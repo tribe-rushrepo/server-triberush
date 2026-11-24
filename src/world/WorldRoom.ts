@@ -41,6 +41,10 @@ import { SpatialGrid } from './SpatialGrid.js';
 import { SurvivalService } from './SurvivalService.js';
 import { TotemService } from './TotemService.js';
 import { TribeManager } from './TribeManager.js';
+import {
+  encodeCompactInventory,
+  type CompactInventorySave
+} from '../services/PlayerSaveService.js';
 
 /**
  * Binary Snapshot Packet Layout (Little-Endian, 65,535-Item Future-Proof Stride):
@@ -125,6 +129,11 @@ export class WorldRoom {
   private onBroadcastProximityEvent:
     | ((recipientIds: string[], payload: Record<string, unknown>) => void)
     | null = null;
+
+  public onPersistPlayerInventory:
+    | ((ownerId: string, compact: CompactInventorySave | null) => void)
+    | null = null;
+  public onClearPlayerInventory: ((ownerId: string) => void) | null = null;
 
   constructor(seed: number = CONFIG.WORLD_SEED, blueprintStoragePath: string | null = null) {
     this.world = new SeededWorld(seed, CONFIG.WORLD_SIZE);
@@ -476,7 +485,12 @@ export class WorldRoom {
 
   public joinPlayer(
     profile: PlayerProfileData,
-    preferredColorIndex?: number
+    preferredColorIndex?: number,
+    restoredInventory?: {
+      hasBackpack: boolean;
+      unlockedSlots: number;
+      inventory: Array<InventorySlotItem | null>;
+    } | null
   ): { ok: boolean; player?: ActiveWorldPlayer; error?: string } {
     const existing = this.playersById.get(profile.id);
     if (existing) {
@@ -549,9 +563,16 @@ export class WorldRoom {
       lastSprintAt: 0,
       angle: 0,
       activeSlot: 0,
-      unlockedSlots: CONFIG.INVENTORY_UNLOCKED_SLOTS,
-      hasBackpack: false,
-      inventory: this.createInitialInventory(),
+      unlockedSlots: restoredInventory
+        ? restoredInventory.unlockedSlots
+        : CONFIG.INVENTORY_UNLOCKED_SLOTS,
+      hasBackpack: restoredInventory ? restoredInventory.hasBackpack : false,
+      inventory: restoredInventory
+        ? Array.from({ length: CONFIG.INVENTORY_TOTAL_SLOTS }, (_, idx) => {
+            const slot = restoredInventory.inventory[idx];
+            return slot ? { itemId: slot.itemId, count: slot.count } : null;
+          })
+        : this.createInitialInventory(),
       hp: CONFIG.PLAYER_MAX_HP,
       maxHp: CONFIG.PLAYER_MAX_HP,
       stamina: CONFIG.PLAYER_MAX_STAMINA,
@@ -612,10 +633,22 @@ export class WorldRoom {
     if (!existing) return;
 
     // Phase 5 Anti-Combat-Log Penalty: disconnecting during 15s Combat Mode silently spills all loot!
-    if (!existing.isDead && Date.now() < existing.combatUntil) {
+    const wasInCombat = !existing.isDead && Date.now() < existing.combatUntil;
+    if (wasInCombat) {
       this.combatService.spillAllInventoryLoot(existing, {
         onSpawnDrop: (itemId, count, ox, oy) => this.spawnGroundDrop(itemId, count, ox, oy)
       });
+      this.onClearPlayerInventory?.(existing.id);
+    } else if (existing.isDead) {
+      this.onClearPlayerInventory?.(existing.id);
+    } else {
+      // Safe disconnect (alive & out of Combat Mode): persist compact sparse inventory to Supabase!
+      const compact = encodeCompactInventory(
+        existing.inventory,
+        existing.unlockedSlots,
+        existing.hasBackpack
+      );
+      this.onPersistPlayerInventory?.(existing.id, compact);
     }
 
     if (existing.tribeId) {
@@ -639,6 +672,24 @@ export class WorldRoom {
       playerId: existing.id,
       onlinePlayers: this.playersById.size
     });
+  }
+
+  /**
+   * Collects compact inventory snapshots for all alive, non-combat players during
+   * graceful server shutdown (e.g. Render redeploy/restart) so players keep their items.
+   */
+  public getAllSafePlayerInventorySnapshots(
+    now: number = Date.now()
+  ): Array<{ ownerId: string; compact: CompactInventorySave | null }> {
+    const snapshots: Array<{ ownerId: string; compact: CompactInventorySave | null }> = [];
+    for (const p of this.playersById.values()) {
+      if (p.isDead || now < p.combatUntil) continue;
+      snapshots.push({
+        ownerId: p.id,
+        compact: encodeCompactInventory(p.inventory, p.unlockedSlots, p.hasBackpack)
+      });
+    }
+    return snapshots;
   }
 
   public handleInputState(
@@ -1095,7 +1146,8 @@ export class WorldRoom {
           this.broadcastProximityEvent(x, y, payload),
         onBroadcastGlobalEvent: (payload) => this.onBroadcastRosterEvent?.(payload),
         onSendPlayerEvent: (pid, payload) => this.onSendPlayerEvent?.(pid, payload),
-        onSyncInventory: (victim) => this.syncPlayerInventory(victim)
+        onSyncInventory: (victim) => this.syncPlayerInventory(victim),
+        onPlayerDied: (victim) => this.onClearPlayerInventory?.(victim.id)
       }
     );
     if (player.pvpKills > prevKills) {
@@ -3228,7 +3280,8 @@ export class WorldRoom {
               this.broadcastProximityEvent(x, y, payload),
             onBroadcastGlobalEvent: (payload) => this.onBroadcastRosterEvent?.(payload),
             onSendPlayerEvent: (pid, payload) => this.onSendPlayerEvent?.(pid, payload),
-            onSyncInventory: (v) => this.syncPlayerInventory(v)
+            onSyncInventory: (v) => this.syncPlayerInventory(v),
+            onPlayerDied: (victim) => this.onClearPlayerInventory?.(victim.id)
           }
         );
       } else if (surv.vitalsChanged && this.serverTick % 8 === 0) {

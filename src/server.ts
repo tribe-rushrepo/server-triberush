@@ -164,7 +164,7 @@ async function main() {
     shuttingDown = true;
     console.log(`[TRIBERUSH] Received ${signal} — shutting down gracefully...`);
     try {
-      webSocketManager.shutdown();
+      await webSocketManager.shutdownAsync();
       await fastify.close();
     } catch {
       // Ignore shutdown errors

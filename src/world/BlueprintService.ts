@@ -35,12 +35,46 @@ export class BlueprintService {
   private readonly slotsByOwnerId = new Map<string, SavedBaseBlueprintSlot>();
   private readonly lastDeployAtByOwnerId = new Map<string, number>();
   private readonly storageFilePath: string | null;
+  public onPersistOwnerState:
+    | ((
+        ownerId: string,
+        slot: SavedBaseBlueprintSlot | null,
+        lastDeployAt: number
+      ) => void)
+    | null = null;
 
   constructor(storageFilePath: string | null = null) {
     this.storageFilePath = storageFilePath;
     if (this.storageFilePath) {
       this.loadFromDisk();
     }
+  }
+
+  /**
+   * Hydrates a player's saved Blueprint slot & deploy cooldown from Supabase on JOIN_WORLD.
+   */
+  public hydrateOwnerState(
+    ownerId: string,
+    slot: SavedBaseBlueprintSlot | null,
+    lastDeployAt: number
+  ): void {
+    if (slot && typeof slot.totemLevel === 'number') {
+      this.slotsByOwnerId.set(ownerId, {
+        ...slot,
+        totemLevel: 1,
+        sizeTiles: CONFIG.TOTEM_SIZE_TILES
+      });
+    }
+    if (typeof lastDeployAt === 'number' && Number.isFinite(lastDeployAt) && lastDeployAt > 0) {
+      const existing = this.lastDeployAtByOwnerId.get(ownerId) || 0;
+      if (lastDeployAt > existing) {
+        this.lastDeployAtByOwnerId.set(ownerId, lastDeployAt);
+      }
+    }
+  }
+
+  public getLastDeployTimestamp(ownerId: string): number {
+    return this.lastDeployAtByOwnerId.get(ownerId) || 0;
   }
 
   private loadFromDisk(): void {
@@ -104,6 +138,7 @@ export class BlueprintService {
   public recordDeployTimestamp(ownerId: string, now = Date.now()): void {
     this.lastDeployAtByOwnerId.set(ownerId, now);
     this.persistToDisk();
+    this.onPersistOwnerState?.(ownerId, this.slotsByOwnerId.get(ownerId) || null, now);
   }
 
   public clearAll(): void {
@@ -316,6 +351,7 @@ export class BlueprintService {
     };
     this.slotsByOwnerId.set(ownerId, slot);
     this.persistToDisk();
+    this.onPersistOwnerState?.(ownerId, slot, this.getLastDeployTimestamp(ownerId));
     return slot;
   }
 
@@ -327,6 +363,7 @@ export class BlueprintService {
     if (slot) {
       this.slotsByOwnerId.delete(ownerId);
       this.persistToDisk();
+      this.onPersistOwnerState?.(ownerId, null, this.getLastDeployTimestamp(ownerId));
     }
     return slot;
   }

@@ -14,6 +14,12 @@ import {
 } from '../src/world/AnimalService.js';
 import { SeededWorld } from '../src/world/SeededWorld.js';
 import {
+  PlayerSaveService,
+  decodeCompactInventory,
+  encodeCompactInventory,
+  isPersistableAccount
+} from '../src/services/PlayerSaveService.js';
+import {
   BINARY_PACKET_SNAPSHOT,
   SNAPSHOT_HEADER_BYTES,
   SNAPSHOT_PLAYER_STRIDE,
@@ -867,5 +873,114 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.strictEqual(room.placedTotems.size, 1);
     assert.strictEqual(room.handleLeaveTribe('totem-boss').ok, true);
     assert.strictEqual(room.placedTotems.size, 0, 'Last member leaving Tribe must remove its placed Totem');
+  });
+
+  it('should persist compact sparse player inventory and Load Build blueprints with zero guest bloat, empty-row pruning, and strict anti-dupe clears', async () => {
+    // 1. Guest and local dev UUID sessions are excluded from DB persistence (zero bloat)
+    assert.strictEqual(isPersistableAccount('guest-abc123'), false);
+    assert.strictEqual(isPersistableAccount('dev-550e8400-e29b-41d4-a716-446655440000'), false);
+    assert.strictEqual(isPersistableAccount('user-hub-uuid-42'), true);
+
+    // 2. Empty inventory with no Backpack encodes to null (no DB row needed)
+    const emptySlots = Array(CONFIG.INVENTORY_TOTAL_SLOTS).fill(null);
+    assert.strictEqual(encodeCompactInventory(emptySlots, 8, false), null);
+
+    // 3. Sparse encoder omits empty slots & strips free tribe_totem, keeping payload compact
+    const sampleSlots = Array(CONFIG.INVENTORY_TOTAL_SLOTS).fill(null);
+    sampleSlots[0] = { itemId: 'wooden_sword', count: 1 };
+    sampleSlots[2] = { itemId: 'tribe_totem', count: 1 }; // must be stripped!
+    sampleSlots[11] = { itemId: 'wood', count: 99 }; // must clamp to maxStack (32)
+    const encoded = encodeCompactInventory(sampleSlots, 32, true);
+    assert.ok(encoded !== null);
+    assert.strictEqual(encoded.bp, true);
+    assert.deepStrictEqual(encoded.s, [
+      [0, 'wooden_sword', 1],
+      [11, 'wood', 32]
+    ]);
+    const decoded = decodeCompactInventory(encoded);
+    assert.ok(decoded !== null);
+    assert.strictEqual(decoded.hasBackpack, true);
+    assert.strictEqual(decoded.unlockedSlots, 32);
+    assert.strictEqual(decoded.inventory[0]?.itemId, 'wooden_sword');
+    assert.strictEqual(decoded.inventory[2], null);
+    assert.strictEqual(decoded.inventory[11]?.count, 32);
+
+    // 4. Full lifecycle with WorldRoom + PlayerSaveService(false)
+    const saveSvc = new PlayerSaveService(false);
+    const roomA = new WorldRoom(20261122);
+    roomA.onPersistPlayerInventory = (ownerId, compact) => {
+      void saveSvc.savePlayerInventory(ownerId, compact);
+    };
+    roomA.onClearPlayerInventory = (ownerId) => {
+      void saveSvc.clearPlayerInventory(ownerId);
+    };
+    roomA.blueprintService.onPersistOwnerState = (ownerId, slot, lastDeployAt) => {
+      void saveSvc.saveBlueprintState(ownerId, slot, lastDeployAt);
+    };
+
+    const uid = 'acc-survivor-777';
+    const p1 = roomA.joinPlayer(makeMockExplorer(uid, 'SavedHero')).player!;
+    p1.spawnProtectedUntil = 0;
+    p1.hasBackpack = true;
+    p1.unlockedSlots = 32;
+    p1.inventory[0] = { itemId: 'wooden_axe', count: 1 };
+    p1.inventory[9] = { itemId: 'coal', count: 18 };
+    p1.inventory[3] = { itemId: 'tribe_totem', count: 1 }; // stripped on save
+
+    // Safe disconnect (alive & out of Combat Mode) persists inventory
+    roomA.removePlayer(uid);
+    const afterSafeLeave = await saveSvc.loadPlayerSave(uid);
+    assert.ok(afterSafeLeave?.inventory !== null);
+    assert.strictEqual(afterSafeLeave?.inventory?.bp, true);
+    assert.strictEqual(afterSafeLeave?.inventory?.s.length, 2);
+
+    // Simulated server reboot -> new WorldRoom restores Backpack + 32 slots + items
+    const roomB = new WorldRoom(20261122);
+    roomB.onPersistPlayerInventory = (ownerId, compact) => {
+      void saveSvc.savePlayerInventory(ownerId, compact);
+    };
+    roomB.onClearPlayerInventory = (ownerId) => {
+      void saveSvc.clearPlayerInventory(ownerId);
+    };
+    const restoredInv = decodeCompactInventory(afterSafeLeave?.inventory);
+    const rejoined = roomB.joinPlayer(makeMockExplorer(uid, 'SavedHero'), undefined, restoredInv).player!;
+    await saveSvc.clearPlayerInventory(uid); // consume-on-join anti-dupe guard
+    assert.strictEqual(rejoined.hasBackpack, true);
+    assert.strictEqual(rejoined.unlockedSlots, 32);
+    assert.strictEqual(rejoined.inventory[0]?.itemId, 'wooden_axe');
+    assert.strictEqual(rejoined.inventory[9]?.count, 18);
+    assert.strictEqual(rejoined.inventory[3], null);
+    // Row is pruned immediately while player is live with no blueprint/cooldown!
+    assert.strictEqual(await saveSvc.loadPlayerSave(uid), null);
+
+    // Combat-log disconnect MUST drop loot AND NOT save inventory (anti-dupe!)
+    rejoined.combatUntil = Date.now() + 15000;
+    roomB.removePlayer(uid);
+    assert.strictEqual(await saveSvc.loadPlayerSave(uid), null);
+    assert.ok(
+      Array.from(roomB.groundDrops.values()).some((d) => d.itemId === 'coal'),
+      'Combat-logged player must spill loot without persisting saved inventory'
+    );
+
+    // PvP Death clears any saved inventory via onPlayerDied callback
+    const victim = roomB.joinPlayer(makeMockExplorer('acc-victim-88', 'Victim')).player!;
+    const killer = roomB.joinPlayer(makeMockExplorer('acc-killer-99', 'Killer')).player!;
+    await saveSvc.savePlayerInventory('acc-victim-88', { bp: false, s: [[0, 'wood', 10]] });
+    assert.ok((await saveSvc.loadPlayerSave('acc-victim-88'))?.inventory !== null);
+    victim.spawnProtectedUntil = 0;
+    killer.spawnProtectedUntil = 0;
+    killer.inventory[0] = { itemId: 'wooden_sword', count: 1 };
+    killer.activeSlot = 0;
+    killer.x = 12800;
+    killer.y = 12800;
+    while (!victim.isDead) {
+      killer.lastSwingAt = 0;
+      victim.lastDamagedAt = 0;
+      victim.x = 12845;
+      victim.y = 12800;
+      roomB.handleSwing('acc-killer-99', 0);
+    }
+    assert.strictEqual(victim.isDead, true);
+    assert.strictEqual(await saveSvc.loadPlayerSave('acc-victim-88'), null);
   });
 });

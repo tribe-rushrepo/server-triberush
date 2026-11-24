@@ -13,6 +13,7 @@ export interface CombatCallbacks {
   onBroadcastGlobalEvent: (payload: Record<string, unknown>) => void;
   onSendPlayerEvent: (playerId: string, payload: Record<string, unknown>) => void;
   onSyncInventory: (player: ActiveWorldPlayer) => void;
+  onPlayerDied?: (victim: ActiveWorldPlayer) => void;
 }
 
 /**
@@ -202,6 +203,7 @@ export class CombatService {
 
     // 1. Spill all items from victim's inventory & backpack (plus equipped backpack itself) onto the ground
     this.spillAllInventoryLoot(victim, callbacks);
+    callbacks.onPlayerDied?.(victim);
 
     // 2. AOI-culled marble shatter explosion effect (Global Death/Kill Announcements removed!)
     callbacks.onBroadcastProximityEvent(victim.x, victim.y, {

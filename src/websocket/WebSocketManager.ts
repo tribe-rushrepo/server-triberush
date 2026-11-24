@@ -4,6 +4,10 @@ import type { WebSocket } from 'ws';
 import { CONFIG } from '../config/index.js';
 import { getClientCatalogPayload } from '../data/items/index.js';
 import { tribeRushAuthService } from '../services/AuthService.js';
+import {
+  decodeCompactInventory,
+  playerSaveService
+} from '../services/PlayerSaveService.js';
 import { WorldRoom } from '../world/WorldRoom.js';
 import { ClientMessageSchema } from './schemas.js';
 
@@ -23,10 +27,20 @@ export class WebSocketManager {
   private socketsByPlayer: Map<string, Set<TrackedWebSocket>> = new Map();
   private connectionCountByIp: Map<string, number> = new Map();
   private heartbeatInterval: ReturnType<typeof setInterval>;
+  private isShuttingDown = false;
 
   constructor() {
     const blueprintFile = path.resolve(process.cwd(), 'data', 'saved_blueprints.json');
     this.worldRoom = new WorldRoom(CONFIG.WORLD_SEED, blueprintFile);
+    this.worldRoom.blueprintService.onPersistOwnerState = (ownerId, slot, lastDeployAt) => {
+      void playerSaveService.saveBlueprintState(ownerId, slot, lastDeployAt);
+    };
+    this.worldRoom.onPersistPlayerInventory = (ownerId, compact) => {
+      void playerSaveService.savePlayerInventory(ownerId, compact);
+    };
+    this.worldRoom.onClearPlayerInventory = (ownerId) => {
+      void playerSaveService.clearPlayerInventory(ownerId);
+    };
     this.worldRoom.setCallbacks({
       onBinarySnapshot: (playerId, frame) => {
         this.sendBinaryToPlayer(playerId, frame);
@@ -70,8 +84,34 @@ export class WebSocketManager {
   }
 
   public shutdown(): void {
+    this.isShuttingDown = true;
     clearInterval(this.heartbeatInterval);
     this.worldRoom.stopSimulationLoop();
+    for (const set of this.socketsByPlayer.values()) {
+      for (const ws of set) {
+        try {
+          ws.close(1001, 'Server restarting');
+        } catch {
+          // Ignore close errors
+        }
+      }
+    }
+    this.socketsByPlayer.clear();
+    this.connectionCountByIp.clear();
+  }
+
+  public async shutdownAsync(): Promise<void> {
+    this.isShuttingDown = true;
+    clearInterval(this.heartbeatInterval);
+    this.worldRoom.stopSimulationLoop();
+
+    // Flush all safe online players' compact inventories to Supabase before closing sockets
+    const snapshots = this.worldRoom.getAllSafePlayerInventorySnapshots();
+    for (const snap of snapshots) {
+      void playerSaveService.savePlayerInventory(snap.ownerId, snap.compact);
+    }
+    await playerSaveService.flushAllPendingWrites(4000);
+
     for (const set of this.socketsByPlayer.values()) {
       for (const ws of set) {
         try {
@@ -304,13 +344,43 @@ export class WebSocketManager {
               });
               return;
             }
-            const res = this.worldRoom.joinPlayer(profile, msg.colorIndex);
+            const alreadyInWorld = Boolean(this.worldRoom.getPlayer(playerId));
+            const saved = !alreadyInWorld
+              ? await playerSaveService.loadPlayerSave(playerId)
+              : null;
+
+            // Abort join if socket closed or server began shutting down while awaiting Supabase
+            if (
+              this.isShuttingDown ||
+              socket.readyState !== 1 ||
+              !this.socketsByPlayer.get(playerId)?.has(socket)
+            ) {
+              return;
+            }
+
+            if (saved) {
+              this.worldRoom.blueprintService.hydrateOwnerState(
+                playerId,
+                saved.blueprint,
+                saved.lastBlueprintDeployAt
+              );
+            }
+            const restoredInventory = saved?.inventory
+              ? decodeCompactInventory(saved.inventory)
+              : null;
+
+            const res = this.worldRoom.joinPlayer(profile, msg.colorIndex, restoredInventory);
             if (!res.ok || !res.player) {
               this.sendJsonToPlayer(playerId, {
                 type: 'ERROR',
                 message: res.error || 'Could not enter world.'
               });
               return;
+            }
+
+            // Anti-Dupe Consume-on-Join: clear stored DB inventory once hydrated into active session
+            if (!alreadyInWorld && saved?.inventory) {
+              void playerSaveService.clearPlayerInventory(playerId);
             }
             const dynamicState = this.worldRoom.getDynamicWorldStateSnapshot();
             const nowMsJoin = Date.now();
@@ -609,7 +679,9 @@ export class WebSocketManager {
         playerSet.delete(socket);
         if (playerSet.size === 0) {
           this.socketsByPlayer.delete(playerId);
-          this.worldRoom.removePlayer(playerId);
+          if (!this.isShuttingDown) {
+            this.worldRoom.removePlayer(playerId);
+          }
         }
       }
     });
