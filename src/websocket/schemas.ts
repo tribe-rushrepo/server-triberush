@@ -1,0 +1,178 @@
+import { z } from 'zod';
+
+export const JoinWorldSchema = z.object({
+  type: z.literal('JOIN_WORLD'),
+  colorIndex: z.number().int().min(0).max(7).optional()
+});
+
+export const LeaveWorldSchema = z.object({
+  type: z.literal('LEAVE_WORLD')
+});
+
+export const InputStateSchema = z.object({
+  type: z.literal('INPUT_STATE'),
+  moveX: z.number().min(-1).max(1),
+  moveY: z.number().min(-1).max(1),
+  angle: z.number().min(-Math.PI * 2).max(Math.PI * 2),
+  sprint: z.boolean().optional()
+});
+
+export const SwingSchema = z.object({
+  type: z.literal('SWING'),
+  angle: z.number().min(-Math.PI * 2).max(Math.PI * 2).optional()
+});
+
+export const SelectSlotSchema = z.object({
+  type: z.literal('SELECT_SLOT'),
+  slot: z.number().int().min(0).max(7)
+});
+
+export const PickupOrHarvestSchema = z.object({
+  type: z.literal('PICKUP_OR_HARVEST')
+});
+
+export const DropHeldItemSchema = z.object({
+  type: z.literal('DROP_ITEM'),
+  dropAll: z.boolean().optional(),
+  source: z.enum(['inventory', 'chest']).optional(),
+  slot: z.number().int().min(0).max(31).optional(),
+  chestId: z.number().int().positive().optional()
+});
+
+export const MoveSlotSchema = z.object({
+  type: z.literal('MOVE_SLOT'),
+  fromSource: z.enum(['inventory', 'chest']),
+  fromSlot: z.number().int().min(0).max(31),
+  toSource: z.enum(['inventory', 'chest']),
+  toSlot: z.number().int().min(0).max(31),
+  chestId: z.number().int().positive().optional()
+});
+
+/**
+ * Data-driven crafting packet validation: accepts any valid item slug (1..64 chars)
+ * and delegates authoritative O(1) verification to RECIPE_BY_ID in WorldRoom.
+ * Scales seamlessly to 100-500+ items without maintaining a hardcoded enum list.
+ */
+export const CraftItemSchema = z.object({
+  type: z.literal('CRAFT_ITEM'),
+  itemId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .regex(/^[a-z0-9_]+$/, 'Invalid item identifier format.')
+});
+
+export const UseOrPlaceItemSchema = z.object({
+  type: z.literal('USE_ITEM'),
+  targetX: z.number().optional(),
+  targetY: z.number().optional(),
+  orientation: z.enum(['h', 'v']).optional(),
+  rotationQuarter: z.number().int().min(0).max(3).optional()
+});
+
+export const UpgradeTotemSchema = z.object({
+  type: z.literal('UPGRADE_TOTEM'),
+  totemId: z.number().int().positive()
+});
+
+export const RemoveTotemSchema = z.object({
+  type: z.literal('REMOVE_TOTEM'),
+  totemId: z.number().int().positive()
+});
+
+export const SetHutHomeSchema = z.object({
+  type: z.literal('SET_HUT_HOME'),
+  structureId: z.number().int().positive()
+});
+
+export const SaveBlueprintBuildSchema = z.object({
+  type: z.literal('SAVE_BLUEPRINT_BUILD')
+});
+
+export const LoadBlueprintBuildSchema = z.object({
+  type: z.literal('LOAD_BLUEPRINT_BUILD'),
+  targetX: z.number(),
+  targetY: z.number()
+});
+
+export const EquipItemSchema = z.object({
+  type: z.literal('EQUIP_ITEM'),
+  slot: z.number().int().min(0).max(7).optional()
+});
+
+export const OpenChestSchema = z.object({
+  type: z.literal('OPEN_CHEST'),
+  chestId: z.number().int().positive()
+});
+
+export const RespawnSchema = z.object({
+  type: z.literal('RESPAWN')
+});
+
+export const CreateTribeSchema = z.object({
+  type: z.literal('TRIBE_CREATE'),
+  name: z.string().trim().min(2).max(20),
+  tag: z.string().trim().min(2).max(4)
+});
+
+export const JoinTribeSchema = z.object({
+  type: z.literal('TRIBE_JOIN'),
+  tribeId: z.string().trim().min(1).max(32)
+});
+
+export const LeaveTribeSchema = z.object({
+  type: z.literal('TRIBE_LEAVE')
+});
+
+export const DisbandTribeSchema = z.object({
+  type: z.literal('TRIBE_DISBAND')
+});
+
+export const KickTribeMemberSchema = z.object({
+  type: z.literal('TRIBE_KICK'),
+  targetPlayerId: z.string().trim().min(1).max(128)
+});
+
+export const ChatMessageSchema = z.object({
+  type: z.literal('CHAT_MESSAGE'),
+  text: z.string().trim().min(1).max(80)
+});
+
+export const PingSchema = z.object({
+  type: z.literal('PING')
+});
+
+export const ClientMessageSchema = z.discriminatedUnion('type', [
+  JoinWorldSchema,
+  LeaveWorldSchema,
+  InputStateSchema,
+  SwingSchema,
+  SelectSlotSchema,
+  PickupOrHarvestSchema,
+  DropHeldItemSchema,
+  MoveSlotSchema,
+  CraftItemSchema,
+  UseOrPlaceItemSchema,
+  UpgradeTotemSchema,
+  RemoveTotemSchema,
+  SetHutHomeSchema,
+  SaveBlueprintBuildSchema,
+  LoadBlueprintBuildSchema,
+  EquipItemSchema,
+  OpenChestSchema,
+  RespawnSchema,
+  CreateTribeSchema,
+  JoinTribeSchema,
+  LeaveTribeSchema,
+  DisbandTribeSchema,
+  KickTribeMemberSchema,
+  ChatMessageSchema,
+  PingSchema
+]);
+
+export type ClientMessage = z.infer<typeof ClientMessageSchema>;
+
+export const SsoExchangeSchema = z.object({
+  code: z.string().trim().min(16).max(256)
+});
