@@ -21,6 +21,7 @@ interface InternalTribe {
   leaderId: string;
   leaderName: string;
   memberIds: Set<string>;
+  builderIds: Set<string>;
   pendingRequests: Map<string, TribeJoinRequest>;
   createdAt: number;
   relocatedTotemState: RelocatedTotemState | null;
@@ -63,6 +64,7 @@ export class TribeManager {
         maxMembers: CONFIG.MAX_TRIBE_MEMBERS,
         memberIds,
         memberShortIds,
+        builderIds: Array.from(t.builderIds),
         pendingRequests: Array.from(t.pendingRequests.values()).sort(
           (a, b) => a.requestedAt - b.requestedAt
         )
@@ -117,6 +119,7 @@ export class TribeManager {
       leaderId: leader.id,
       leaderName: leader.username,
       memberIds: new Set([leader.id]),
+      builderIds: new Set([leader.id]),
       pendingRequests: new Map(),
       createdAt: Date.now(),
       relocatedTotemState: null
@@ -288,6 +291,7 @@ export class TribeManager {
     if (!tribe) return { ok: true };
 
     tribe.memberIds.delete(player.id);
+    tribe.builderIds.delete(player.id);
     if (tribe.memberIds.size === 0) {
       this.tribesById.delete(tribe.id);
       this.tribesByTag.delete(tribe.tag);
@@ -299,6 +303,7 @@ export class TribeManager {
       const nextLeader = playersById.get(nextLeaderId);
       tribe.leaderId = nextLeaderId;
       tribe.leaderName = nextLeader ? nextLeader.username : 'Leader';
+      tribe.builderIds.add(nextLeaderId);
     }
     return { ok: true };
   }
@@ -362,12 +367,63 @@ export class TribeManager {
     }
 
     tribe.memberIds.delete(targetPlayerId);
+    tribe.builderIds.delete(targetPlayerId);
     const target = playersById.get(targetPlayerId);
     if (target) {
       target.tribeId = null;
       target.tribeTag = null;
     }
     return { ok: true };
+  }
+
+  public isTribeLeader(playerId: string, tribeId?: string | null): boolean {
+    if (!tribeId) return false;
+    const tribe = this.tribesById.get(tribeId);
+    return Boolean(tribe && tribe.leaderId === playerId);
+  }
+
+  public hasBuildPermission(player: ActiveWorldPlayer): boolean {
+    if (!player.tribeId) return false;
+    const tribe = this.tribesById.get(player.tribeId);
+    if (!tribe) return false;
+    return tribe.leaderId === player.id || tribe.builderIds.has(player.id);
+  }
+
+  public setMemberBuildPermission(
+    leader: ActiveWorldPlayer,
+    targetPlayerId: string,
+    allowed: boolean,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>
+  ): {
+    ok: boolean;
+    allowed?: boolean;
+    targetPlayer?: ActiveWorldPlayer;
+    tribeTag?: string;
+    error?: string;
+  } {
+    if (!leader.tribeId) return { ok: false, error: 'Not in a Tribe.' };
+    const tribe = this.tribesById.get(leader.tribeId);
+    if (!tribe || tribe.leaderId !== leader.id) {
+      return { ok: false, error: 'Only the Tribe Host can grant or revoke build permissions.' };
+    }
+    if (targetPlayerId === leader.id) {
+      return { ok: false, error: 'Tribe Host always has full build permissions.' };
+    }
+    if (!tribe.memberIds.has(targetPlayerId)) {
+      return { ok: false, error: 'Member not found in your Tribe.' };
+    }
+
+    if (allowed) {
+      tribe.builderIds.add(targetPlayerId);
+    } else {
+      tribe.builderIds.delete(targetPlayerId);
+    }
+    return {
+      ok: true,
+      allowed,
+      targetPlayer: playersById.get(targetPlayerId),
+      tribeTag: tribe.tag
+    };
   }
 
   /**

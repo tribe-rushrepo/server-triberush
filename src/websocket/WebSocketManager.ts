@@ -751,6 +751,20 @@ export class WebSocketManager {
             }
             break;
           }
+          case 'TRIBE_SET_BUILD_PERMISSION': {
+            const res = this.worldRoom.handleSetTribeBuildPermission(
+              playerId,
+              msg.targetPlayerId,
+              msg.allowed
+            );
+            if (!res.ok && res.error) {
+              this.sendJsonToPlayer(playerId, {
+                type: 'ACTION_NOTICE',
+                message: res.error
+              });
+            }
+            break;
+          }
           case 'CHAT_MESSAGE': {
             this.worldRoom.handleChatMessage(playerId, msg.text);
             break;

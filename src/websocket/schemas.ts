@@ -185,6 +185,12 @@ export const KickTribeMemberSchema = z.object({
   targetPlayerId: z.string().trim().min(1).max(128)
 });
 
+export const SetTribeBuildPermissionSchema = z.object({
+  type: z.literal('TRIBE_SET_BUILD_PERMISSION'),
+  targetPlayerId: z.string().trim().min(1).max(128),
+  allowed: z.boolean()
+});
+
 export const ChatMessageSchema = z.object({
   type: z.literal('CHAT_MESSAGE'),
   text: z.string().trim().min(1).max(80)
@@ -224,6 +230,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   LeaveTribeSchema,
   DisbandTribeSchema,
   KickTribeMemberSchema,
+  SetTribeBuildPermissionSchema,
   ChatMessageSchema,
   PingSchema
 ]);

@@ -1824,10 +1824,15 @@ export class WorldRoom {
   private canTribeManageEntity(
     player: ActiveWorldPlayer,
     ownerId: string,
-    tribeId: string | null | undefined
+    tribeId: string | null | undefined,
+    hostOnly = false
   ): boolean {
-    if (ownerId === player.id) return true;
-    return Boolean(player.tribeId && tribeId && player.tribeId === tribeId);
+    if (tribeId) {
+      if (player.tribeId !== tribeId) return false;
+      if (hostOnly) return this.tribeManager.isTribeLeader(player.id, tribeId);
+      return this.tribeManager.hasBuildPermission(player);
+    }
+    return ownerId === player.id;
   }
 
   private placeBuildableCore(
@@ -1869,7 +1874,7 @@ export class WorldRoom {
         ? targetY
         : player.y + Math.sin(player.angle) * 72;
 
-    // 2. Placing a Tribe Totem (Allowed anywhere dry & non-overlapping to claim Lv. 1 30x30 Kingdom Land!)
+    // 2. Placing a Tribe Totem (Host-only so members cannot claim/overwrite the Tribe Totem!)
     if (placeCfg.kind === 'totem') {
       if (!player.tribeId) {
         return { ok: false, error: 'Create or join a Tribe before placing a Tribe Totem.' };
@@ -1878,6 +1883,9 @@ export class WorldRoom {
       const myTribe = tribeSummaries.find((t) => t.id === player.tribeId);
       if (!myTribe) {
         return { ok: false, error: 'Tribe not found.' };
+      }
+      if (myTribe.leaderId !== player.id) {
+        return { ok: false, error: 'Only the Tribe Host can place the Tribe Totem.' };
       }
       if (this.totemService.findTotemForTribe(player.tribeId, this.placedTotems.values())) {
         return { ok: false, error: 'Your Tribe already has an active Tribe Totem.' };
@@ -1968,7 +1976,7 @@ export class WorldRoom {
       return { ok: true, action: 'totem_placed', totem };
     }
 
-    // Strict Tribe Totem Territory Gate on ALL other buildables (Chests, Walls, Torches, Hut, Watchtower, Campfire)
+    // Strict Tribe Totem Territory Gate + Host/Builder Permission Check on ALL buildables
     const tribeTotem = this.totemService.findTotemForTribe(
       player.tribeId,
       this.placedTotems.values()
@@ -1977,6 +1985,12 @@ export class WorldRoom {
       return {
         ok: false,
         error: 'Must build inside your Tribe Totem territory (create a Tribe and place your Totem first).'
+      };
+    }
+    if (!this.tribeManager.hasBuildPermission(player)) {
+      return {
+        ok: false,
+        error: 'Only the Tribe Host or members with Build Permission can build.'
       };
     }
 
@@ -2496,9 +2510,7 @@ export class WorldRoom {
       return { ok: false, error: check.reason };
     }
 
-    // Consume 1 Base Blueprint and pack up live entities (True Pack-Up = ZERO duplication!)
-    this.deductPlayerItem(player, 'blueprint', 1);
-
+    // Keep the Base Blueprint scroll in Host inventory (True Pack-Up packs live entities with ZERO duplication!)
     const walls = check.capturedWalls || [];
     const structures = check.capturedStructures || [];
     const chests = check.capturedChests || [];
@@ -2578,14 +2590,17 @@ export class WorldRoom {
 
     const slot = this.blueprintService.getSlot(player.id);
     if (!slot) {
-      return { ok: false, error: 'No saved build in your Load Build slot.' };
+      return {
+        ok: false,
+        error: 'Click Save & Pack first before loading your Tribe Base again.'
+      };
     }
     if (!player.tribeId) {
       return { ok: false, error: 'Create a Tribe first to deploy your saved Tribe Base.' };
     }
     const tribe = this.getTribeSummaries().find((t) => t.id === player.tribeId);
     if (!tribe || tribe.leaderId !== player.id) {
-      return { ok: false, error: 'Only the Tribe Leader can load a saved Tribe Base.' };
+      return { ok: false, error: 'Only the Tribe Host can load a saved Tribe Base.' };
     }
     if (this.totemService.findTotemForTribe(player.tribeId, this.placedTotems.values())) {
       return {
@@ -2600,10 +2615,12 @@ export class WorldRoom {
     }
     const cooldownRem = this.blueprintService.getDeployCooldownRemainingMs(player.id, now);
     if (cooldownRem > 0) {
-      const remMins = Math.ceil(cooldownRem / 60000);
+      const totalSec = Math.ceil(cooldownRem / 1000);
+      const mins = Math.floor(totalSec / 60);
+      const secs = totalSec % 60;
       return {
         ok: false,
-        error: `Deploy cooldown active (${remMins}m remaining).`
+        error: `Load Base cooldown active (${mins}m ${secs}s remaining).`
       };
     }
 
@@ -2965,7 +2982,10 @@ export class WorldRoom {
       const wall = this.placedWalls.get(targetId);
       if (!wall) return { ok: false, error: 'Wall not found.' };
       if (!this.canTribeManageEntity(player, wall.ownerId, wall.tribeId)) {
-        return { ok: false, error: 'Only Tribe members can modify this wall.' };
+        return {
+          ok: false,
+          error: 'Only the Tribe Host or members with Build Permission can remove this wall.'
+        };
       }
       const halfW = wall.orientation === 'h' ? wall.length / 2 : wall.thickness / 2;
       const halfH = wall.orientation === 'h' ? wall.thickness / 2 : wall.length / 2;
@@ -2986,7 +3006,10 @@ export class WorldRoom {
       const s = this.placedStructures.get(targetId);
       if (!s) return { ok: false, error: 'Structure not found.' };
       if (!this.canTribeManageEntity(player, s.ownerId, s.tribeId)) {
-        return { ok: false, error: 'Only Tribe members can modify this structure.' };
+        return {
+          ok: false,
+          error: 'Only the Tribe Host or members with Build Permission can remove this structure.'
+        };
       }
       this.removeStructureEntity(s);
       this.onBroadcastRosterEvent?.({
@@ -3009,7 +3032,10 @@ export class WorldRoom {
       const chest = this.placedChests.get(targetId);
       if (!chest) return { ok: false, error: 'Chest not found.' };
       if (!this.canTribeManageEntity(player, chest.ownerId, chest.ownerTribeId)) {
-        return { ok: false, error: 'Only Tribe members can modify this chest.' };
+        return {
+          ok: false,
+          error: 'Only the Tribe Host or members with Build Permission can remove this chest.'
+        };
       }
       // Return any items inside the chest safely to player inventory (spilling overflow cleanly on ground)
       for (let i = 0; i < chest.slots.length; i++) {
@@ -3037,7 +3063,10 @@ export class WorldRoom {
       const torch = this.placedTorches.get(targetId);
       if (!torch) return { ok: false, error: 'Torch not found.' };
       if (!this.canTribeManageEntity(player, torch.ownerId, torch.ownerTribeId)) {
-        return { ok: false, error: 'Only Tribe members can modify this torch.' };
+        return {
+          ok: false,
+          error: 'Only the Tribe Host or members with Build Permission can remove this torch.'
+        };
       }
       this.placedTorches.delete(torch.id);
       this.onBroadcastRosterEvent?.({ type: 'TORCH_REMOVED', id: torch.id });
@@ -3048,8 +3077,8 @@ export class WorldRoom {
     } else if (targetKind === 'totem') {
       const totem = this.placedTotems.get(targetId);
       if (!totem) return { ok: false, error: 'Tribe Totem not found.' };
-      if (!this.canTribeManageEntity(player, totem.ownerId, totem.tribeId)) {
-        return { ok: false, error: 'Only Tribe members can modify this Tribe Totem.' };
+      if (!this.canTribeManageEntity(player, totem.ownerId, totem.tribeId, true)) {
+        return { ok: false, error: 'Only the Tribe Host can remove the Tribe Totem.' };
       }
       this.placedTotems.delete(totem.id);
       this.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
@@ -3091,7 +3120,10 @@ export class WorldRoom {
       const s = this.placedStructures.get(targetId);
       if (!s) return { ok: false, error: 'Structure not found.' };
       if (!this.canTribeManageEntity(player, s.ownerId, s.tribeId)) {
-        return { ok: false, error: 'Only Tribe members can rotate this structure.' };
+        return {
+          ok: false,
+          error: 'Only the Tribe Host or members with Build Permission can rotate this structure.'
+        };
       }
       if (s.kind !== 'watchtower') {
         return { ok: false, error: 'Only Watchtowers and Walls can be rotated.' };
@@ -3104,7 +3136,10 @@ export class WorldRoom {
     const wall = this.placedWalls.get(targetId);
     if (!wall) return { ok: false, error: 'Wall not found.' };
     if (!this.canTribeManageEntity(player, wall.ownerId, wall.tribeId)) {
-      return { ok: false, error: 'Only Tribe members can rotate this wall.' };
+      return {
+        ok: false,
+        error: 'Only the Tribe Host or members with Build Permission can rotate this wall.'
+      };
     }
     const tribeTotem = this.totemService.findTotemForTribe(
       wall.tribeId ?? player.tribeId,
@@ -3166,8 +3201,8 @@ export class WorldRoom {
     if (targetKind === 'totem') {
       const totem = this.placedTotems.get(targetId);
       if (!totem) return { ok: false, error: 'Tribe Totem not found.' };
-      if (!this.canTribeManageEntity(player, totem.ownerId, totem.tribeId)) {
-        return { ok: false, error: 'Only Tribe members can move this Tribe Totem.' };
+      if (!this.canTribeManageEntity(player, totem.ownerId, totem.tribeId, true)) {
+        return { ok: false, error: 'Only the Tribe Host can move the Tribe Totem.' };
       }
       const placeX = this.snapGridLine(targetX);
       const placeY = this.snapGridLine(targetY);
@@ -3232,7 +3267,10 @@ export class WorldRoom {
       const wall = this.placedWalls.get(targetId);
       if (!wall) return { ok: false, error: 'Wall not found.' };
       if (!this.canTribeManageEntity(player, wall.ownerId, wall.tribeId)) {
-        return { ok: false, error: 'Only Tribe members can move this wall.' };
+        return {
+          ok: false,
+          error: 'Only the Tribe Host or members with Build Permission can move this wall.'
+        };
       }
       const nextOri: WallOrientation =
         orientation === 'h' || orientation === 'v' ? orientation : wall.orientation;
@@ -3301,7 +3339,10 @@ export class WorldRoom {
       const s = this.placedStructures.get(targetId);
       if (!s) return { ok: false, error: 'Structure not found.' };
       if (!this.canTribeManageEntity(player, s.ownerId, s.tribeId)) {
-        return { ok: false, error: 'Only Tribe members can move this structure.' };
+        return {
+          ok: false,
+          error: 'Only the Tribe Host or members with Build Permission can move this structure.'
+        };
       }
       const placeX = s.tilesW % 2 === 1 ? this.snapTileCenter(targetX) : this.snapGridLine(targetX);
       const placeY = s.tilesH % 2 === 1 ? this.snapTileCenter(targetY) : this.snapGridLine(targetY);
@@ -3356,7 +3397,10 @@ export class WorldRoom {
       const chest = this.placedChests.get(targetId);
       if (!chest) return { ok: false, error: 'Chest not found.' };
       if (!this.canTribeManageEntity(player, chest.ownerId, chest.ownerTribeId)) {
-        return { ok: false, error: 'Only Tribe members can move this chest.' };
+        return {
+          ok: false,
+          error: 'Only the Tribe Host or members with Build Permission can move this chest.'
+        };
       }
       const placeX = this.snapTileCenter(targetX);
       const placeY = this.snapTileCenter(targetY);
@@ -3407,7 +3451,10 @@ export class WorldRoom {
       const torch = this.placedTorches.get(targetId);
       if (!torch) return { ok: false, error: 'Torch not found.' };
       if (!this.canTribeManageEntity(player, torch.ownerId, torch.ownerTribeId)) {
-        return { ok: false, error: 'Only Tribe members can move this torch.' };
+        return {
+          ok: false,
+          error: 'Only the Tribe Host or members with Build Permission can move this torch.'
+        };
       }
       const placeX = this.snapTileCenter(targetX);
       const placeY = this.snapTileCenter(targetY);
@@ -3556,6 +3603,43 @@ export class WorldRoom {
     if (!leader) return { ok: false, error: 'Player not found.' };
     const res = this.tribeManager.setVisibility(leader, visibility);
     if (!res.ok) return { ok: false, error: res.error };
+    this.broadcastTribeSync();
+    return { ok: true };
+  }
+
+  public handleSetTribeBuildPermission(
+    leaderId: string,
+    targetPlayerId: string,
+    allowed: boolean
+  ): { ok: boolean; error?: string } {
+    const leader = this.playersById.get(leaderId);
+    if (!leader) return { ok: false, error: 'Player not found.' };
+    const res = this.tribeManager.setMemberBuildPermission(
+      leader,
+      targetPlayerId,
+      allowed,
+      this.playersById
+    );
+    if (!res.ok) return { ok: false, error: res.error };
+
+    if (res.targetPlayer) {
+      this.onSendPlayerEvent?.(res.targetPlayer.id, {
+        type: 'ACTION_NOTICE',
+        message: allowed
+          ? `Tribe [${res.tribeTag}] Host granted you Build, Move, Rotate & Remove permission!`
+          : `Tribe [${res.tribeTag}] Host revoked your Build permission.`,
+        x: Math.round(res.targetPlayer.x),
+        y: Math.round(res.targetPlayer.y)
+      });
+    }
+    this.onSendPlayerEvent?.(leader.id, {
+      type: 'ACTION_NOTICE',
+      message: allowed
+        ? `Granted Build permission to ${res.targetPlayer?.username || 'member'}.`
+        : `Revoked Build permission from ${res.targetPlayer?.username || 'member'}.`,
+      x: Math.round(leader.x),
+      y: Math.round(leader.y)
+    });
     this.broadcastTribeSync();
     return { ok: true };
   }

@@ -337,6 +337,7 @@ export interface TribeSummary {
   maxMembers: number;
   memberIds: string[];
   memberShortIds: number[];
+  builderIds: string[];
   pendingRequests?: TribeJoinRequest[];
 }
 

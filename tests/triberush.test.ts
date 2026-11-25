@@ -816,8 +816,12 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     const restoredWt = Array.from(room.placedStructures.values()).find((s) => s.kind === 'watchtower');
     assert.strictEqual(restoredWt?.rotationQuarter, 2);
 
-    // 12. Anti-Abuse Gate Check D: Immediate re-deploy within 20-minute cooldown MUST be rejected!
-    leader.inventory[0] = { itemId: 'blueprint', count: 1 };
+    // 12. Anti-Abuse Gate Check D: Host cannot Load Base again without clicking Save & Pack first, and faces a 5-minute deploy cooldown!
+    assert.strictEqual(CONFIG.BLUEPRINT_DEPLOY_COOLDOWN_MS, 5 * 60000);
+    const blockedNoPack = room.handleLoadBlueprintBuild('king-1', 12800, 12800);
+    assert.strictEqual(blockedNoPack.ok, false);
+    assert.match(blockedNoPack.error || '', /Save & Pack/i);
+
     assert.strictEqual(room.handleSaveBlueprintBuild('king-1').ok, true);
     const blockedCooldown = room.handleLoadBlueprintBuild('king-1', 12800, 12800);
     assert.strictEqual(blockedCooldown.ok, false);
@@ -1111,7 +1115,7 @@ describe('4. Phase 7: Blueprint Build/Move/Rotate/Remove, Structure Immunity, 25
     assert.ok(builder.hunger > 89.8, 'Balanced slower hunger drain should drain ~0.085/s walking');
   });
 
-  it('should let ALL Tribe members move, rotate, and remove builds into Blueprint storedBuilds (reusable via Use & persisted in Supabase save)', async () => {
+  it('should block regular Tribe members from Load Base, Build, Move, Rotate, and Remove until Host grants Build Permission, and enforce Host-only Load Base with 5-minute cooldown', async () => {
     const saveSvc = new PlayerSaveService(false);
     const room = new WorldRoom(20261122);
     room.blueprintService.onPersistOwnerState = (ownerId, slot, lastDeployAt, storedBuilds) => {
@@ -1137,19 +1141,64 @@ describe('4. Phase 7: Blueprint Build/Move/Rotate/Remove, Structure Immunity, 25
     leader.inventory[5] = { itemId: 'wood', count: 32 };
     room.handleSelectSlot('acc-bp-lead', 0);
 
-    assert.strictEqual(
-      room.handleBlueprintPlaceBuild('acc-bp-lead', 'tribe_totem', 12800, 12800).ok,
-      true
-    );
+    const totemRes = room.handleBlueprintPlaceBuild('acc-bp-lead', 'tribe_totem', 12800, 12800);
+    assert.strictEqual(totemRes.ok, true);
     const cfRes = room.handleBlueprintPlaceBuild('acc-bp-lead', 'campfire', 12800, 12928);
     assert.strictEqual(cfRes.ok, true);
     const chRes = room.handleBlueprintPlaceBuild('acc-bp-lead', 'wooden_chest', 12896, 12896);
     assert.strictEqual(chRes.ok, true);
+    const wallRes = room.handleBlueprintPlaceBuild('acc-bp-lead', 'wooden_wall', 12864, 12736, 'h');
+    assert.strictEqual(wallRes.ok, true);
     chRes.chest!.slots[0] = { itemId: 'leather', count: 9 };
 
-    // Tribemate (non-leader) holding Blueprint can MOVE Chest (keeping items!) and REMOVE Campfire (storing 1x!)
+    // 1. Regular member WITHOUT Host Build Permission is BLOCKED from Build, Move, Rotate, Remove, Save & Pack, and Load Base!
     member.inventory[0] = { itemId: 'blueprint', count: 1 };
+    member.inventory[1] = { itemId: 'wood', count: 20 };
     room.handleSelectSlot('acc-bp-mem', 0);
+
+    assert.strictEqual(
+      room.handleBlueprintPlaceBuild('acc-bp-mem', 'wooden_wall', 12736, 12736, 'h').ok,
+      false,
+      'Member without build permission must NOT build'
+    );
+    assert.strictEqual(
+      room.handleBlueprintMoveEntity('acc-bp-mem', 'chest', chRes.chest!.id, 12704, 12896).ok,
+      false,
+      'Member without build permission must NOT move builds'
+    );
+    assert.strictEqual(
+      room.handleBlueprintRotateEntity('acc-bp-mem', 'wall', wallRes.wall!.id).ok,
+      false,
+      'Member without build permission must NOT rotate builds'
+    );
+    assert.strictEqual(
+      room.handleBlueprintRemoveEntity('acc-bp-mem', 'structure', cfRes.structure!.id).ok,
+      false,
+      'Member without build permission must NOT remove builds'
+    );
+    assert.strictEqual(
+      room.handleSaveBlueprintBuild('acc-bp-mem').ok,
+      false,
+      'Member must NOT Save & Pack Tribe base'
+    );
+
+    // 2. Host grants Build Permission to Member -> Member can now Move, Rotate, Remove & Build (still NOT Totem or Load Base!)
+    assert.strictEqual(
+      room.handleSetTribeBuildPermission('acc-bp-lead', 'acc-bp-mem', true).ok,
+      true
+    );
+
+    // Still cannot remove Tribe Totem (Host-only!) or Save/Load Base!
+    assert.strictEqual(
+      room.handleBlueprintRemoveEntity('acc-bp-mem', 'totem', totemRes.totem!.id).ok,
+      false,
+      'Only Host can remove the Tribe Totem'
+    );
+    assert.strictEqual(
+      room.handleSaveBlueprintBuild('acc-bp-mem').ok,
+      false,
+      'Permitted member still cannot Save & Pack base'
+    );
 
     const movedChest = room.handleBlueprintMoveEntity(
       'acc-bp-mem',
@@ -1161,6 +1210,9 @@ describe('4. Phase 7: Blueprint Build/Move/Rotate/Remove, Structure Immunity, 25
     assert.strictEqual(movedChest.ok, true);
     assert.strictEqual(chRes.chest!.slots[0]?.itemId, 'leather');
     assert.strictEqual(chRes.chest!.slots[0]?.count, 9);
+
+    const rotatedWall = room.handleBlueprintRotateEntity('acc-bp-mem', 'wall', wallRes.wall!.id);
+    assert.strictEqual(rotatedWall.ok, true);
 
     const removedCf = room.handleBlueprintRemoveEntity(
       'acc-bp-mem',
@@ -1181,6 +1233,37 @@ describe('4. Phase 7: Blueprint Build/Move/Rotate/Remove, Structure Immunity, 25
     assert.strictEqual(reusedCf.ok, true);
     assert.strictEqual(reusedCf.usedStored, true);
     assert.strictEqual(room.blueprintService.getStoredBuildCount('acc-bp-mem', 'campfire'), 0);
+
+    // 3. Host revokes Build Permission -> Member is immediately blocked again!
+    assert.strictEqual(
+      room.handleSetTribeBuildPermission('acc-bp-lead', 'acc-bp-mem', false).ok,
+      true
+    );
+    assert.strictEqual(
+      room.handleBlueprintRemoveEntity('acc-bp-mem', 'structure', reusedCf.structure!.id).ok,
+      false,
+      'Revoked member must immediately lose remove permission'
+    );
+
+    // 4. Even if a Tribe member somehow has a saved base from an earlier solo Tribe, they CANNOT Load Base as a member!
+    room.blueprintService.hydrateOwnerState(
+      'acc-bp-mem',
+      {
+        ownerId: 'acc-bp-mem',
+        totemLevel: 1,
+        sizeTiles: 20,
+        huntCounts: { pig: 0, cow: 0, chicken: 0, duck: 0, sheep: 0 },
+        walls: [],
+        structures: [],
+        chests: [],
+        torches: [],
+        savedAt: Date.now()
+      },
+      0
+    );
+    const memberLoadBlocked = room.handleLoadBlueprintBuild('acc-bp-mem', 14000, 14000);
+    assert.strictEqual(memberLoadBlocked.ok, false);
+    assert.match(memberLoadBlocked.error || '', /Host/i);
   });
 
   it('should support Private Tribes with join request Accept/Decline and relocate felled resources strictly outside claimed Totem territories', () => {
