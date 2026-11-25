@@ -67,6 +67,7 @@ export function handleSwingCore(
     }
 
     tree.hp = Math.max(0, tree.hp - stats.treeDmg);
+    ctx.world.alteredTreeIds.add(tree.id);
     const isDestroyed = tree.hp <= 0;
     if (isDestroyed) {
       tree.destroyedAt = now;
@@ -122,6 +123,7 @@ export function handleSwingCore(
     }
 
     rock.hp = Math.max(0, rock.hp - stats.rockDmg);
+    ctx.world.alteredRockIds.add(rock.id);
     const isDestroyed = rock.hp <= 0;
     if (isDestroyed) {
       rock.destroyedAt = now;
@@ -164,6 +166,7 @@ export function handleSwingCore(
     if (stats.bushDmg <= 0) break;
 
     bush.hp = Math.max(0, bush.hp - stats.bushDmg);
+    ctx.world.alteredBushIds.add(bush.id);
     const isDestroyed = bush.hp <= 0;
     if (isDestroyed) {
       bush.destroyedAt = now;
@@ -217,7 +220,10 @@ export function handleSwingCore(
       onBroadcastGlobalEvent: (payload) => ctx.emitRosterEvent(payload),
       onSendPlayerEvent: (pid, payload) => ctx.emitPlayerEvent(pid, payload),
       onSyncInventory: (victim) => ctx.syncPlayerInventory(victim),
-      onPlayerDied: (victim) => ctx.clearPlayerInventoryPersistence(victim.id)
+      onPlayerDied: (victim) => {
+        ctx.clearPlayerInventoryPersistence(victim.id);
+        ctx.clearSessionResume(victim.id);
+      }
     }
   );
   if (player.pvpKills > prevKills) {
@@ -266,18 +272,25 @@ export function handleSwingCore(
             : 10;
 
   let hitStructureEntity = false;
+  const wallMaxReach = stats.reach + 16;
   for (const wall of ctx.placedWalls.values()) {
     if (wall.ownerId === player.id || (player.tribeId && wall.tribeId === player.tribeId)) {
       continue;
     }
     const halfW = wall.orientation === 'h' ? wall.length / 2 : wall.thickness / 2;
     const halfH = wall.orientation === 'h' ? wall.thickness / 2 : wall.length / 2;
+    if (
+      Math.abs(wall.x - player.x) > halfW + wallMaxReach ||
+      Math.abs(wall.y - player.y) > halfH + wallMaxReach
+    ) {
+      continue;
+    }
     const clampedX = Math.max(wall.x - halfW, Math.min(player.x, wall.x + halfW));
     const clampedY = Math.max(wall.y - halfH, Math.min(player.y, wall.y + halfH));
     const dx = clampedX - player.x;
     const dy = clampedY - player.y;
     const dist = Math.hypot(dx, dy);
-    if (dist > stats.reach + 16) continue;
+    if (dist > wallMaxReach) continue;
     const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
     if (dot < 0.28) continue;
 
@@ -308,10 +321,12 @@ export function handleSwingCore(
         continue;
       }
       const halfSpan = (Math.max(s.tilesW, s.tilesH) * CONFIG.BUILD_GRID_SIZE) / 2;
+      const maxS = stats.reach + halfSpan;
       const dx = s.x - player.x;
       const dy = s.y - player.y;
+      if (Math.abs(dx) > maxS || Math.abs(dy) > maxS) continue;
       const dist = Math.hypot(dx, dy);
-      if (dist > stats.reach + halfSpan) continue;
+      if (dist > maxS) continue;
       const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
       if (dot < 0.25) continue;
 
@@ -350,10 +365,12 @@ export function handleSwingCore(
       if (totem.ownerId === player.id || (player.tribeId && totem.tribeId === player.tribeId)) {
         continue;
       }
+      const maxT = stats.reach + totem.radius + 10;
       const dx = totem.x - player.x;
       const dy = totem.y - player.y;
+      if (Math.abs(dx) > maxT || Math.abs(dy) > maxT) continue;
       const dist = Math.hypot(dx, dy);
-      if (dist > stats.reach + totem.radius + 10) continue;
+      if (dist > maxT) continue;
       const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
       if (dot < 0.3) continue;
 

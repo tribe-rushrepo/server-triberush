@@ -62,6 +62,9 @@ export class BlueprintService {
   private readonly lastDeployAtByOwnerId = new Map<string, number>();
   private readonly storedBuildsByOwnerId = new Map<string, BlueprintStoredBuilds>();
   private readonly storageFilePath: string | null;
+  private diskWriteTimer: ReturnType<typeof setTimeout> | null = null;
+  private diskDirty = false;
+  private diskWriteChain: Promise<void> = Promise.resolve();
   public onPersistOwnerState:
     | ((
         ownerId: string,
@@ -194,20 +197,75 @@ export class BlueprintService {
     }
   }
 
+  private buildSerializedDiskPayload(): string {
+    const payload: PersistedBlueprintPayload = {
+      slots: Object.fromEntries(this.slotsByOwnerId.entries()),
+      lastDeployAt: Object.fromEntries(this.lastDeployAtByOwnerId.entries()),
+      storedBuilds: Object.fromEntries(this.storedBuildsByOwnerId.entries())
+    };
+    return JSON.stringify(payload);
+  }
+
+  /**
+   * Non-blocking debounced async disk persistence so live 20Hz gameplay
+   * ticks NEVER stall on fs.writeFileSync / fs.renameSync.
+   */
   private persistToDisk(): void {
     if (!this.storageFilePath) return;
+    this.diskDirty = true;
+    if (this.diskWriteTimer) return;
+    this.diskWriteTimer = setTimeout(() => {
+      this.diskWriteTimer = null;
+      void this.flushPendingDiskWrite();
+    }, 2000);
+    this.diskWriteTimer.unref?.();
+  }
+
+  public async flushPendingDiskWrite(): Promise<void> {
+    if (!this.storageFilePath) return;
+    if (this.diskWriteTimer) {
+      clearTimeout(this.diskWriteTimer);
+      this.diskWriteTimer = null;
+    }
+    if (!this.diskDirty) {
+      await this.diskWriteChain;
+      return;
+    }
+    this.diskDirty = false;
+    const filePath = this.storageFilePath;
+    const serialized = this.buildSerializedDiskPayload();
+    const task = this.diskWriteChain
+      .catch(() => {})
+      .then(async () => {
+        try {
+          const dir = path.dirname(filePath);
+          await fs.promises.mkdir(dir, { recursive: true });
+          const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+          await fs.promises.writeFile(tmpPath, serialized, 'utf8');
+          await fs.promises.rename(tmpPath, filePath);
+        } catch {
+          // Ignore disk persistence errors
+        }
+      });
+    this.diskWriteChain = task;
+    await task;
+  }
+
+  public flushPendingDiskWriteSync(): void {
+    if (!this.storageFilePath) return;
+    if (this.diskWriteTimer) {
+      clearTimeout(this.diskWriteTimer);
+      this.diskWriteTimer = null;
+    }
+    if (!this.diskDirty) return;
+    this.diskDirty = false;
     try {
       const dir = path.dirname(this.storageFilePath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      const payload: PersistedBlueprintPayload = {
-        slots: Object.fromEntries(this.slotsByOwnerId.entries()),
-        lastDeployAt: Object.fromEntries(this.lastDeployAtByOwnerId.entries()),
-        storedBuilds: Object.fromEntries(this.storedBuildsByOwnerId.entries())
-      };
       const tmpPath = `${this.storageFilePath}.tmp`;
-      fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2), 'utf8');
+      fs.writeFileSync(tmpPath, this.buildSerializedDiskPayload(), 'utf8');
       fs.renameSync(tmpPath, this.storageFilePath);
     } catch {
       // Ignore disk persistence errors

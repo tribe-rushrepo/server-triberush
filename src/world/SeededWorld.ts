@@ -45,6 +45,8 @@ export class SeededWorld {
   public readonly treesById: Map<number, WorldTreeNode> = new Map();
   public readonly rocksById: Map<number, WorldRockNode> = new Map();
   public readonly bushesById: Map<number, WorldBushNode> = new Map();
+  public readonly lakesById: Map<number, WorldLakeNode> = new Map();
+  public readonly pondsById: Map<number, WorldPondNode> = new Map();
 
   private colliderBuckets: Map<number, SolidCollider[]> = new Map();
   private readonly boxColliderBuckets: Map<number, BoxCollider[]> = new Map();
@@ -52,6 +54,9 @@ export class SeededWorld {
   private treeBuckets: Map<number, WorldTreeNode[]> = new Map();
   private rockBuckets: Map<number, WorldRockNode[]> = new Map();
   private bushBuckets: Map<number, WorldBushNode[]> = new Map();
+  public readonly alteredTreeIds: Set<number> = new Set();
+  public readonly alteredRockIds: Set<number> = new Set();
+  public readonly alteredBushIds: Set<number> = new Set();
   public readonly relocatedTreeIds: Set<number> = new Set();
   public readonly relocatedRockIds: Set<number> = new Set();
   public readonly relocatedBushIds: Set<number> = new Set();
@@ -78,12 +83,17 @@ export class SeededWorld {
     this.treesById.clear();
     this.rocksById.clear();
     this.bushesById.clear();
+    this.lakesById.clear();
+    this.pondsById.clear();
     this.colliderBuckets.clear();
     this.boxColliderBuckets.clear();
     this.speedZoneBuckets.clear();
     this.treeBuckets.clear();
     this.rockBuckets.clear();
     this.bushBuckets.clear();
+    this.alteredTreeIds.clear();
+    this.alteredRockIds.clear();
+    this.alteredBushIds.clear();
     this.relocatedTreeIds.clear();
     this.relocatedRockIds.clear();
     this.relocatedBushIds.clear();
@@ -113,6 +123,8 @@ export class SeededWorld {
       overlapsWaterOrMud: (x, y, pad) => this.overlapsWaterOrMud(x, y, pad),
       overlapsAnySolid: (x, y, gap) => this.overlapsAnySolid(x, y, gap)
     });
+    for (let i = 0; i < this.lakes.length; i++) this.lakesById.set(this.lakes[i].id, this.lakes[i]);
+    for (let i = 0; i < this.ponds.length; i++) this.pondsById.set(this.ponds[i].id, this.ponds[i]);
   }
 
   private bucketKey(cx: number, cy: number): number {
@@ -419,7 +431,7 @@ export class SeededWorld {
     insetScale: number = 0.86
   ): boolean {
     if (waterKind === 'pond') {
-      const pd = this.ponds.find((p) => p.id === waterId);
+      const pd = this.pondsById.get(waterId);
       if (!pd) return false;
       const poly = BAKED_POND_POLYGONS[pd.variant % BAKED_POND_POLYGONS.length];
       return isPointInsideFreeformZone(
@@ -433,7 +445,7 @@ export class SeededWorld {
         poly
       );
     }
-    const lk = this.lakes.find((l) => l.id === waterId);
+    const lk = this.lakesById.get(waterId);
     if (!lk) return false;
     const poly = BAKED_LAKE_POLYGONS[lk.variant % BAKED_LAKE_POLYGONS.length];
     return isPointInsideFreeformZone(
@@ -512,6 +524,9 @@ export class SeededWorld {
       b.hasFruit = b.spawnsFruit;
       b.fruitRegrowAt = null;
     }
+    this.alteredTreeIds.clear();
+    this.alteredRockIds.clear();
+    this.alteredBushIds.clear();
   }
 
   public resolvePlayerPosition(

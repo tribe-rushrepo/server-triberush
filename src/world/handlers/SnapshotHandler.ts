@@ -41,8 +41,12 @@ export function buildDynamicWorldStateSnapshot(ctx: WorldRoomContext) {
     hp: number;
     destroyed: boolean;
   }> = [];
-  for (const t of ctx.world.trees) {
-    const relocated = ctx.world.relocatedTreeIds.has(t.id);
+  const seenTreeIds = new Set<number>();
+  for (const id of ctx.world.alteredTreeIds) {
+    seenTreeIds.add(id);
+    const t = ctx.world.treesById.get(id);
+    if (!t) continue;
+    const relocated = ctx.world.relocatedTreeIds.has(id);
     if (t.destroyedAt !== null || t.hp < t.maxHp || relocated) {
       damagedOrDestroyedTrees.push({
         id: t.id,
@@ -52,6 +56,18 @@ export function buildDynamicWorldStateSnapshot(ctx: WorldRoomContext) {
       });
     }
   }
+  for (const id of ctx.world.relocatedTreeIds) {
+    if (seenTreeIds.has(id)) continue;
+    const t = ctx.world.treesById.get(id);
+    if (!t) continue;
+    damagedOrDestroyedTrees.push({
+      id: t.id,
+      x: t.x,
+      y: t.y,
+      hp: t.hp,
+      destroyed: t.destroyedAt !== null
+    });
+  }
 
   const damagedOrDestroyedRocks: Array<{
     id: number;
@@ -60,8 +76,12 @@ export function buildDynamicWorldStateSnapshot(ctx: WorldRoomContext) {
     hp: number;
     destroyed: boolean;
   }> = [];
-  for (const r of ctx.world.rocks) {
-    const relocated = ctx.world.relocatedRockIds.has(r.id);
+  const seenRockIds = new Set<number>();
+  for (const id of ctx.world.alteredRockIds) {
+    seenRockIds.add(id);
+    const r = ctx.world.rocksById.get(id);
+    if (!r) continue;
+    const relocated = ctx.world.relocatedRockIds.has(id);
     if (r.destroyedAt !== null || r.hp < r.maxHp || relocated) {
       damagedOrDestroyedRocks.push({
         id: r.id,
@@ -70,6 +90,18 @@ export function buildDynamicWorldStateSnapshot(ctx: WorldRoomContext) {
         destroyed: r.destroyedAt !== null
       });
     }
+  }
+  for (const id of ctx.world.relocatedRockIds) {
+    if (seenRockIds.has(id)) continue;
+    const r = ctx.world.rocksById.get(id);
+    if (!r) continue;
+    damagedOrDestroyedRocks.push({
+      id: r.id,
+      x: r.x,
+      y: r.y,
+      hp: r.hp,
+      destroyed: r.destroyedAt !== null
+    });
   }
 
   const alteredBushes: Array<{
@@ -80,8 +112,12 @@ export function buildDynamicWorldStateSnapshot(ctx: WorldRoomContext) {
     hasFruit: boolean;
     destroyed: boolean;
   }> = [];
-  for (const b of ctx.world.bushes) {
-    const relocated = ctx.world.relocatedBushIds.has(b.id);
+  const seenBushIds = new Set<number>();
+  for (const id of ctx.world.alteredBushIds) {
+    seenBushIds.add(id);
+    const b = ctx.world.bushesById.get(id);
+    if (!b) continue;
+    const relocated = ctx.world.relocatedBushIds.has(id);
     if (b.destroyedAt !== null || b.hp < b.maxHp || b.hasFruit !== b.spawnsFruit || relocated) {
       alteredBushes.push({
         id: b.id,
@@ -91,6 +127,19 @@ export function buildDynamicWorldStateSnapshot(ctx: WorldRoomContext) {
         destroyed: b.destroyedAt !== null
       });
     }
+  }
+  for (const id of ctx.world.relocatedBushIds) {
+    if (seenBushIds.has(id)) continue;
+    const b = ctx.world.bushesById.get(id);
+    if (!b) continue;
+    alteredBushes.push({
+      id: b.id,
+      x: b.x,
+      y: b.y,
+      hp: b.hp,
+      hasFruit: b.hasFruit,
+      destroyed: b.destroyedAt !== null
+    });
   }
 
   return {
@@ -220,6 +269,7 @@ export function stepResourceRegrowthAndDrops(ctx: WorldRoomContext, now: number)
       t.destroyedAt = null;
       t.hp = t.maxHp;
       ctx.pendingTreeRespawns.delete(t);
+      ctx.world.alteredTreeIds.delete(t.id);
       ctx.world.addSolidCollider({
         kind: 'tree',
         id: t.id,
@@ -246,6 +296,7 @@ export function stepResourceRegrowthAndDrops(ctx: WorldRoomContext, now: number)
       r.destroyedAt = null;
       r.hp = r.maxHp;
       ctx.pendingRockRespawns.delete(r);
+      ctx.world.alteredRockIds.delete(r.id);
       ctx.world.addSolidCollider({
         kind: 'rock',
         id: r.id,
@@ -274,6 +325,7 @@ export function stepResourceRegrowthAndDrops(ctx: WorldRoomContext, now: number)
       b.hasFruit = b.spawnsFruit;
       b.fruitRegrowAt = null;
       ctx.pendingBushRespawns.delete(b);
+      ctx.world.alteredBushIds.delete(b.id);
       ctx.emitRosterEvent({
         type: 'BUSH_HIT',
         id: b.id,
@@ -294,6 +346,7 @@ export function stepResourceRegrowthAndDrops(ctx: WorldRoomContext, now: number)
       b.hasFruit = true;
       b.fruitRegrowAt = null;
       ctx.pendingBushRespawns.delete(b);
+      if (b.hp >= b.maxHp) ctx.world.alteredBushIds.delete(b.id);
       ctx.emitRosterEvent({
         type: 'BUSH_HIT',
         id: b.id,
@@ -353,13 +406,15 @@ export function broadcastWatchtowerRadars(ctx: WorldRoomContext): void {
         }
       }
     }
+    const memberIds: string[] = [];
     for (const member of ctx.playersById.values()) {
-      if (member.tribeId === tribeId) {
-        ctx.emitPlayerEvent(member.id, {
-          type: 'WATCHTOWER_RADAR',
-          blips
-        });
-      }
+      if (member.tribeId === tribeId) memberIds.push(member.id);
+    }
+    if (memberIds.length > 0) {
+      ctx.emitPlayersEvent(memberIds, {
+        type: 'WATCHTOWER_RADAR',
+        blips
+      });
     }
   }
 }

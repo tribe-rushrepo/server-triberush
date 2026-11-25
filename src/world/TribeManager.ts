@@ -199,6 +199,28 @@ export class TribeManager {
     return { ok: true, pending: false, tribeTag: tribe.tag, tribeName: tribe.name };
   }
 
+  /**
+   * Restores Tribe membership cleanly when a player reconnects within the short
+   * session-resume window (works for both Public and Private Tribes if still open).
+   */
+  public rejoinTribeById(
+    player: ActiveWorldPlayer,
+    tribeId: string,
+    restoreBuildPermission: boolean = false
+  ): boolean {
+    if (player.tribeId) return false;
+    const tribe = this.tribesById.get(tribeId);
+    if (!tribe || tribe.memberIds.size >= CONFIG.MAX_TRIBE_MEMBERS) return false;
+    this.clearPendingRequestsForPlayer(player.id);
+    tribe.memberIds.add(player.id);
+    if (restoreBuildPermission) {
+      tribe.builderIds.add(player.id);
+    }
+    player.tribeId = tribe.id;
+    player.tribeTag = tribe.tag;
+    return true;
+  }
+
   public respondToJoinRequest(
     leader: ActiveWorldPlayer,
     targetPlayerId: string,

@@ -6,17 +6,25 @@ import { tribeRushAuthService } from '../services/AuthService.js';
 import { playerSaveService } from '../services/PlayerSaveService.js';
 import { WorldRoom } from '../world/WorldRoom.js';
 import { dispatchClientMessage } from './messageRouter.js';
+import { packetRateGuard } from './packetRateGuard.js';
 import { ClientMessageSchema } from './schemas.js';
 
-const MAX_BINARY_BUFFERED_BYTES = 64 * 1024; // 64 KB backpressure guard
-const MAX_WS_PACKETS_PER_SEC = 55; // Sliding-window anti-flood limit
+const MAX_BINARY_BUFFERED_BYTES = 64 * 1024;
+const MAX_JSON_BUFFERED_BYTES = 256 * 1024;
+const STALE_SOCKET_BUFFERED_BYTES = 512 * 1024;
+const SOFT_MAX_WS_PACKETS_PER_SEC = 100; // Silently drop overflow above this (never kicks real players)
+const HARD_DDOS_PACKETS_PER_SEC = 220; // Sustained >220 pkt/s counts 1 strike per second (kicks at 10s)
+const MAX_BAD_PACKET_STRIKES = 15;
 
 type TrackedWebSocket = WebSocket & {
   __isAlive?: boolean;
   __clientIp?: string;
+  __hasJoinedWorld?: boolean;
   __msgWindowStart?: number;
   __msgCountInWindow?: number;
-  __floodStrikes?: number;
+  __struckThisWindow?: boolean;
+  __ddosStrikes?: number;
+  __badPacketStrikes?: number;
 };
 
 export class WebSocketManager {
@@ -89,6 +97,7 @@ export class WebSocketManager {
     this.isShuttingDown = true;
     clearInterval(this.heartbeatInterval);
     this.worldRoom.stopSimulationLoop();
+    this.worldRoom.blueprintService.flushPendingDiskWriteSync();
     for (const set of this.socketsByPlayer.values()) {
       for (const ws of set) {
         try {
@@ -111,7 +120,10 @@ export class WebSocketManager {
     for (const snap of snapshots) {
       void playerSaveService.savePlayerInventory(snap.ownerId, snap.compact);
     }
-    await playerSaveService.flushAllPendingWrites(4000);
+    await Promise.allSettled([
+      playerSaveService.flushAllPendingWrites(4000),
+      this.worldRoom.blueprintService.flushPendingDiskWrite()
+    ]);
 
     for (const set of this.socketsByPlayer.values()) {
       for (const ws of set) {
@@ -139,18 +151,34 @@ export class WebSocketManager {
     return Math.max(count, this.worldRoom.getPlayerCount());
   }
 
+  private safeSendJsonFrame(ws: TrackedWebSocket, raw: string): void {
+    if (ws.readyState !== 1) return;
+    if (typeof ws.bufferedAmount === 'number') {
+      if (ws.bufferedAmount > STALE_SOCKET_BUFFERED_BYTES) {
+        try {
+          ws.terminate?.();
+        } catch {
+          // Ignore terminate error
+        }
+        return;
+      }
+      if (ws.bufferedAmount > MAX_JSON_BUFFERED_BYTES) {
+        return;
+      }
+    }
+    try {
+      ws.send(raw);
+    } catch {
+      // Ignore send failure
+    }
+  }
+
   public sendJsonToPlayer(playerId: string, payload: Record<string, unknown>): void {
     const set = this.socketsByPlayer.get(playerId);
     if (!set || set.size === 0) return;
     const raw = JSON.stringify(payload);
     for (const ws of set) {
-      if (ws.readyState === 1) {
-        try {
-          ws.send(raw);
-        } catch {
-          // Ignore send failure
-        }
-      }
+      this.safeSendJsonFrame(ws, raw);
     }
   }
 
@@ -164,13 +192,7 @@ export class WebSocketManager {
       const set = this.socketsByPlayer.get(playerIds[i]);
       if (!set || set.size === 0) continue;
       for (const ws of set) {
-        if (ws.readyState === 1) {
-          try {
-            ws.send(raw);
-          } catch {
-            // Ignore send failure
-          }
-        }
+        this.safeSendJsonFrame(ws, raw);
       }
     }
   }
@@ -196,13 +218,7 @@ export class WebSocketManager {
     const raw = JSON.stringify(payload);
     for (const set of this.socketsByPlayer.values()) {
       for (const ws of set) {
-        if (ws.readyState === 1) {
-          try {
-            ws.send(raw);
-          } catch {
-            // Ignore send failure
-          }
-        }
+        this.safeSendJsonFrame(ws, raw);
       }
     }
   }
@@ -229,7 +245,17 @@ export class WebSocketManager {
 
     const rawIp = String((socket as any)?._socket?.remoteAddress || '127.0.0.1');
     const isLocalIp = rawIp === '127.0.0.1' || rawIp === '::1' || rawIp.endsWith('127.0.0.1');
-    const maxPerIp = CONFIG.NODE_ENV === 'production' && !isLocalIp ? 6 : 32;
+    const isProd = CONFIG.NODE_ENV === 'production';
+
+    if (!packetRateGuard.allowIpConnect(rawIp, isProd, isLocalIp)) {
+      socket.send(
+        JSON.stringify({ type: 'ERROR', message: 'Too many reconnect attempts. Please wait briefly.' })
+      );
+      socket.close(4008, 'Connect rate limit exceeded');
+      return;
+    }
+
+    const maxPerIp = isProd && !isLocalIp ? 6 : 32;
     const currentIpCount = this.connectionCountByIp.get(rawIp) || 0;
     if (currentIpCount >= maxPerIp) {
       socket.send(JSON.stringify({ type: 'ERROR', message: 'Too many active connections from this IP.' }));
@@ -240,9 +266,12 @@ export class WebSocketManager {
 
     socket.__isAlive = true;
     socket.__clientIp = rawIp;
+    socket.__hasJoinedWorld = false;
     socket.__msgWindowStart = Date.now();
     socket.__msgCountInWindow = 0;
-    socket.__floodStrikes = 0;
+    socket.__struckThisWindow = false;
+    socket.__ddosStrikes = 0;
+    socket.__badPacketStrikes = 0;
 
     socket.on('pong', () => {
       socket.__isAlive = true;
@@ -298,25 +327,48 @@ export class WebSocketManager {
 
         const nowMs = Date.now();
         if (!socket.__msgWindowStart || nowMs - socket.__msgWindowStart >= 1000) {
+          if (!socket.__struckThisWindow && socket.__ddosStrikes && socket.__ddosStrikes > 0) {
+            socket.__ddosStrikes -= 1;
+          }
           socket.__msgWindowStart = nowMs;
           socket.__msgCountInWindow = 1;
-          if (socket.__floodStrikes && socket.__floodStrikes > 0) {
-            socket.__floodStrikes -= 1;
-          }
+          socket.__struckThisWindow = false;
         } else {
           socket.__msgCountInWindow = (socket.__msgCountInWindow || 0) + 1;
-          if (socket.__msgCountInWindow > MAX_WS_PACKETS_PER_SEC) {
-            socket.__floodStrikes = (socket.__floodStrikes || 0) + 1;
-            if (socket.__floodStrikes >= 8) {
-              socket.close(4008, 'Packet rate limit exceeded');
+          if (socket.__msgCountInWindow > HARD_DDOS_PACKETS_PER_SEC) {
+            if (!socket.__struckThisWindow) {
+              socket.__struckThisWindow = true;
+              socket.__ddosStrikes = (socket.__ddosStrikes || 0) + 1;
+              if (socket.__ddosStrikes >= 10) {
+                socket.close(4008, 'Sustained flood detected');
+              }
             }
+            return;
+          }
+          // Soft-throttle: discard excess packets before JSON.parse() without kicking real players
+          if (socket.__msgCountInWindow > SOFT_MAX_WS_PACKETS_PER_SEC) {
             return;
           }
         }
 
-        const parsedJson = JSON.parse(String(raw));
+        let parsedJson: unknown;
+        try {
+          parsedJson = JSON.parse(String(raw));
+        } catch {
+          socket.__badPacketStrikes = (socket.__badPacketStrikes || 0) + 1;
+          if (socket.__badPacketStrikes >= MAX_BAD_PACKET_STRIKES) {
+            socket.close(4008, 'Too many malformed packets');
+          }
+          return;
+        }
+
         const validated = ClientMessageSchema.safeParse(parsedJson);
         if (!validated.success) {
+          socket.__badPacketStrikes = (socket.__badPacketStrikes || 0) + 1;
+          if (socket.__badPacketStrikes >= MAX_BAD_PACKET_STRIKES) {
+            socket.close(4008, 'Too many invalid packets');
+            return;
+          }
           this.sendJsonToPlayer(playerId, {
             type: 'ERROR',
             message: validated.error.issues[0]?.message || 'Malformed packet.'
@@ -330,6 +382,10 @@ export class WebSocketManager {
             playerId,
             username,
             socket,
+            hasJoinedWorld: () => Boolean(socket.__hasJoinedWorld),
+            markJoinedWorld: () => {
+              socket.__hasJoinedWorld = true;
+            },
             isConnectionActive: () =>
               !this.isShuttingDown &&
               socket.readyState === 1 &&
@@ -340,7 +396,7 @@ export class WebSocketManager {
           validated.data
         );
       } catch {
-        // Ignore malformed frame
+        // Ignore unexpected frame error
       }
     });
 
@@ -358,6 +414,7 @@ export class WebSocketManager {
         playerSet.delete(socket);
         if (playerSet.size === 0) {
           this.socketsByPlayer.delete(playerId);
+          packetRateGuard.clearPlayer(playerId);
           if (!this.isShuttingDown) {
             this.worldRoom.removePlayer(playerId);
           }

@@ -95,6 +95,7 @@ import {
   SNAPSHOT_PLAYER_STRIDE,
   type WorldRoomContext
 } from './handlers/roomContext.js';
+import { SessionResumeCache } from './handlers/sessionResumeCache.js';
 
 export { BINARY_PACKET_SNAPSHOT, SNAPSHOT_HEADER_BYTES, SNAPSHOT_PLAYER_STRIDE };
 
@@ -138,7 +139,10 @@ export class WorldRoom {
   private lastLeaderboardSyncAt = 0;
 
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private tribeSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastTribeSyncBroadcastAt = 0;
   private lastTickTime = Date.now();
+  private readonly sessionResumeCache = new SessionResumeCache();
 
   private onBroadcastBinarySnapshot: ((playerId: string, frame: Buffer) => void) | null = null;
   private onBroadcastRosterEvent: ((payload: Record<string, unknown>) => void) | null = null;
@@ -195,8 +199,17 @@ export class WorldRoom {
       getServerTick: () => this.serverTick,
       emitRosterEvent: (payload) => this.onBroadcastRosterEvent?.(payload),
       emitPlayerEvent: (pid, payload) => this.onSendPlayerEvent?.(pid, payload),
+      emitPlayersEvent: (pids, payload) => {
+        if (pids.length === 0) return;
+        if (this.onBroadcastProximityEvent) {
+          this.onBroadcastProximityEvent(pids, payload);
+        } else if (this.onSendPlayerEvent) {
+          for (let i = 0; i < pids.length; i++) this.onSendPlayerEvent(pids[i], payload);
+        }
+      },
       broadcastProximityEvent: (x, y, payload) => this.broadcastProximityEvent(x, y, payload),
       clearPlayerInventoryPersistence: (ownerId) => this.onClearPlayerInventory?.(ownerId),
+      clearSessionResume: (playerId) => this.sessionResumeCache.delete(playerId),
       getDayCycleSnapshot: () => this.getDayCycleSnapshot(),
       getTribeSummaries: () => this.getTribeSummaries(),
       getLeaderboardEntries: () => this.getLeaderboardEntries(),
@@ -226,10 +239,28 @@ export class WorldRoom {
         return ownerId === player.id;
       },
       broadcastTribeSync: () => {
-        this.onBroadcastRosterEvent?.({
-          type: 'TRIBE_LIST_SYNC',
-          tribes: this.getTribeSummaries()
-        });
+        const now = Date.now();
+        if (now - this.lastTribeSyncBroadcastAt >= 100) {
+          this.lastTribeSyncBroadcastAt = now;
+          if (this.tribeSyncTimer) {
+            clearTimeout(this.tribeSyncTimer);
+            this.tribeSyncTimer = null;
+          }
+          this.onBroadcastRosterEvent?.({
+            type: 'TRIBE_LIST_SYNC',
+            tribes: this.getTribeSummaries()
+          });
+        } else if (!this.tribeSyncTimer) {
+          this.tribeSyncTimer = setTimeout(() => {
+            this.tribeSyncTimer = null;
+            this.lastTribeSyncBroadcastAt = Date.now();
+            this.onBroadcastRosterEvent?.({
+              type: 'TRIBE_LIST_SYNC',
+              tribes: this.getTribeSummaries()
+            });
+          }, 100);
+          this.tribeSyncTimer.unref?.();
+        }
       }
     };
 
@@ -241,7 +272,8 @@ export class WorldRoom {
       },
       resetWorldToDayOne: () => this.resetWorldToDayOne(),
       persistPlayerInventory: (ownerId, compact) =>
-        this.onPersistPlayerInventory?.(ownerId, compact)
+        this.onPersistPlayerInventory?.(ownerId, compact),
+      sessionResumeCache: this.sessionResumeCache
     };
   }
 
@@ -296,6 +328,10 @@ export class WorldRoom {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
     }
+    if (this.tribeSyncTimer) {
+      clearTimeout(this.tribeSyncTimer);
+      this.tribeSyncTimer = null;
+    }
   }
 
   public getPlayerCount(): number {
@@ -337,6 +373,7 @@ export class WorldRoom {
     this.pendingRockRespawns.clear();
     this.pendingBushRespawns.clear();
     this.tribeManager.clear();
+    this.sessionResumeCache.clear();
     const nextSeed = typeof explicitSeed === 'number' ? explicitSeed : rollRandomWorldSeed();
     this.world.regenerateWithSeed(nextSeed);
     this.animalService.regenerate();
@@ -448,20 +485,17 @@ export class WorldRoom {
     return spawnGroundDropCore(this.ctx, itemId, count, originX, originY, targetX, targetY);
   }
 
-  public handleSwing(playerId: string, angle?: number) {
-    return handleSwingCore(this.ctx, playerId, angle);
-  }
-  public handlePickupOrHarvest(playerId: string) {
-    return handlePickupOrHarvestCore(this.ctx, playerId);
-  }
+  public handleSwing(playerId: string, angle?: number) { return handleSwingCore(this.ctx, playerId, angle); }
+  public handlePickupOrHarvest(playerId: string) { return handlePickupOrHarvestCore(this.ctx, playerId); }
   public handleDropHeldItem(
     playerId: string,
     dropAll = false,
     source: 'inventory' | 'chest' = 'inventory',
     explicitSlot?: number,
-    chestId?: number
+    chestId?: number,
+    explicitCount?: number
   ) {
-    return handleDropHeldItemCore(this.ctx, playerId, dropAll, source, explicitSlot, chestId);
+    return handleDropHeldItemCore(this.ctx, playerId, dropAll, source, explicitSlot, chestId, explicitCount);
   }
   public handleMoveSlot(
     playerId: string,
@@ -473,12 +507,8 @@ export class WorldRoom {
   ) {
     return handleMoveSlotCore(this.ctx, playerId, fromSource, fromSlot, toSource, toSlot, chestId);
   }
-  public handleCraftItem(playerId: string, recipeItemId: ItemId) {
-    return handleCraftItemCore(this.ctx, playerId, recipeItemId);
-  }
-  public handleEquipHeldItem(playerId: string, explicitSlot?: number) {
-    return handleEquipHeldItemCore(this.ctx, playerId, explicitSlot);
-  }
+  public handleCraftItem(playerId: string, recipeItemId: ItemId) { return handleCraftItemCore(this.ctx, playerId, recipeItemId); }
+  public handleEquipHeldItem(playerId: string, explicitSlot?: number) { return handleEquipHeldItemCore(this.ctx, playerId, explicitSlot); }
   public handleUseOrPlaceItem(
     playerId: string,
     targetX?: number,
@@ -488,21 +518,11 @@ export class WorldRoom {
   ) {
     return handleUseOrPlaceItemCore(this.ctx, playerId, targetX, targetY, orientation, rotationQuarter);
   }
-  public handleUpgradeTotem(playerId: string, totemId: number) {
-    return handleUpgradeTotemCore(this.ctx, playerId, totemId);
-  }
-  public handleRemoveTotem(playerId: string, totemId: number) {
-    return handleRemoveTotemCore(this.ctx, playerId, totemId);
-  }
-  public handleSetHutHome(playerId: string, structureId: number) {
-    return handleSetHutHomeCore(this.ctx, playerId, structureId);
-  }
-  public handleSaveBlueprintBuild(playerId: string) {
-    return handleSaveBlueprintBuildCore(this.ctx, playerId);
-  }
-  public handleLoadBlueprintBuild(playerId: string, targetX: number, targetY: number) {
-    return handleLoadBlueprintBuildCore(this.ctx, playerId, targetX, targetY);
-  }
+  public handleUpgradeTotem(playerId: string, totemId: number) { return handleUpgradeTotemCore(this.ctx, playerId, totemId); }
+  public handleRemoveTotem(playerId: string, totemId: number) { return handleRemoveTotemCore(this.ctx, playerId, totemId); }
+  public handleSetHutHome(playerId: string, structureId: number) { return handleSetHutHomeCore(this.ctx, playerId, structureId); }
+  public handleSaveBlueprintBuild(playerId: string) { return handleSaveBlueprintBuildCore(this.ctx, playerId); }
+  public handleLoadBlueprintBuild(playerId: string, targetX: number, targetY: number) { return handleLoadBlueprintBuildCore(this.ctx, playerId, targetX, targetY); }
   public handleBlueprintPlaceBuild(
     playerId: string,
     itemId: ItemId,
@@ -511,28 +531,12 @@ export class WorldRoom {
     orientation?: WallOrientation,
     rotationQuarter?: RotationQuarter
   ) {
-    return handleBlueprintPlaceBuildCore(
-      this.ctx,
-      playerId,
-      itemId,
-      targetX,
-      targetY,
-      orientation,
-      rotationQuarter
-    );
+    return handleBlueprintPlaceBuildCore(this.ctx, playerId, itemId, targetX, targetY, orientation, rotationQuarter);
   }
-  public handleBlueprintRemoveEntity(
-    playerId: string,
-    targetKind: BlueprintTargetKind,
-    targetId: number
-  ) {
+  public handleBlueprintRemoveEntity(playerId: string, targetKind: BlueprintTargetKind, targetId: number) {
     return handleBlueprintRemoveEntityCore(this.ctx, playerId, targetKind, targetId);
   }
-  public handleBlueprintRotateEntity(
-    playerId: string,
-    targetKind: 'wall' | 'structure',
-    targetId: number
-  ) {
+  public handleBlueprintRotateEntity(playerId: string, targetKind: 'wall' | 'structure', targetId: number) {
     return handleBlueprintRotateEntityCore(this.ctx, playerId, targetKind, targetId);
   }
   public handleBlueprintMoveEntity(
@@ -544,55 +548,25 @@ export class WorldRoom {
     orientation?: WallOrientation,
     rotationQuarter?: RotationQuarter
   ) {
-    return handleBlueprintMoveEntityCore(
-      this.ctx,
-      playerId,
-      targetKind,
-      targetId,
-      targetX,
-      targetY,
-      orientation,
-      rotationQuarter
-    );
+    return handleBlueprintMoveEntityCore(this.ctx, playerId, targetKind, targetId, targetX, targetY, orientation, rotationQuarter);
   }
-  public handleOpenChest(playerId: string, chestId: number) {
-    return handleOpenChestCore(this.ctx, playerId, chestId);
-  }
-  public handleRespawn(playerId: string) {
-    return handleRespawnCore(this.ctx, playerId);
-  }
-  public handleCreateTribe(
-    playerId: string,
-    name: string,
-    tag: string,
-    visibility: 'public' | 'private' = 'public'
-  ) {
+  public handleOpenChest(playerId: string, chestId: number) { return handleOpenChestCore(this.ctx, playerId, chestId); }
+  public handleRespawn(playerId: string) { return handleRespawnCore(this.ctx, playerId); }
+  public handleCreateTribe(playerId: string, name: string, tag: string, visibility: 'public' | 'private' = 'public') {
     return handleCreateTribeCore(this.ctx, playerId, name, tag, visibility);
   }
-  public handleSetTribeVisibility(leaderId: string, visibility: 'public' | 'private') {
-    return handleSetTribeVisibilityCore(this.ctx, leaderId, visibility);
-  }
+  public handleSetTribeVisibility(leaderId: string, visibility: 'public' | 'private') { return handleSetTribeVisibilityCore(this.ctx, leaderId, visibility); }
   public handleSetTribeBuildPermission(leaderId: string, targetPlayerId: string, allowed: boolean) {
     return handleSetTribeBuildPermissionCore(this.ctx, leaderId, targetPlayerId, allowed);
   }
-  public handleJoinTribe(playerId: string, tribeId: string) {
-    return handleJoinTribeCore(this.ctx, playerId, tribeId);
-  }
+  public handleJoinTribe(playerId: string, tribeId: string) { return handleJoinTribeCore(this.ctx, playerId, tribeId); }
   public handleRespondTribeRequest(leaderId: string, targetPlayerId: string, accept: boolean) {
     return handleRespondTribeRequestCore(this.ctx, leaderId, targetPlayerId, accept);
   }
-  public handleLeaveTribe(playerId: string) {
-    return handleLeaveTribeCore(this.ctx, playerId);
-  }
-  public handleDisbandTribe(playerId: string) {
-    return handleDisbandTribeCore(this.ctx, playerId);
-  }
-  public handleKickTribeMember(leaderId: string, targetPlayerId: string) {
-    return handleKickTribeMemberCore(this.ctx, leaderId, targetPlayerId);
-  }
-  public handleChatMessage(playerId: string, rawText: string) {
-    return handleChatMessageCore(this.ctx, playerId, rawText);
-  }
+  public handleLeaveTribe(playerId: string) { return handleLeaveTribeCore(this.ctx, playerId); }
+  public handleDisbandTribe(playerId: string) { return handleDisbandTribeCore(this.ctx, playerId); }
+  public handleKickTribeMember(leaderId: string, targetPlayerId: string) { return handleKickTribeMemberCore(this.ctx, leaderId, targetPlayerId); }
+  public handleChatMessage(playerId: string, rawText: string) { return handleChatMessageCore(this.ctx, playerId, rawText); }
 
   public stepSimulation(fixedDtSeconds?: number): void {
     const now = Date.now();
@@ -625,7 +599,7 @@ export class WorldRoom {
     if (
       currCycle.phase !== prevPhase ||
       currCycle.dayNumber !== prevDay ||
-      now - this.lastDaySyncBroadcastAt >= 2500
+      now - this.lastDaySyncBroadcastAt >= 10000
     ) {
       this.lastDaySyncBroadcastAt = now;
       this.onBroadcastRosterEvent?.({ type: 'DAY_CYCLE_SYNC', dayCycle: currCycle });

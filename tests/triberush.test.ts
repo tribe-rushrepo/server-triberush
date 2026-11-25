@@ -623,7 +623,7 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.strictEqual(board[9].kills, 6);
   });
 
-  it('should craft Fiber->Rope, Feather+Paper->Blueprint, gate builds inside Tribe Totem 30x30->36x36 land, enforce Watchtower-only rotation, and support anti-abuse 1-Slot Blueprint Save/Load', () => {
+  it('should craft Fiber->Rope, Feather+Paper->Blueprint, gate builds inside Tribe Totem 30x30->36x36 land, enforce Watchtower-only rotation, and support anti-abuse 1-Slot Blueprint Save/Load', async () => {
     const room = new WorldRoom(20261122);
     const leader = room.joinPlayer(makeMockExplorer('king-1', 'BuilderKing')).player!;
     leader.spawnProtectedUntil = 0;
@@ -755,6 +755,7 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
       assert.strictEqual(pTotemRes.ok, true);
       assert.strictEqual(pTotemRes.totem!.sizeTiles, 20);
       assert.strictEqual(persistedRoom.handleSaveBlueprintBuild('king-persist').ok, true);
+      await persistedRoom.blueprintService.flushPendingDiskWrite();
 
       // Tribe Host disconnects + empty-world Day 1 reset runs -> saved slot MUST NOT disappear!
       persistedRoom.removePlayer('king-persist');
@@ -771,6 +772,7 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
       assert.strictEqual(rebootedRoom.blueprintService.getSlot('king-persist')?.sizeTiles, 20);
       assert.strictEqual(rebootedRoom.handleCreateTribe('king-persist', 'Persist Reborn', 'PRB').ok, true);
       assert.strictEqual(rebootedRoom.handleLoadBlueprintBuild('king-persist', 12800, 12800).ok, true);
+      await rebootedRoom.blueprintService.flushPendingDiskWrite();
 
       // Verify 20-minute Deploy Cooldown ALSO persists across disconnect + restart!
       const rebootedAfterDeploy = new WorldRoom(20261122, tmpBlueprintFile);

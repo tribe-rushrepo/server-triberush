@@ -80,8 +80,10 @@ export interface WorldRoomContext {
 
   emitRosterEvent(payload: Record<string, unknown>): void;
   emitPlayerEvent(playerId: string, payload: Record<string, unknown>): void;
+  emitPlayersEvent(playerIds: string[], payload: Record<string, unknown>): void;
   broadcastProximityEvent(x: number, y: number, payload: Record<string, unknown>): void;
   clearPlayerInventoryPersistence(ownerId: string): void;
+  clearSessionResume(playerId: string): void;
 
   getDayCycleSnapshot(): DayCycleSnapshot;
   getTribeSummaries(): TribeSummary[];

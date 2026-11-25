@@ -35,6 +35,7 @@ export const PickupOrHarvestSchema = z.object({
 export const DropHeldItemSchema = z.object({
   type: z.literal('DROP_ITEM'),
   dropAll: z.boolean().optional(),
+  count: z.number().int().min(1).max(32).optional(),
   source: z.enum(['inventory', 'chest']).optional(),
   slot: z.number().int().min(0).max(31).optional(),
   chestId: z.number().int().positive().optional()

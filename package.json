@@ -8,7 +8,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "tsx --test tests/triberush.test.ts"
+    "test": "tsx --test tests/triberush.test.ts tests/phase9.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",

@@ -174,6 +174,7 @@ export function handlePickupOrHarvestCore(
     nearestBush.hasFruit = false;
     nearestBush.fruitRegrowAt = now + CONFIG.BUSH_FRUIT_REGROW_MS;
     ctx.pendingBushRespawns.add(nearestBush);
+    ctx.world.alteredBushIds.add(nearestBush.id);
     harvestedBushId = nearestBush.id;
 
     if (leftover > 0) {
@@ -232,7 +233,8 @@ export function handleDropHeldItemCore(
   dropAll: boolean = false,
   source: 'inventory' | 'chest' = 'inventory',
   explicitSlot?: number,
-  chestId?: number
+  chestId?: number,
+  explicitCount?: number
 ): { ok: boolean; drop?: WorldGroundDrop; error?: string } {
   const player = ctx.playersById.get(playerId);
   if (!player || player.isDead) return { ok: false };
@@ -270,7 +272,14 @@ export function handleDropHeldItemCore(
   const slotItem = slotArr[targetSlot];
   if (!slotItem) return { ok: false };
 
-  const dropCount = dropAll || isNonStackableItem(slotItem.itemId) ? slotItem.count : 1;
+  let dropCount: number;
+  if (isNonStackableItem(slotItem.itemId)) {
+    dropCount = 1;
+  } else if (typeof explicitCount === 'number' && Number.isFinite(explicitCount)) {
+    dropCount = Math.max(1, Math.min(slotItem.count, Math.floor(explicitCount)));
+  } else {
+    dropCount = dropAll ? slotItem.count : 1;
+  }
   const itemId = slotItem.itemId;
   slotItem.count -= dropCount;
   if (slotItem.count <= 0) {

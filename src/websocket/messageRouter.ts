@@ -4,6 +4,7 @@ import { getClientCatalogPayload } from '../data/items/index.js';
 import { tribeRushAuthService } from '../services/AuthService.js';
 import { decodeCompactInventory, playerSaveService } from '../services/PlayerSaveService.js';
 import type { WorldRoom } from '../world/WorldRoom.js';
+import { packetRateGuard } from './packetRateGuard.js';
 import type { ClientMessage } from './schemas.js';
 
 export interface MessageRouterContext {
@@ -11,6 +12,8 @@ export interface MessageRouterContext {
   playerId: string;
   username: string;
   socket: WebSocket;
+  hasJoinedWorld: () => boolean;
+  markJoinedWorld: () => void;
   isConnectionActive: () => boolean;
   getOnlinePlayerCount: () => number;
   sendJsonToPlayer: (playerId: string, payload: Record<string, unknown>) => void;
@@ -34,6 +37,10 @@ export async function dispatchClientMessage(
 ): Promise<void> {
   const { worldRoom, playerId, username } = ctx;
 
+  if (!packetRateGuard.allowAction(playerId, msg.type)) {
+    return;
+  }
+
   switch (msg.type) {
     case 'PING': {
       ctx.sendJsonToPlayer(playerId, {
@@ -44,6 +51,9 @@ export async function dispatchClientMessage(
       return;
     }
     case 'JOIN_WORLD': {
+      if (ctx.hasJoinedWorld() && worldRoom.getPlayer(playerId)) {
+        return;
+      }
       const profile = await tribeRushAuthService.getPlayerByIdAsync(playerId, username);
       if (!profile || profile.isBanned) {
         ctx.sendJsonToPlayer(playerId, {
@@ -83,6 +93,7 @@ export async function dispatchClientMessage(
       if (!alreadyInWorld && saved?.inventory) {
         void playerSaveService.clearPlayerInventory(playerId);
       }
+      ctx.markJoinedWorld();
       const dynamicState = worldRoom.getDynamicWorldStateSnapshot();
       const nowMsJoin = Date.now();
       ctx.sendJsonToPlayer(playerId, {
@@ -170,7 +181,8 @@ export async function dispatchClientMessage(
           Boolean(msg.dropAll),
           msg.source || 'inventory',
           msg.slot,
-          msg.chestId
+          msg.chestId,
+          msg.count
         )
       );
       return;

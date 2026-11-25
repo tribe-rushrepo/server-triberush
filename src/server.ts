@@ -46,7 +46,7 @@ async function main() {
   await fastify.register(websocket, {
     options: {
       perMessageDeflate: false,
-      maxPayload: 64 * 1024
+      maxPayload: 4 * 1024
     }
   });
 
@@ -97,7 +97,10 @@ async function main() {
   });
 
   // Federated Cross-Account SSO Exchange
-  fastify.post('/api/auth/sso-exchange', async (req, reply) => {
+  fastify.post(
+    '/api/auth/sso-exchange',
+    { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
+    async (req, reply) => {
     const parsed = SsoExchangeSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: 'Invalid SSO code format.' });

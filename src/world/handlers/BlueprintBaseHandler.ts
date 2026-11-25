@@ -256,10 +256,18 @@ export function handleLoadBlueprintBuildCore(
     y: totem.y,
     radius: totem.radius
   });
-  ctx.emitRosterEvent({
-    type: 'TOTEM_PLACED',
-    totem: ctx.totemService.serializeTotem(totem)
-  });
+  const serializedTotem = ctx.totemService.serializeTotem(totem);
+  const deployedWalls: WorldPlacedWall[] = [];
+  const deployedStructures: WorldPlacedStructure[] = [];
+  const deployedChests: Array<{
+    id: number;
+    x: number;
+    y: number;
+    radius: number;
+    ownerId: string;
+    ownerTribeId: string | null;
+  }> = [];
+  const deployedTorches: WorldPlacedTorch[] = [];
 
   for (const w of consumed.walls) {
     const halfW = w.orientation === 'h' ? CONFIG.WALL_LENGTH / 2 : CONFIG.WALL_THICKNESS / 2;
@@ -287,7 +295,7 @@ export function handleLoadBlueprintBuildCore(
       halfW,
       halfH
     });
-    ctx.emitRosterEvent({ type: 'WALL_PLACED', wall });
+    deployedWalls.push(wall);
   }
 
   for (const s of consumed.structures) {
@@ -316,7 +324,7 @@ export function handleLoadBlueprintBuildCore(
     };
     ctx.placedStructures.set(structure.id, structure);
     ctx.registerStructureColliders(structure);
-    ctx.emitRosterEvent({ type: 'STRUCTURE_PLACED', structure });
+    deployedStructures.push(structure);
   }
 
   for (const c of consumed.chests) {
@@ -361,16 +369,13 @@ export function handleLoadBlueprintBuildCore(
       y: chest.y,
       radius: chest.radius
     });
-    ctx.emitRosterEvent({
-      type: 'CHEST_PLACED',
-      chest: {
-        id: chest.id,
-        x: chest.x,
-        y: chest.y,
-        radius: chest.radius,
-        ownerId: chest.ownerId,
-        ownerTribeId: chest.ownerTribeId
-      }
+    deployedChests.push({
+      id: chest.id,
+      x: chest.x,
+      y: chest.y,
+      radius: chest.radius,
+      ownerId: chest.ownerId,
+      ownerTribeId: chest.ownerTribeId
     });
   }
 
@@ -384,8 +389,18 @@ export function handleLoadBlueprintBuildCore(
       createdAt: now
     };
     ctx.placedTorches.set(torch.id, torch);
-    ctx.emitRosterEvent({ type: 'TORCH_PLACED', torch });
+    deployedTorches.push(torch);
   }
+
+  // Single batched deploy broadcast instead of 80+ individual global frames!
+  ctx.emitRosterEvent({
+    type: 'BLUEPRINT_BASE_DEPLOYED',
+    totem: serializedTotem,
+    walls: deployedWalls,
+    structures: deployedStructures,
+    chests: deployedChests,
+    torches: deployedTorches
+  });
 
   ctx.syncPlayerInventory(player);
   ctx.emitPlayerEvent(player.id, {

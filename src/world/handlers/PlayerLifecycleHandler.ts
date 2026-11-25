@@ -15,6 +15,7 @@ import {
 } from './SnapshotHandler.js';
 import { checkPlayerShelterCore } from './TotemHutHandler.js';
 import type { WorldRoomContext } from './roomContext.js';
+import type { SessionResumeCache } from './sessionResumeCache.js';
 
 export interface LifecycleHooks {
   allocateShortId: () => number;
@@ -22,7 +23,10 @@ export interface LifecycleHooks {
   setEmptySince: (ts: number | null) => void;
   resetWorldToDayOne: () => void;
   persistPlayerInventory: (ownerId: string, compact: CompactInventorySave | null) => void;
+  sessionResumeCache: SessionResumeCache;
 }
+
+const activePlayersScratch: ActiveWorldPlayer[] = [];
 
 export function joinPlayerCore(
   ctx: WorldRoomContext,
@@ -56,6 +60,9 @@ export function joinPlayerCore(
   }
   hooks.setEmptySince(null);
 
+  const now = Date.now();
+  const resumed = hooks.sessionResumeCache.consume(profile.id, now);
+
   const shortId = hooks.allocateShortId();
   const colorIndex =
     typeof preferredColorIndex === 'number' &&
@@ -64,10 +71,11 @@ export function joinPlayerCore(
       ? preferredColorIndex
       : (shortId - 1) % MARBLE_PALETTE_ORDER.length;
   const color = MARBLE_PALETTE_ORDER[colorIndex];
-  const spawn = ctx.world.getRandomSafeSpawnPosition(
-    Array.from(ctx.playersById.values()),
-    null
-  );
+
+  const spawn = resumed
+    ? ctx.world.resolvePlayerPosition(resumed.x, resumed.y, CONFIG.PLAYER_RADIUS)
+    : ctx.world.getRandomSafeSpawnPosition(Array.from(ctx.playersById.values()), null);
+
   const title =
     profile.earnedTitle?.toUpperCase() === 'AEON'
       ? 'AEON'
@@ -81,7 +89,6 @@ export function joinPlayerCore(
               ? 'Expert'
               : null;
 
-  const now = Date.now();
   const player: ActiveWorldPlayer = {
     id: profile.id,
     shortId,
@@ -103,7 +110,7 @@ export function joinPlayerCore(
     isExhausted: false,
     lastSprintAt: 0,
     angle: 0,
-    activeSlot: 0,
+    activeSlot: resumed ? Math.max(0, Math.min(7, resumed.activeSlot)) : 0,
     unlockedSlots: restoredInventory
       ? restoredInventory.unlockedSlots
       : CONFIG.INVENTORY_UNLOCKED_SLOTS,
@@ -114,18 +121,22 @@ export function joinPlayerCore(
           return slot ? { itemId: slot.itemId, count: slot.count } : null;
         })
       : Array(CONFIG.INVENTORY_TOTAL_SLOTS).fill(null),
-    hp: CONFIG.PLAYER_MAX_HP,
+    hp: resumed ? Math.max(1, Math.min(CONFIG.PLAYER_MAX_HP, resumed.hp)) : CONFIG.PLAYER_MAX_HP,
     maxHp: CONFIG.PLAYER_MAX_HP,
-    stamina: CONFIG.PLAYER_MAX_STAMINA,
+    stamina: resumed
+      ? Math.max(0, Math.min(CONFIG.PLAYER_MAX_STAMINA, resumed.stamina))
+      : CONFIG.PLAYER_MAX_STAMINA,
     maxStamina: CONFIG.PLAYER_MAX_STAMINA,
-    hunger: CONFIG.PLAYER_MAX_HUNGER,
+    hunger: resumed
+      ? Math.max(0, Math.min(CONFIG.PLAYER_MAX_HUNGER, resumed.hunger))
+      : CONFIG.PLAYER_MAX_HUNGER,
     maxHunger: CONFIG.PLAYER_MAX_HUNGER,
     lastStarveTickAt: now,
     lastHearthHealAt: now,
     lastDamagedAt: 0,
-    spawnProtectedUntil: now + CONFIG.SPAWN_PROTECTION_MS,
+    spawnProtectedUntil: resumed ? resumed.spawnProtectedUntil : now + CONFIG.SPAWN_PROTECTION_MS,
     combatUntil: 0,
-    homeHutId: null,
+    homeHutId: resumed ? resumed.homeHutId : null,
     score: 0,
     animalKills: 0,
     pvpKills: 0,
@@ -145,6 +156,16 @@ export function joinPlayerCore(
 
   ctx.playersById.set(player.id, player);
   ctx.playersByShortId.set(player.shortId, player);
+
+  let tribeRestored = false;
+  if (resumed?.tribeId) {
+    tribeRestored = ctx.tribeManager.rejoinTribeById(
+      player,
+      resumed.tribeId,
+      resumed.hadBuildPermission
+    );
+  }
+
   ctx.emitRosterEvent({
     type: 'PLAYER_JOINED',
     player: {
@@ -161,6 +182,9 @@ export function joinPlayerCore(
     },
     onlinePlayers: ctx.playersById.size
   });
+  if (tribeRestored) {
+    ctx.broadcastTribeSync();
+  }
   return { ok: true, player };
 }
 
@@ -172,14 +196,23 @@ export function removePlayerCore(
   const existing = ctx.playersById.get(playerId);
   if (!existing) return;
 
-  const wasInCombat = !existing.isDead && Date.now() < existing.combatUntil;
+  const now = Date.now();
+  const wasInCombat = !existing.isDead && now < existing.combatUntil;
+  const prevTribeId = existing.tribeId;
+  const wasTribeLeader = prevTribeId
+    ? ctx.tribeManager.isTribeLeader(existing.id, prevTribeId)
+    : false;
+  const hadBuildPermission = prevTribeId ? ctx.tribeManager.hasBuildPermission(existing) : false;
+
   if (wasInCombat) {
     ctx.combatService.spillAllInventoryLoot(existing, {
       onSpawnDrop: (itemId, count, ox, oy) => ctx.spawnGroundDrop(itemId, count, ox, oy)
     });
     ctx.clearPlayerInventoryPersistence(existing.id);
+    hooks.sessionResumeCache.delete(existing.id);
   } else if (existing.isDead) {
     ctx.clearPlayerInventoryPersistence(existing.id);
+    hooks.sessionResumeCache.delete(existing.id);
   } else {
     const compact = encodeCompactInventory(
       existing.inventory,
@@ -187,6 +220,13 @@ export function removePlayerCore(
       existing.hasBackpack
     );
     hooks.persistPlayerInventory(existing.id, compact);
+    hooks.sessionResumeCache.save(
+      existing,
+      prevTribeId,
+      wasTribeLeader,
+      hadBuildPermission,
+      now
+    );
   }
 
   const clearedPending = ctx.tribeManager.clearPendingRequestsForPlayer(existing.id);
@@ -202,7 +242,7 @@ export function removePlayerCore(
 
   ctx.playersById.delete(playerId);
   ctx.playersByShortId.delete(existing.shortId);
-  if (ctx.playersById.size === 0) hooks.setEmptySince(Date.now());
+  if (ctx.playersById.size === 0) hooks.setEmptySince(now);
 
   ctx.emitRosterEvent({
     type: 'PLAYER_LEFT',
@@ -224,10 +264,12 @@ export function stepPlayersAndWorldCore(
   }
 
   ctx.spatialGrid.clear();
+  activePlayersScratch.length = 0;
   const kbDecay = Math.exp(-CONFIG.KNOCKBACK_DAMPING * dt);
   const shelterFn = (px: number, py: number) => checkPlayerShelterCore(ctx, px, py);
 
   for (const p of ctx.playersById.values()) {
+    activePlayersScratch.push(p);
     const surv = ctx.survivalService.stepPlayerSurvival(p, dt, now, shelterFn);
     if (surv.damageEvent) {
       ctx.combatService.applyEnvironmentalDamage(
@@ -241,7 +283,10 @@ export function stepPlayersAndWorldCore(
           onBroadcastGlobalEvent: (payload) => ctx.emitRosterEvent(payload),
           onSendPlayerEvent: (pid, payload) => ctx.emitPlayerEvent(pid, payload),
           onSyncInventory: (v) => ctx.syncPlayerInventory(v),
-          onPlayerDied: (victim) => ctx.clearPlayerInventoryPersistence(victim.id)
+          onPlayerDied: (victim) => {
+            ctx.clearPlayerInventoryPersistence(victim.id);
+            ctx.clearSessionResume(victim.id);
+          }
         }
       );
     } else if (surv.vitalsChanged && serverTick % 8 === 0) {
@@ -284,7 +329,10 @@ export function stepPlayersAndWorldCore(
     ctx.spatialGrid.insert(p);
   }
 
-  ctx.animalService.step(dt, now, Array.from(ctx.playersById.values()));
+  // Step wildlife AI at 10Hz (matching the 10Hz binary animal snapshot cadence)
+  if (serverTick % 2 === 0) {
+    ctx.animalService.step(dt * 2, now, activePlayersScratch);
+  }
 
   if (serverTick % 20 === 0 && hasPlayerEventCb) {
     broadcastWatchtowerRadars(ctx);

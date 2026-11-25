@@ -53,6 +53,7 @@ export class AnimalService {
 
   private readonly gridCols: number;
   private readonly buckets: Map<number, WorldAnimalEntity[]> = new Map();
+  private readonly lastCellByAnimalId: Map<number, number> = new Map();
   private nextAnimalId = 1;
 
   constructor(private readonly world: SeededWorld) {
@@ -64,6 +65,7 @@ export class AnimalService {
     this.animals.length = 0;
     this.animalsById.clear();
     this.buckets.clear();
+    this.lastCellByAnimalId.clear();
     this.nextAnimalId = 1;
     this.spawnInitialWildlife();
   }
@@ -74,12 +76,14 @@ export class AnimalService {
 
   private rebuildSpatialGrid(): void {
     this.buckets.clear();
+    this.lastCellByAnimalId.clear();
     for (let i = 0; i < this.animals.length; i++) {
       const a = this.animals[i];
       if (a.isDead) continue;
       const cx = Math.max(0, Math.min(this.gridCols - 1, Math.floor(a.x / ANIMAL_GRID_CELL)));
       const cy = Math.max(0, Math.min(this.gridCols - 1, Math.floor(a.y / ANIMAL_GRID_CELL)));
       const key = this.bucketKey(cx, cy);
+      this.lastCellByAnimalId.set(a.id, key);
       let list = this.buckets.get(key);
       if (!list) {
         list = [];
@@ -286,6 +290,7 @@ export class AnimalService {
   ): void {
     const wakeSq = ANIMAL_WAKE_RADIUS * ANIMAL_WAKE_RADIUS;
     const kbDecay = Math.exp(-CONFIG.KNOCKBACK_DAMPING * dt);
+    let anyMoved = false;
 
     for (let i = 0; i < this.animals.length; i++) {
       const a = this.animals[i];
@@ -293,6 +298,7 @@ export class AnimalService {
       if (a.isDead) {
         if (a.respawnAt !== null && now >= a.respawnAt) {
           this.respawnAnimal(a, now);
+          anyMoved = true;
         }
         continue;
       }
@@ -377,6 +383,7 @@ export class AnimalService {
           ) {
             a.x = candX;
             a.y = candY;
+            anyMoved = true;
           } else {
             const toCenterAngle = Math.atan2(a.homeY - a.y, a.homeX - a.x);
             const deflected = toCenterAngle + (Math.random() - 0.5) * 1.1;
@@ -393,8 +400,10 @@ export class AnimalService {
           let hitsWater = false;
           for (let li = 0; li < this.world.lakes.length; li++) {
             const lk = this.world.lakes[li];
-            const dSq = (resolved.x - lk.x) ** 2 + (resolved.y - lk.y) ** 2;
-            if (dSq < lk.outerRadius * lk.outerRadius) {
+            const dxL = resolved.x - lk.x;
+            const dyL = resolved.y - lk.y;
+            if (Math.abs(dxL) >= lk.outerRadius || Math.abs(dyL) >= lk.outerRadius) continue;
+            if (dxL * dxL + dyL * dyL < lk.outerRadius * lk.outerRadius) {
               if (this.world.isPointInsideWaterBody(resolved.x, resolved.y, 'lake', lk.id, 0.96)) {
                 hitsWater = true;
                 break;
@@ -404,8 +413,10 @@ export class AnimalService {
           if (!hitsWater) {
             for (let pi = 0; pi < this.world.ponds.length; pi++) {
               const pd = this.world.ponds[pi];
-              const dSq = (resolved.x - pd.x) ** 2 + (resolved.y - pd.y) ** 2;
-              if (dSq < pd.radius * pd.radius) {
+              const dxP = resolved.x - pd.x;
+              const dyP = resolved.y - pd.y;
+              if (Math.abs(dxP) >= pd.radius || Math.abs(dyP) >= pd.radius) continue;
+              if (dxP * dxP + dyP * dyP < pd.radius * pd.radius) {
                 if (this.world.isPointInsideWaterBody(resolved.x, resolved.y, 'pond', pd.id, 0.96)) {
                   hitsWater = true;
                   break;
@@ -417,6 +428,7 @@ export class AnimalService {
           if (!hitsWater) {
             a.x = resolved.x;
             a.y = resolved.y;
+            anyMoved = true;
           }
 
           if (blocked || hitsWater) {
@@ -436,7 +448,28 @@ export class AnimalService {
       }
     }
 
-    this.rebuildSpatialGrid();
+    let gridDirty = false;
+    for (let i = 0; i < this.animals.length; i++) {
+      const a = this.animals[i];
+      if (a.isDead) {
+        if (this.lastCellByAnimalId.has(a.id)) {
+          gridDirty = true;
+          break;
+        }
+        continue;
+      }
+      const cx = Math.max(0, Math.min(this.gridCols - 1, Math.floor(a.x / ANIMAL_GRID_CELL)));
+      const cy = Math.max(0, Math.min(this.gridCols - 1, Math.floor(a.y / ANIMAL_GRID_CELL)));
+      if (this.lastCellByAnimalId.get(a.id) !== this.bucketKey(cx, cy)) {
+        gridDirty = true;
+        break;
+      }
+    }
+    if (gridDirty || anyMoved) {
+      if (gridDirty) {
+        this.rebuildSpatialGrid();
+      }
+    }
   }
 
   private pickNextWanderTarget(a: WorldAnimalEntity, now: number): void {
