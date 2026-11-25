@@ -57,7 +57,6 @@ export const CONFIG = {
   PLAYER_MAX_HP: 100,
   PLAYER_MAX_STAMINA: 100,
   PLAYER_MAX_HUNGER: 100,
-  PLAYER_MAX_WARMTH: 100,
   PLAYER_WALK_SPEED: 215, // Grounded walking pace
   PLAYER_SPRINT_SPEED: 335, // Hold Shift + WASD sprint speed
   PLAYER_MAX_SPEED: 335,
@@ -66,19 +65,11 @@ export const CONFIG = {
   STAMINA_REGEN_DELAY_MS: 800,
   STAMINA_MIN_TO_START_SPRINT: 18,
 
-  // Survival Vitals: Hunger & Nighttime Cold / Warmth
-  HUNGER_DRAIN_WALK_PER_SEC: 0.25,
-  HUNGER_DRAIN_SPRINT_PER_SEC: 0.45,
+  // Survival Vitals: Balanced Hunger & Starvation (Warmth/Cold removed in Phase 7)
+  HUNGER_DRAIN_WALK_PER_SEC: 0.085,
+  HUNGER_DRAIN_SPRINT_PER_SEC: 0.16,
   STARVATION_TICK_MS: 3000,
   STARVATION_DMG: 2,
-  WARMTH_REGEN_DAY_PER_SEC: 12,
-  WARMTH_REGEN_TORCH_PER_SEC: 10,
-  WARMTH_DRAIN_SUNSET_PER_SEC: 1.2,
-  WARMTH_DRAIN_NIGHT_PER_SEC: 3.2,
-  TORCH_WARMTH_RADIUS: 340,
-  FREEZING_TICK_MS: 2500,
-  FREEZING_DMG: 2,
-  FREEZING_SPEED_MULT: 0.85,
 
   // Combat, Spawn Protection & Respawn Constants
   SPAWN_PROTECTION_MS: 10000,
@@ -92,11 +83,11 @@ export const CONFIG = {
   // Tribe System Constants
   MAX_TRIBE_MEMBERS: 30,
 
-  // Phase 5: Building Grid, Pure-Wood Kingdom Walls, Totems, Multi-Tile Structures & Blueprints
+  // Phase 5+: Building Grid, Pure-Wood Kingdom Walls, Totems, Multi-Tile Structures & Blueprints
   BUILD_GRID_SIZE: 64,
   WALL_LENGTH: 128,
   WALL_THICKNESS: 16,
-  WALL_MAX_HP: 180,
+  WALL_MAX_HP: 2500,
   MAX_WALLS_PER_PLAYER: 120,
   MAX_WORLD_WALLS: 2400,
 
@@ -111,7 +102,6 @@ export const CONFIG = {
   CHICKEN_FEATHER_DROP_CHANCE: 0.45,
 
   HUT_MAX_HP: 450,
-  HUT_WARMTH_REGEN_PER_SEC: 15,
   MAX_HUTS_PER_PLAYER: 2,
   MAX_WORLD_HUTS: 60,
 
@@ -123,8 +113,7 @@ export const CONFIG = {
 
   CAMPFIRE_MAX_HP: 220,
   CAMPFIRE_LIGHT_RADIUS: 540,
-  CAMPFIRE_WARMTH_RADIUS: 460,
-  CAMPFIRE_WARMTH_REGEN_PER_SEC: 18,
+  CAMPFIRE_HEAL_RADIUS: 460,
   CAMPFIRE_HEAL_PER_SEC: 1,
   MAX_CAMPFIRES_PER_PLAYER: 6,
   MAX_WORLD_CAMPFIRES: 150,

@@ -96,6 +96,45 @@ export const LoadBlueprintBuildSchema = z.object({
   targetY: z.number()
 });
 
+export const BlueprintPlaceBuildSchema = z.object({
+  type: z.literal('BLUEPRINT_PLACE_BUILD'),
+  itemId: z.enum([
+    'tribe_totem',
+    'wooden_wall',
+    'campfire',
+    'wooden_chest',
+    'torch',
+    'hut',
+    'watchtower'
+  ]),
+  targetX: z.number(),
+  targetY: z.number(),
+  orientation: z.enum(['h', 'v']).optional(),
+  rotationQuarter: z.number().int().min(0).max(3).optional()
+});
+
+export const BlueprintRemoveEntitySchema = z.object({
+  type: z.literal('BLUEPRINT_REMOVE_ENTITY'),
+  targetKind: z.enum(['wall', 'structure', 'chest', 'torch', 'totem']),
+  targetId: z.number().int().positive()
+});
+
+export const BlueprintRotateEntitySchema = z.object({
+  type: z.literal('BLUEPRINT_ROTATE_ENTITY'),
+  targetKind: z.enum(['wall', 'structure']),
+  targetId: z.number().int().positive()
+});
+
+export const BlueprintMoveEntitySchema = z.object({
+  type: z.literal('BLUEPRINT_MOVE_ENTITY'),
+  targetKind: z.enum(['wall', 'structure', 'chest', 'torch', 'totem']),
+  targetId: z.number().int().positive(),
+  targetX: z.number(),
+  targetY: z.number(),
+  orientation: z.enum(['h', 'v']).optional(),
+  rotationQuarter: z.number().int().min(0).max(3).optional()
+});
+
 export const EquipItemSchema = z.object({
   type: z.literal('EQUIP_ITEM'),
   slot: z.number().int().min(0).max(7).optional()
@@ -113,7 +152,19 @@ export const RespawnSchema = z.object({
 export const CreateTribeSchema = z.object({
   type: z.literal('TRIBE_CREATE'),
   name: z.string().trim().min(2).max(20),
-  tag: z.string().trim().min(2).max(4)
+  tag: z.string().trim().min(2).max(4),
+  visibility: z.enum(['public', 'private']).optional()
+});
+
+export const SetTribeVisibilitySchema = z.object({
+  type: z.literal('TRIBE_SET_VISIBILITY'),
+  visibility: z.enum(['public', 'private'])
+});
+
+export const RespondTribeRequestSchema = z.object({
+  type: z.literal('TRIBE_RESPOND_REQUEST'),
+  targetPlayerId: z.string().trim().min(1).max(128),
+  accept: z.boolean()
 });
 
 export const JoinTribeSchema = z.object({
@@ -159,10 +210,16 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SetHutHomeSchema,
   SaveBlueprintBuildSchema,
   LoadBlueprintBuildSchema,
+  BlueprintPlaceBuildSchema,
+  BlueprintRemoveEntitySchema,
+  BlueprintRotateEntitySchema,
+  BlueprintMoveEntitySchema,
   EquipItemSchema,
   OpenChestSchema,
   RespawnSchema,
   CreateTribeSchema,
+  SetTribeVisibilitySchema,
+  RespondTribeRequestSchema,
   JoinTribeSchema,
   LeaveTribeSchema,
   DisbandTribeSchema,

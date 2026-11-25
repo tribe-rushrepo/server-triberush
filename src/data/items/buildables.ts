@@ -31,15 +31,13 @@ export const BUILDABLE_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     iconKey: 'torch',
     handStyle: 'held_item',
     lightRadius: 390,
-    providesWarmth: true,
     placeable: {
       kind: 'torch',
       maxDistance: 145,
       tilesW: 1,
       tilesH: 1,
       requiresTotem: true,
-      lightRadius: 360,
-      warmthRadius: 340
+      lightRadius: 360
     },
     recipe: {
       costs: [
@@ -62,7 +60,7 @@ export const BUILDABLE_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
       maxDistance: 175,
       length: 128,
       thickness: 16,
-      maxHp: 180,
+      maxHp: 2500,
       requiresTotem: true
     },
     recipe: {
@@ -110,8 +108,7 @@ export const BUILDABLE_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
       tilesH: 3,
       rotatable: false,
       maxHp: 450,
-      requiresTotem: true,
-      warmthRadius: 96
+      requiresTotem: true
     },
     recipe: {
       costs: [
@@ -164,8 +161,7 @@ export const BUILDABLE_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
       rotatable: false,
       maxHp: 220,
       requiresTotem: true,
-      lightRadius: 540,
-      warmthRadius: 460
+      lightRadius: 540
     },
     recipe: {
       costs: [

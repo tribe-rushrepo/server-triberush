@@ -13,7 +13,7 @@ export const TOOL_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     combat: {
       cooldownMs: 540, // Balanced Tier-1 wood-chopping swing
       durationMs: 380,
-      reach: 72,
+      reach: 104, // Matches full tall drawn Wooden Axe shaft & head
       treeDmg: 22,
       bushDmg: 18,
       rockDmg: 0, // Axe is for wood only
@@ -38,7 +38,7 @@ export const TOOL_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     combat: {
       cooldownMs: 560, // Balanced Tier-1 mining swing
       durationMs: 390,
-      reach: 72,
+      reach: 104, // Matches full tall drawn Wooden Pickaxe shaft & head
       treeDmg: 0, // Pickaxe is for stone & coal only
       bushDmg: 0,
       rockDmg: 19,

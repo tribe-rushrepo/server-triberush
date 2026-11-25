@@ -11,6 +11,7 @@ import {
   MARBLE_PALETTE_ORDER,
   type ActiveWorldPlayer,
   type AnimalKind,
+  type BlueprintTargetKind,
   type BushKind,
   type DayCycleSnapshot,
   type DayPhaseName,
@@ -96,12 +97,10 @@ export class WorldRoom {
   public readonly placedTotems: Map<number, WorldPlacedTotem> = new Map();
   public readonly placedStructures: Map<number, WorldPlacedStructure> = new Map();
 
-  // S2 & S3 Optimization: O(destroyed) pending respawn sets & O(1) spatial torch buckets
+  // S2 & S3 Optimization: O(destroyed) pending respawn sets
   private readonly pendingTreeRespawns: Set<WorldTreeNode> = new Set();
   private readonly pendingRockRespawns: Set<WorldRockNode> = new Set();
   private readonly pendingBushRespawns: Set<WorldBushNode> = new Set();
-  private readonly torchBuckets: Map<number, WorldPlacedTorch[]> = new Map();
-  private readonly torchGridCols = Math.ceil(CONFIG.WORLD_SIZE / 512);
 
   private nextShortId = 1;
   private nextDropId = 1;
@@ -260,7 +259,6 @@ export class WorldRoom {
     this.pendingTreeRespawns.clear();
     this.pendingRockRespawns.clear();
     this.pendingBushRespawns.clear();
-    this.torchBuckets.clear();
     this.tribeManager.clear();
     // NOTE: Account-bound saved Blueprint slots in BlueprintService intentionally persist across empty-world resets & disconnects!
     const nextSeed = typeof explicitSeed === 'number' ? explicitSeed : rollRandomWorldSeed();
@@ -284,10 +282,10 @@ export class WorldRoom {
     }));
   }
 
-  private checkPlayerShelterHeat(x: number, y: number): { nearCampfire: boolean; insideHut: boolean } {
+  private checkPlayerShelter(x: number, y: number): { nearCampfire: boolean; insideHut: boolean } {
     let nearCampfire = false;
     let insideHut = false;
-    const cfRadSq = CONFIG.CAMPFIRE_WARMTH_RADIUS * CONFIG.CAMPFIRE_WARMTH_RADIUS;
+    const cfRadSq = CONFIG.CAMPFIRE_HEAL_RADIUS * CONFIG.CAMPFIRE_HEAL_RADIUS;
     const hutRadSq = 92 * 92;
     for (const s of this.placedStructures.values()) {
       const dx = s.x - x;
@@ -303,67 +301,20 @@ export class WorldRoom {
     return { nearCampfire, insideHut };
   }
 
-  private insertTorchSpatial(torch: WorldPlacedTorch): void {
-    const r = CONFIG.TORCH_WARMTH_RADIUS;
-    const minCx = Math.max(0, Math.floor((torch.x - r) / 512));
-    const maxCx = Math.min(this.torchGridCols - 1, Math.floor((torch.x + r) / 512));
-    const minCy = Math.max(0, Math.floor((torch.y - r) / 512));
-    const maxCy = Math.min(this.torchGridCols - 1, Math.floor((torch.y + r) / 512));
-    for (let cy = minCy; cy <= maxCy; cy++) {
-      for (let cx = minCx; cx <= maxCx; cx++) {
-        const key = cy * this.torchGridCols + cx;
-        let list = this.torchBuckets.get(key);
-        if (!list) {
-          list = [];
-          this.torchBuckets.set(key, list);
-        }
-        list.push(torch);
-      }
-    }
-  }
-
-  private removeTorchSpatial(torch: WorldPlacedTorch): void {
-    const r = CONFIG.TORCH_WARMTH_RADIUS;
-    const minCx = Math.max(0, Math.floor((torch.x - r) / 512));
-    const maxCx = Math.min(this.torchGridCols - 1, Math.floor((torch.x + r) / 512));
-    const minCy = Math.max(0, Math.floor((torch.y - r) / 512));
-    const maxCy = Math.min(this.torchGridCols - 1, Math.floor((torch.y + r) / 512));
-    for (let cy = minCy; cy <= maxCy; cy++) {
-      for (let cx = minCx; cx <= maxCx; cx++) {
-        const list = this.torchBuckets.get(cy * this.torchGridCols + cx);
-        if (!list) continue;
-        for (let i = list.length - 1; i >= 0; i--) {
-          if (list[i].id === torch.id) list.splice(i, 1);
-        }
-      }
-    }
-  }
-
-  private hasNearbyPlacedTorch(x: number, y: number, radius: number): boolean {
-    const cx = Math.max(0, Math.min(this.torchGridCols - 1, Math.floor(x / 512)));
-    const cy = Math.max(0, Math.min(this.torchGridCols - 1, Math.floor(y / 512)));
-    const list = this.torchBuckets.get(cy * this.torchGridCols + cx);
-    if (!list) return false;
-    const rSq = radius * radius;
-    for (let i = 0; i < list.length; i++) {
-      const t = list[i];
-      const dx = t.x - x;
-      const dy = t.y - y;
-      if (dx * dx + dy * dy <= rSq) return true;
-    }
-    return false;
-  }
-
   public getDynamicWorldStateSnapshot() {
     const damagedOrDestroyedTrees: Array<{
       id: number;
+      x?: number;
+      y?: number;
       hp: number;
       destroyed: boolean;
     }> = [];
     for (const t of this.world.trees) {
-      if (t.destroyedAt !== null || t.hp < t.maxHp) {
+      const relocated = this.world.relocatedTreeIds.has(t.id);
+      if (t.destroyedAt !== null || t.hp < t.maxHp || relocated) {
         damagedOrDestroyedTrees.push({
           id: t.id,
+          ...(relocated ? { x: t.x, y: t.y } : {}),
           hp: t.hp,
           destroyed: t.destroyedAt !== null
         });
@@ -372,13 +323,17 @@ export class WorldRoom {
 
     const damagedOrDestroyedRocks: Array<{
       id: number;
+      x?: number;
+      y?: number;
       hp: number;
       destroyed: boolean;
     }> = [];
     for (const r of this.world.rocks) {
-      if (r.destroyedAt !== null || r.hp < r.maxHp) {
+      const relocated = this.world.relocatedRockIds.has(r.id);
+      if (r.destroyedAt !== null || r.hp < r.maxHp || relocated) {
         damagedOrDestroyedRocks.push({
           id: r.id,
+          ...(relocated ? { x: r.x, y: r.y } : {}),
           hp: r.hp,
           destroyed: r.destroyedAt !== null
         });
@@ -387,14 +342,18 @@ export class WorldRoom {
 
     const alteredBushes: Array<{
       id: number;
+      x?: number;
+      y?: number;
       hp: number;
       hasFruit: boolean;
       destroyed: boolean;
     }> = [];
     for (const b of this.world.bushes) {
-      if (b.destroyedAt !== null || b.hp < b.maxHp || b.hasFruit !== b.spawnsFruit) {
+      const relocated = this.world.relocatedBushIds.has(b.id);
+      if (b.destroyedAt !== null || b.hp < b.maxHp || b.hasFruit !== b.spawnsFruit || relocated) {
         alteredBushes.push({
           id: b.id,
+          ...(relocated ? { x: b.x, y: b.y } : {}),
           hp: b.hp,
           hasFruit: b.hasFruit,
           destroyed: b.destroyedAt !== null
@@ -579,10 +538,7 @@ export class WorldRoom {
       maxStamina: CONFIG.PLAYER_MAX_STAMINA,
       hunger: CONFIG.PLAYER_MAX_HUNGER,
       maxHunger: CONFIG.PLAYER_MAX_HUNGER,
-      warmth: CONFIG.PLAYER_MAX_WARMTH,
-      maxWarmth: CONFIG.PLAYER_MAX_WARMTH,
       lastStarveTickAt: now,
-      lastFreezeTickAt: now,
       lastHearthHealAt: now,
       lastDamagedAt: 0,
       spawnProtectedUntil: now + CONFIG.SPAWN_PROTECTION_MS,
@@ -651,11 +607,14 @@ export class WorldRoom {
       this.onPersistPlayerInventory?.(existing.id, compact);
     }
 
+    const clearedPending = this.tribeManager.clearPendingRequestsForPlayer(existing.id);
     if (existing.tribeId) {
       const leaveRes = this.tribeManager.leaveTribe(existing, this.playersById);
       if (leaveRes.disbandedTribeId) {
         this.removeTotemForTribe(leaveRes.disbandedTribeId);
       }
+      this.broadcastTribeSync();
+    } else if (clearedPending) {
       this.broadcastTribeSync();
     }
 
@@ -814,8 +773,6 @@ export class WorldRoom {
       maxStamina: player.maxStamina,
       hunger: Math.round(player.hunger),
       maxHunger: player.maxHunger,
-      warmth: Math.round(player.warmth),
-      maxWarmth: player.maxWarmth,
       tribeId: player.tribeId,
       tribeTag: player.tribeTag,
       spawnProtectionRemainingMs: Math.max(0, player.spawnProtectedUntil - now),
@@ -834,8 +791,6 @@ export class WorldRoom {
       maxStamina: player.maxStamina,
       hunger: Math.round(player.hunger),
       maxHunger: player.maxHunger,
-      warmth: Math.round(player.warmth),
-      maxWarmth: player.maxWarmth,
       spawnProtectionRemainingMs: Math.max(0, player.spawnProtectedUntil - now),
       combatRemainingMs: Math.max(0, player.combatUntil - now)
     });
@@ -1198,8 +1153,11 @@ export class WorldRoom {
               : 10;
 
     let hitStructureEntity = false;
-    // 5a. Walls (circle-to-AABB nearest point check inside forward strike cone)
+    // 5a. Walls (Outsiders ONLY: owner and same-Tribe allies deal 0 damage!)
     for (const wall of this.placedWalls.values()) {
+      if (wall.ownerId === player.id || (player.tribeId && wall.tribeId === player.tribeId)) {
+        continue;
+      }
       const halfW = wall.orientation === 'h' ? wall.length / 2 : wall.thickness / 2;
       const halfH = wall.orientation === 'h' ? wall.thickness / 2 : wall.length / 2;
       const clampedX = Math.max(wall.x - halfW, Math.min(player.x, wall.x + halfW));
@@ -1235,9 +1193,12 @@ export class WorldRoom {
       break;
     }
 
-    // 5b. Multi-tile Structures (Hut, Watchtower, Campfire)
+    // 5b. Multi-tile Structures (Hut, Watchtower, Campfire — Outsiders ONLY!)
     if (!hitStructureEntity) {
       for (const s of this.placedStructures.values()) {
+        if (s.ownerId === player.id || (player.tribeId && s.tribeId === player.tribeId)) {
+          continue;
+        }
         const halfSpan = (Math.max(s.tilesW, s.tilesH) * CONFIG.BUILD_GRID_SIZE) / 2;
         const dx = s.x - player.x;
         const dy = s.y - player.y;
@@ -1279,10 +1240,12 @@ export class WorldRoom {
       }
     }
 
-    // 5c. Tribe Totems (600 HP — Friendly Fire disabled so Tribe members never accidentally damage their own Totem!)
+    // 5c. Tribe Totems (Outsiders ONLY: owner & Tribe allies deal 0 damage!)
     if (!hitStructureEntity) {
       for (const totem of this.placedTotems.values()) {
-        if (player.tribeId && totem.tribeId === player.tribeId) continue;
+        if (totem.ownerId === player.id || (player.tribeId && totem.tribeId === player.tribeId)) {
+          continue;
+        }
         const dx = totem.x - player.x;
         const dy = totem.y - player.y;
         const dist = Math.hypot(dx, dy);
@@ -1605,6 +1568,12 @@ export class WorldRoom {
     if (!itemDef || !itemDef.recipe) {
       return { ok: false, error: 'Unknown crafting recipe.' };
     }
+    if (itemDef.placeable) {
+      return {
+        ok: false,
+        error: 'Craft a Base Blueprint and hold it to build structures.'
+      };
+    }
     const recipe = itemDef.recipe;
 
     for (const cost of recipe.costs) {
@@ -1835,7 +1804,61 @@ export class WorldRoom {
     }
 
     if (!itemDef.placeable) return { ok: false };
+
+    return this.placeBuildableCore(
+      player,
+      itemDef,
+      targetX,
+      targetY,
+      orientation,
+      rotationQuarter,
+      () => {
+        slotItem.count -= 1;
+        if (slotItem.count <= 0) {
+          player.inventory[player.activeSlot] = null;
+        }
+      }
+    );
+  }
+
+  private canTribeManageEntity(
+    player: ActiveWorldPlayer,
+    ownerId: string,
+    tribeId: string | null | undefined
+  ): boolean {
+    if (ownerId === player.id) return true;
+    return Boolean(player.tribeId && tribeId && player.tribeId === tribeId);
+  }
+
+  private placeBuildableCore(
+    player: ActiveWorldPlayer,
+    itemDef: NonNullable<ReturnType<typeof getItemDef>>,
+    targetX: number | undefined,
+    targetY: number | undefined,
+    orientation: WallOrientation | undefined,
+    rotationQuarter: RotationQuarter | undefined,
+    onConsumeCost: () => void
+  ): {
+    ok: boolean;
+    action?:
+      | 'healed'
+      | 'chest_placed'
+      | 'torch_placed'
+      | 'wall_placed'
+      | 'totem_placed'
+      | 'structure_placed';
+    hp?: number;
+    hunger?: number;
+    chest?: WorldPlacedChest;
+    torch?: WorldPlacedTorch;
+    wall?: WorldPlacedWall;
+    totem?: WorldPlacedTotem;
+    structure?: WorldPlacedStructure;
+    error?: string;
+  } {
+    if (!itemDef.placeable) return { ok: false };
     const placeCfg = itemDef.placeable;
+    const now = Date.now();
 
     const rawX =
       typeof targetX === 'number' && Number.isFinite(targetX)
@@ -1905,10 +1928,7 @@ export class WorldRoom {
         return { ok: false, error: 'Land overlaps another Tribe Totem territory.' };
       }
 
-      slotItem.count -= 1;
-      if (slotItem.count <= 0) {
-        player.inventory[player.activeSlot] = null;
-      }
+      onConsumeCost();
 
       const totem: WorldPlacedTotem = {
         id: this.nextTotemId++,
@@ -1995,10 +2015,7 @@ export class WorldRoom {
         return { ok: false, error: 'Blocked by obstacle.' };
       }
 
-      slotItem.count -= 1;
-      if (slotItem.count <= 0) {
-        player.inventory[player.activeSlot] = null;
-      }
+      onConsumeCost();
 
       const chest: WorldPlacedChest = {
         id: this.nextChestId++,
@@ -2061,14 +2078,10 @@ export class WorldRoom {
         const oldestTorch = this.placedTorches.values().next().value;
         if (oldestTorch) {
           this.placedTorches.delete(oldestTorch.id);
-          this.removeTorchSpatial(oldestTorch);
         }
       }
 
-      slotItem.count -= 1;
-      if (slotItem.count <= 0) {
-        player.inventory[player.activeSlot] = null;
-      }
+      onConsumeCost();
 
       const torch: WorldPlacedTorch = {
         id: this.nextTorchId++,
@@ -2079,7 +2092,6 @@ export class WorldRoom {
         createdAt: now
       };
       this.placedTorches.set(torch.id, torch);
-      this.insertTorchSpatial(torch);
       player.structuresBuilt += 1;
       player.score += 10;
 
@@ -2148,10 +2160,7 @@ export class WorldRoom {
         return { ok: false, error: 'Blocked by tree, rock, or structure.' };
       }
 
-      slotItem.count -= 1;
-      if (slotItem.count <= 0) {
-        player.inventory[player.activeSlot] = null;
-      }
+      onConsumeCost();
 
       const wall: WorldPlacedWall = {
         id: this.nextWallId++,
@@ -2259,10 +2268,7 @@ export class WorldRoom {
         return { ok: false, error: 'Blocked by trees, rocks, or existing builds.' };
       }
 
-      slotItem.count -= 1;
-      if (slotItem.count <= 0) {
-        player.inventory[player.activeSlot] = null;
-      }
+      onConsumeCost();
 
       const maxHp =
         placeCfg.maxHp ??
@@ -2537,7 +2543,6 @@ export class WorldRoom {
     const removedTorchIds: number[] = [];
     for (const t of torches) {
       this.placedTorches.delete(t.id);
-      this.removeTorchSpatial(t);
       removedTorchIds.push(t.id);
     }
 
@@ -2774,6 +2779,29 @@ export class WorldRoom {
     }
 
     for (const c of consumed.chests) {
+      const restoredSlots: Array<InventorySlotItem | null> = Array(CONFIG.CHEST_SLOTS).fill(null);
+      if (Array.isArray(c.items)) {
+        for (const entry of c.items) {
+          if (!Array.isArray(entry) || entry.length < 3) continue;
+          const [slotIdx, itemId, count] = entry;
+          if (
+            typeof slotIdx !== 'number' ||
+            !Number.isInteger(slotIdx) ||
+            slotIdx < 0 ||
+            slotIdx >= CONFIG.CHEST_SLOTS
+          ) {
+            continue;
+          }
+          if (typeof itemId !== 'string' || itemId === 'tribe_totem') continue;
+          const def = getItemDef(itemId);
+          if (!def) continue;
+          if (typeof count !== 'number' || !Number.isFinite(count) || count <= 0) continue;
+          restoredSlots[slotIdx] = {
+            itemId: def.id,
+            count: Math.min(def.maxStack, Math.floor(count))
+          };
+        }
+      }
       const chest: WorldPlacedChest = {
         id: this.nextChestId++,
         x: cx + c.dx,
@@ -2781,7 +2809,7 @@ export class WorldRoom {
         radius: 25,
         ownerId: player.id,
         ownerTribeId: tribe.id,
-        slots: Array(CONFIG.CHEST_SLOTS).fill(null),
+        slots: restoredSlots,
         createdAt: now
       };
       this.placedChests.set(chest.id, chest);
@@ -2815,18 +2843,587 @@ export class WorldRoom {
         createdAt: now
       };
       this.placedTorches.set(torch.id, torch);
-      this.insertTorchSpatial(torch);
       this.onBroadcastRosterEvent?.({ type: 'TORCH_PLACED', torch });
     }
 
     this.syncPlayerInventory(player);
     this.onSendPlayerEvent?.(player.id, {
       type: 'ACTION_NOTICE',
-      message: `Deployed Tribe Base (${CONFIG.TOTEM_SIZE_TILES}x${CONFIG.TOTEM_SIZE_TILES}) onto empty land!`,
+      message: `Deployed Tribe Base (${CONFIG.TOTEM_SIZE_TILES}x${CONFIG.TOTEM_SIZE_TILES}) with Chest loot restored!`,
       x: cx,
       y: cy
     });
     return { ok: true };
+  }
+
+  /**
+   * Phase 7: Blueprint Direct Build / Use Stored Build Handler.
+   * - Requires owning a Base Blueprint.
+   * - If player has stored removed builds of `itemId` (e.g. Campfire 4x), consumes 1 stored copy (0 materials).
+   * - Otherwise validates inventory recipe costs and deducts ONLY when placement succeeds!
+   */
+  public handleBlueprintPlaceBuild(
+    playerId: string,
+    itemId: ItemId,
+    targetX: number,
+    targetY: number,
+    orientation?: WallOrientation,
+    rotationQuarter?: RotationQuarter
+  ): {
+    ok: boolean;
+    usedStored?: boolean;
+    chest?: WorldPlacedChest;
+    torch?: WorldPlacedTorch;
+    wall?: WorldPlacedWall;
+    totem?: WorldPlacedTotem;
+    structure?: WorldPlacedStructure;
+    error?: string;
+  } {
+    const player = this.playersById.get(playerId);
+    if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
+    if (this.countPlayerItem(player, 'blueprint') < 1) {
+      return { ok: false, error: 'Hold a Base Blueprint to build structures.' };
+    }
+
+    const itemDef = getItemDef(itemId);
+    if (!itemDef || !itemDef.placeable) {
+      return { ok: false, error: 'Invalid buildable item.' };
+    }
+
+    const storedCount = this.blueprintService.getStoredBuildCount(player.id, itemDef.id);
+    const useStored = storedCount > 0;
+
+    if (!useStored) {
+      const recipe = itemDef.recipe;
+      if (!recipe) return { ok: false, error: 'This structure has no build recipe.' };
+      for (const cost of recipe.costs) {
+        const owned = this.countPlayerItem(player, cost.itemId);
+        if (owned < cost.count) {
+          const costDef = getItemDef(cost.itemId);
+          return {
+            ok: false,
+            error: `Need ${cost.count} ${costDef ? costDef.name : cost.itemId} to build ${itemDef.name}.`
+          };
+        }
+      }
+    }
+
+    const res = this.placeBuildableCore(
+      player,
+      itemDef,
+      targetX,
+      targetY,
+      orientation,
+      rotationQuarter,
+      () => {
+        if (useStored) {
+          this.blueprintService.consumeStoredBuild(player.id, itemDef.id);
+        } else if (itemDef.recipe) {
+          for (const cost of itemDef.recipe.costs) {
+            this.deductPlayerItem(player, cost.itemId, cost.count);
+          }
+        }
+      }
+    );
+
+    if (!res.ok) return { ok: false, error: res.error };
+    return {
+      ok: true,
+      usedStored: useStored,
+      chest: res.chest,
+      torch: res.torch,
+      wall: res.wall,
+      totem: res.totem,
+      structure: res.structure
+    };
+  }
+
+  /**
+   * Phase 7: Hold Blueprint + Click Build -> Remove & Store into Blueprint (All Tribe Members Allowed!).
+   * Stored count increments (e.g. Campfire 4x -> "Use" button) and persists to Supabase!
+   */
+  public handleBlueprintRemoveEntity(
+    playerId: string,
+    targetKind: BlueprintTargetKind,
+    targetId: number
+  ): { ok: boolean; storedItemId?: ItemId; storedCount?: number; error?: string } {
+    const player = this.playersById.get(playerId);
+    if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
+    if (this.countPlayerItem(player, 'blueprint') < 1) {
+      return { ok: false, error: 'Hold a Base Blueprint to remove structures.' };
+    }
+    if (Date.now() < player.combatUntil) {
+      return { ok: false, error: 'Cannot remove structures during Combat Mode.' };
+    }
+
+    let mappedItemId: ItemId | null = null;
+    let entityX = player.x;
+    let entityY = player.y;
+    let label = 'Build';
+
+    if (targetKind === 'wall') {
+      const wall = this.placedWalls.get(targetId);
+      if (!wall) return { ok: false, error: 'Wall not found.' };
+      if (!this.canTribeManageEntity(player, wall.ownerId, wall.tribeId)) {
+        return { ok: false, error: 'Only Tribe members can modify this wall.' };
+      }
+      const halfW = wall.orientation === 'h' ? wall.length / 2 : wall.thickness / 2;
+      const halfH = wall.orientation === 'h' ? wall.thickness / 2 : wall.length / 2;
+      this.placedWalls.delete(wall.id);
+      this.world.removeBoxCollider('wall', wall.id, wall.x, wall.y, halfW, halfH);
+      this.onBroadcastRosterEvent?.({
+        type: 'WALL_HIT',
+        id: wall.id,
+        hp: 0,
+        maxHp: wall.maxHp,
+        destroyed: true
+      });
+      mappedItemId = 'wooden_wall';
+      entityX = wall.x;
+      entityY = wall.y;
+      label = 'Wooden Wall';
+    } else if (targetKind === 'structure') {
+      const s = this.placedStructures.get(targetId);
+      if (!s) return { ok: false, error: 'Structure not found.' };
+      if (!this.canTribeManageEntity(player, s.ownerId, s.tribeId)) {
+        return { ok: false, error: 'Only Tribe members can modify this structure.' };
+      }
+      this.removeStructureEntity(s);
+      this.onBroadcastRosterEvent?.({
+        type: 'STRUCTURE_HIT',
+        id: s.id,
+        hp: 0,
+        maxHp: s.maxHp,
+        destroyed: true
+      });
+      mappedItemId = s.kind;
+      entityX = s.x;
+      entityY = s.y;
+      label =
+        s.kind === 'hut'
+          ? 'Circular Hut'
+          : s.kind === 'watchtower'
+            ? 'Wooden Watchtower'
+            : 'Campfire';
+    } else if (targetKind === 'chest') {
+      const chest = this.placedChests.get(targetId);
+      if (!chest) return { ok: false, error: 'Chest not found.' };
+      if (!this.canTribeManageEntity(player, chest.ownerId, chest.ownerTribeId)) {
+        return { ok: false, error: 'Only Tribe members can modify this chest.' };
+      }
+      // Return any items inside the chest safely to player inventory (spilling overflow cleanly on ground)
+      for (let i = 0; i < chest.slots.length; i++) {
+        const slot = chest.slots[i];
+        if (!slot || slot.count <= 0) continue;
+        const leftover = this.addItemToSlots(
+          player.inventory,
+          player.unlockedSlots,
+          slot.itemId,
+          slot.count
+        );
+        if (leftover > 0) {
+          this.spawnGroundDrop(slot.itemId, leftover, chest.x, chest.y);
+        }
+        chest.slots[i] = null;
+      }
+      this.placedChests.delete(chest.id);
+      this.world.removeSolidCollider('chest', chest.id, chest.x, chest.y, chest.radius);
+      this.onBroadcastRosterEvent?.({ type: 'CHEST_REMOVED', id: chest.id });
+      mappedItemId = 'wooden_chest';
+      entityX = chest.x;
+      entityY = chest.y;
+      label = 'Wooden Chest';
+    } else if (targetKind === 'torch') {
+      const torch = this.placedTorches.get(targetId);
+      if (!torch) return { ok: false, error: 'Torch not found.' };
+      if (!this.canTribeManageEntity(player, torch.ownerId, torch.ownerTribeId)) {
+        return { ok: false, error: 'Only Tribe members can modify this torch.' };
+      }
+      this.placedTorches.delete(torch.id);
+      this.onBroadcastRosterEvent?.({ type: 'TORCH_REMOVED', id: torch.id });
+      mappedItemId = 'torch';
+      entityX = torch.x;
+      entityY = torch.y;
+      label = 'Torch';
+    } else if (targetKind === 'totem') {
+      const totem = this.placedTotems.get(targetId);
+      if (!totem) return { ok: false, error: 'Tribe Totem not found.' };
+      if (!this.canTribeManageEntity(player, totem.ownerId, totem.tribeId)) {
+        return { ok: false, error: 'Only Tribe members can modify this Tribe Totem.' };
+      }
+      this.placedTotems.delete(totem.id);
+      this.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
+      this.onBroadcastRosterEvent?.({ type: 'TOTEM_REMOVED', id: totem.id });
+      mappedItemId = 'tribe_totem';
+      entityX = totem.x;
+      entityY = totem.y;
+      label = 'Tribe Totem';
+    }
+
+    if (!mappedItemId) return { ok: false, error: 'Unsupported build type.' };
+
+    const nextCount = this.blueprintService.addStoredBuild(player.id, mappedItemId, 1);
+    this.syncPlayerInventory(player);
+    this.onSendPlayerEvent?.(player.id, {
+      type: 'ACTION_NOTICE',
+      message: `Stored ${label} in Blueprint (${nextCount}x)`,
+      x: Math.round(entityX),
+      y: Math.round(entityY)
+    });
+    return { ok: true, storedItemId: mappedItemId, storedCount: nextCount };
+  }
+
+  /**
+   * Phase 7: Hold Blueprint + Click Build -> Rotate Watchtower (4-way) or Wall (H/V) — All Tribe Members Allowed!
+   */
+  public handleBlueprintRotateEntity(
+    playerId: string,
+    targetKind: 'wall' | 'structure',
+    targetId: number
+  ): { ok: boolean; error?: string } {
+    const player = this.playersById.get(playerId);
+    if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
+    if (this.countPlayerItem(player, 'blueprint') < 1) {
+      return { ok: false, error: 'Hold a Base Blueprint to rotate structures.' };
+    }
+
+    if (targetKind === 'structure') {
+      const s = this.placedStructures.get(targetId);
+      if (!s) return { ok: false, error: 'Structure not found.' };
+      if (!this.canTribeManageEntity(player, s.ownerId, s.tribeId)) {
+        return { ok: false, error: 'Only Tribe members can rotate this structure.' };
+      }
+      if (s.kind !== 'watchtower') {
+        return { ok: false, error: 'Only Watchtowers and Walls can be rotated.' };
+      }
+      s.rotationQuarter = ((s.rotationQuarter + 1) & 3) as RotationQuarter;
+      this.onBroadcastRosterEvent?.({ type: 'STRUCTURE_PLACED', structure: s });
+      return { ok: true };
+    }
+
+    const wall = this.placedWalls.get(targetId);
+    if (!wall) return { ok: false, error: 'Wall not found.' };
+    if (!this.canTribeManageEntity(player, wall.ownerId, wall.tribeId)) {
+      return { ok: false, error: 'Only Tribe members can rotate this wall.' };
+    }
+    const tribeTotem = this.totemService.findTotemForTribe(
+      wall.tribeId ?? player.tribeId,
+      this.placedTotems.values()
+    );
+    const nextOri: WallOrientation = wall.orientation === 'h' ? 'v' : 'h';
+    if (
+      tribeTotem &&
+      !this.totemService.isRectInsideTotem(
+        tribeTotem,
+        wall.x,
+        wall.y,
+        nextOri === 'h' ? wall.length / 2 - 2 : 0,
+        nextOri === 'v' ? wall.length / 2 - 2 : 0
+      )
+    ) {
+      return { ok: false, error: 'Rotated wall would extend outside Tribe territory.' };
+    }
+    const oldHalfW = wall.orientation === 'h' ? wall.length / 2 : wall.thickness / 2;
+    const oldHalfH = wall.orientation === 'h' ? wall.thickness / 2 : wall.length / 2;
+    this.world.removeBoxCollider('wall', wall.id, wall.x, wall.y, oldHalfW, oldHalfH);
+
+    wall.orientation = nextOri;
+    const newHalfW = wall.orientation === 'h' ? wall.length / 2 : wall.thickness / 2;
+    const newHalfH = wall.orientation === 'h' ? wall.thickness / 2 : wall.length / 2;
+    this.world.addBoxCollider({
+      kind: 'wall',
+      id: wall.id,
+      x: wall.x,
+      y: wall.y,
+      halfW: newHalfW,
+      halfH: newHalfH
+    });
+    this.onBroadcastRosterEvent?.({ type: 'WALL_PLACED', wall });
+    return { ok: true };
+  }
+
+  /**
+   * Phase 7: Hold Blueprint + Move Placed Build (All Tribe Members Allowed! Chests preserve all 30 slots!).
+   */
+  public handleBlueprintMoveEntity(
+    playerId: string,
+    targetKind: BlueprintTargetKind,
+    targetId: number,
+    targetX: number,
+    targetY: number,
+    orientation?: WallOrientation,
+    rotationQuarter?: RotationQuarter
+  ): { ok: boolean; error?: string } {
+    const player = this.playersById.get(playerId);
+    if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
+    if (this.countPlayerItem(player, 'blueprint') < 1) {
+      return { ok: false, error: 'Hold a Base Blueprint to move structures.' };
+    }
+    if (Date.now() < player.combatUntil) {
+      return { ok: false, error: 'Cannot move structures during Combat Mode.' };
+    }
+
+    if (targetKind === 'totem') {
+      const totem = this.placedTotems.get(targetId);
+      if (!totem) return { ok: false, error: 'Tribe Totem not found.' };
+      if (!this.canTribeManageEntity(player, totem.ownerId, totem.tribeId)) {
+        return { ok: false, error: 'Only Tribe members can move this Tribe Totem.' };
+      }
+      const placeX = this.snapGridLine(targetX);
+      const placeY = this.snapGridLine(targetY);
+      const halfPx = (totem.sizeTiles * CONFIG.BUILD_GRID_SIZE) / 2;
+      if (Math.hypot(placeX - player.x, placeY - player.y) > 220) {
+        return { ok: false, error: 'Move closer to place the Tribe Totem.' };
+      }
+      if (
+        placeX - halfPx < 128 ||
+        placeX + halfPx > this.world.size - 128 ||
+        placeY - halfPx < 128 ||
+        placeY + halfPx > this.world.size - 128
+      ) {
+        return { ok: false, error: 'Too close to world border.' };
+      }
+      this.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
+      const blocked =
+        this.world.overlapsWaterOrMud(placeX, placeY, CONFIG.TOTEM_RADIUS + 14) ||
+        this.world.overlapsAnySolid(placeX, placeY, CONFIG.TOTEM_RADIUS + 10) ||
+        this.totemService.doesClaimOverlapOtherTotem(
+          placeX,
+          placeY,
+          totem.sizeTiles,
+          this.placedTotems.values(),
+          totem.tribeId
+        );
+      if (blocked) {
+        this.world.addSolidCollider({
+          kind: 'totem',
+          id: totem.id,
+          x: totem.x,
+          y: totem.y,
+          radius: totem.radius
+        });
+        return { ok: false, error: 'Target position is blocked or overlaps another Tribe.' };
+      }
+      totem.x = placeX;
+      totem.y = placeY;
+      this.world.addSolidCollider({
+        kind: 'totem',
+        id: totem.id,
+        x: totem.x,
+        y: totem.y,
+        radius: totem.radius
+      });
+      this.onBroadcastRosterEvent?.({
+        type: 'TOTEM_PLACED',
+        totem: this.totemService.serializeTotem(totem)
+      });
+      return { ok: true };
+    }
+
+    const tribeTotem = this.totemService.findTotemForTribe(
+      player.tribeId,
+      this.placedTotems.values()
+    );
+    if (!tribeTotem) {
+      return { ok: false, error: 'Must stay inside your Tribe Totem territory.' };
+    }
+
+    if (targetKind === 'wall') {
+      const wall = this.placedWalls.get(targetId);
+      if (!wall) return { ok: false, error: 'Wall not found.' };
+      if (!this.canTribeManageEntity(player, wall.ownerId, wall.tribeId)) {
+        return { ok: false, error: 'Only Tribe members can move this wall.' };
+      }
+      const nextOri: WallOrientation =
+        orientation === 'h' || orientation === 'v' ? orientation : wall.orientation;
+      const placeX = this.snapGridLine(targetX);
+      const placeY = this.snapGridLine(targetY);
+      if (Math.hypot(placeX - player.x, placeY - player.y) > 235) {
+        return { ok: false, error: 'Move closer to place the wall.' };
+      }
+      if (
+        !this.totemService.isRectInsideTotem(
+          tribeTotem,
+          placeX,
+          placeY,
+          nextOri === 'h' ? wall.length / 2 - 2 : 0,
+          nextOri === 'v' ? wall.length / 2 - 2 : 0
+        )
+      ) {
+        return { ok: false, error: 'Wall must stay inside your Tribe Totem territory.' };
+      }
+      for (const w of this.placedWalls.values()) {
+        if (w.id === wall.id) continue;
+        if (w.orientation === nextOri) {
+          if (nextOri === 'h' && w.y === placeY && Math.abs(w.x - placeX) < wall.length - 2) {
+            return { ok: false, error: 'A wall already spans this grid line.' };
+          }
+          if (nextOri === 'v' && w.x === placeX && Math.abs(w.y - placeY) < wall.length - 2) {
+            return { ok: false, error: 'A wall already spans this grid line.' };
+          }
+        }
+      }
+      const oldHalfW = wall.orientation === 'h' ? wall.length / 2 : wall.thickness / 2;
+      const oldHalfH = wall.orientation === 'h' ? wall.thickness / 2 : wall.length / 2;
+      this.world.removeBoxCollider('wall', wall.id, wall.x, wall.y, oldHalfW, oldHalfH);
+      if (
+        this.world.overlapsWaterOrMud(placeX, placeY, 16) ||
+        this.world.overlapsAnySolid(placeX, placeY, 12)
+      ) {
+        this.world.addBoxCollider({
+          kind: 'wall',
+          id: wall.id,
+          x: wall.x,
+          y: wall.y,
+          halfW: oldHalfW,
+          halfH: oldHalfH
+        });
+        return { ok: false, error: 'Blocked by obstacle or water.' };
+      }
+      wall.x = placeX;
+      wall.y = placeY;
+      wall.orientation = nextOri;
+      const newHalfW = wall.orientation === 'h' ? wall.length / 2 : wall.thickness / 2;
+      const newHalfH = wall.orientation === 'h' ? wall.thickness / 2 : wall.length / 2;
+      this.world.addBoxCollider({
+        kind: 'wall',
+        id: wall.id,
+        x: wall.x,
+        y: wall.y,
+        halfW: newHalfW,
+        halfH: newHalfH
+      });
+      this.onBroadcastRosterEvent?.({ type: 'WALL_PLACED', wall });
+      return { ok: true };
+    }
+
+    if (targetKind === 'structure') {
+      const s = this.placedStructures.get(targetId);
+      if (!s) return { ok: false, error: 'Structure not found.' };
+      if (!this.canTribeManageEntity(player, s.ownerId, s.tribeId)) {
+        return { ok: false, error: 'Only Tribe members can move this structure.' };
+      }
+      const placeX = s.tilesW % 2 === 1 ? this.snapTileCenter(targetX) : this.snapGridLine(targetX);
+      const placeY = s.tilesH % 2 === 1 ? this.snapTileCenter(targetY) : this.snapGridLine(targetY);
+      const halfW = (s.tilesW * CONFIG.BUILD_GRID_SIZE) / 2;
+      const halfH = (s.tilesH * CONFIG.BUILD_GRID_SIZE) / 2;
+      if (Math.hypot(placeX - player.x, placeY - player.y) > 260) {
+        return { ok: false, error: 'Move closer to relocate this structure.' };
+      }
+      if (!this.totemService.isRectInsideTotem(tribeTotem, placeX, placeY, halfW - 2, halfH - 2)) {
+        return { ok: false, error: 'Structure must stay inside Tribe Totem territory.' };
+      }
+      for (const other of this.placedStructures.values()) {
+        if (other.id === s.id) continue;
+        const oHalfW = (other.tilesW * CONFIG.BUILD_GRID_SIZE) / 2;
+        const oHalfH = (other.tilesH * CONFIG.BUILD_GRID_SIZE) / 2;
+        if (
+          Math.abs(placeX - other.x) < halfW + oHalfW - 4 &&
+          Math.abs(placeY - other.y) < halfH + oHalfH - 4
+        ) {
+          return { ok: false, error: 'Overlaps another structure.' };
+        }
+      }
+      // Temporarily detach collider while checking destination
+      const prevX = s.x;
+      const prevY = s.y;
+      if (s.kind === 'hut') {
+        this.world.removeHutColliders(s.id, prevX, prevY);
+      } else if (s.kind === 'watchtower') {
+        this.world.removeBoxCollider('structure', s.id, prevX, prevY, 52, 52);
+      } else {
+        this.world.removeSolidCollider('structure', s.id, prevX, prevY, 38);
+      }
+      const checkR = Math.min(halfW, halfH) - 10;
+      if (
+        this.world.overlapsWaterOrMud(placeX, placeY, checkR) ||
+        this.world.overlapsAnySolid(placeX, placeY, checkR)
+      ) {
+        this.registerStructureColliders(s);
+        return { ok: false, error: 'Blocked by trees, rocks, or water.' };
+      }
+      s.x = placeX;
+      s.y = placeY;
+      if (s.kind === 'watchtower' && typeof rotationQuarter === 'number') {
+        s.rotationQuarter = ((Math.floor(rotationQuarter) & 3) as RotationQuarter);
+      }
+      this.registerStructureColliders(s);
+      this.onBroadcastRosterEvent?.({ type: 'STRUCTURE_PLACED', structure: s });
+      return { ok: true };
+    }
+
+    if (targetKind === 'chest') {
+      const chest = this.placedChests.get(targetId);
+      if (!chest) return { ok: false, error: 'Chest not found.' };
+      if (!this.canTribeManageEntity(player, chest.ownerId, chest.ownerTribeId)) {
+        return { ok: false, error: 'Only Tribe members can move this chest.' };
+      }
+      const placeX = this.snapTileCenter(targetX);
+      const placeY = this.snapTileCenter(targetY);
+      if (Math.hypot(placeX - player.x, placeY - player.y) > 210) {
+        return { ok: false, error: 'Move closer to place the chest.' };
+      }
+      if (!this.totemService.isRectInsideTotem(tribeTotem, placeX, placeY, 31, 31)) {
+        return { ok: false, error: 'Chest must stay inside Tribe Totem territory.' };
+      }
+      this.world.removeSolidCollider('chest', chest.id, chest.x, chest.y, chest.radius);
+      if (
+        this.world.overlapsWaterOrMud(placeX, placeY, chest.radius) ||
+        this.world.overlapsAnySolid(placeX, placeY, chest.radius + 4)
+      ) {
+        this.world.addSolidCollider({
+          kind: 'chest',
+          id: chest.id,
+          x: chest.x,
+          y: chest.y,
+          radius: chest.radius
+        });
+        return { ok: false, error: 'Blocked by obstacle or water.' };
+      }
+      chest.x = placeX;
+      chest.y = placeY;
+      this.world.addSolidCollider({
+        kind: 'chest',
+        id: chest.id,
+        x: chest.x,
+        y: chest.y,
+        radius: chest.radius
+      });
+      this.onBroadcastRosterEvent?.({
+        type: 'CHEST_PLACED',
+        chest: {
+          id: chest.id,
+          x: chest.x,
+          y: chest.y,
+          radius: chest.radius,
+          ownerId: chest.ownerId,
+          ownerTribeId: chest.ownerTribeId
+        }
+      });
+      return { ok: true };
+    }
+
+    if (targetKind === 'torch') {
+      const torch = this.placedTorches.get(targetId);
+      if (!torch) return { ok: false, error: 'Torch not found.' };
+      if (!this.canTribeManageEntity(player, torch.ownerId, torch.ownerTribeId)) {
+        return { ok: false, error: 'Only Tribe members can move this torch.' };
+      }
+      const placeX = this.snapTileCenter(targetX);
+      const placeY = this.snapTileCenter(targetY);
+      if (Math.hypot(placeX - player.x, placeY - player.y) > 210) {
+        return { ok: false, error: 'Move closer to place the torch.' };
+      }
+      if (!this.totemService.isPointInsideTotem(tribeTotem, placeX, placeY, 12)) {
+        return { ok: false, error: 'Torch must stay inside Tribe Totem territory.' };
+      }
+      torch.x = placeX;
+      torch.y = placeY;
+      this.onBroadcastRosterEvent?.({ type: 'TORCH_PLACED', torch });
+      return { ok: true };
+    }
+
+    return { ok: false, error: 'Unsupported move target.' };
   }
 
   /**
@@ -2917,7 +3514,8 @@ export class WorldRoom {
   public handleCreateTribe(
     playerId: string,
     name: string,
-    tag: string
+    tag: string,
+    visibility: 'public' | 'private' = 'public'
   ): { ok: boolean; tribe?: TribeSummary; error?: string } {
     const player = this.playersById.get(playerId);
     if (!player) return { ok: false, error: 'Player not found.' };
@@ -2925,22 +3523,13 @@ export class WorldRoom {
       return { ok: false, error: 'Cannot change Tribe during Combat Mode.' };
     }
 
-    const res = this.tribeManager.createTribe(player, name, tag);
+    const res = this.tribeManager.createTribe(player, name, tag, visibility);
     if (!res.ok) return { ok: false, error: res.error };
 
-    // Phase 5: Creating a Tribe automatically awards 1 Tribe Totem (place anywhere to claim Lv. 1 30x30 land!)
-    const leftover = this.addItemToSlots(
-      player.inventory,
-      player.unlockedSlots,
-      'tribe_totem',
-      1
-    );
-    if (leftover > 0) {
-      this.spawnGroundDrop('tribe_totem', 1, player.x, player.y);
-    }
+    // Phase 7: No free Tribe Totem on create — craft a Base Blueprint and build your Totem inside it!
     this.onSendPlayerEvent?.(player.id, {
       type: 'ACTION_NOTICE',
-      message: `Tribe created! Place your Tribe Totem to claim ${CONFIG.TOTEM_SIZE_TILES}x${CONFIG.TOTEM_SIZE_TILES} land.`,
+      message: `Tribe [${player.tribeTag}] created (${visibility === 'private' ? 'Private' : 'Public'}). Craft a Base Blueprint to build a Tribe Totem.`,
       x: Math.round(player.x),
       y: Math.round(player.y)
     });
@@ -2959,10 +3548,22 @@ export class WorldRoom {
     return { ok: true, tribe: summary };
   }
 
+  public handleSetTribeVisibility(
+    leaderId: string,
+    visibility: 'public' | 'private'
+  ): { ok: boolean; error?: string } {
+    const leader = this.playersById.get(leaderId);
+    if (!leader) return { ok: false, error: 'Player not found.' };
+    const res = this.tribeManager.setVisibility(leader, visibility);
+    if (!res.ok) return { ok: false, error: res.error };
+    this.broadcastTribeSync();
+    return { ok: true };
+  }
+
   public handleJoinTribe(
     playerId: string,
     tribeId: string
-  ): { ok: boolean; tribe?: TribeSummary; error?: string } {
+  ): { ok: boolean; pending?: boolean; tribe?: TribeSummary; error?: string } {
     const player = this.playersById.get(playerId);
     if (!player) return { ok: false, error: 'Player not found.' };
     if (Date.now() < player.combatUntil) {
@@ -2971,6 +3572,28 @@ export class WorldRoom {
 
     const res = this.tribeManager.joinTribe(player, tribeId);
     if (!res.ok) return { ok: false, error: res.error };
+
+    if (res.pending) {
+      this.onSendPlayerEvent?.(player.id, {
+        type: 'ACTION_NOTICE',
+        message: `Join request sent to [${res.tribeTag}]. Waiting for Leader approval.`,
+        x: Math.round(player.x),
+        y: Math.round(player.y)
+      });
+      if (res.leaderId) {
+        const leader = this.playersById.get(res.leaderId);
+        if (leader) {
+          this.onSendPlayerEvent?.(leader.id, {
+            type: 'ACTION_NOTICE',
+            message: `${player.username} requested to join your Tribe [${res.tribeTag}].`,
+            x: Math.round(leader.x),
+            y: Math.round(leader.y)
+          });
+        }
+      }
+      this.broadcastTribeSync();
+      return { ok: true, pending: true };
+    }
 
     this.syncPlayerInventory(player);
     this.onBroadcastRosterEvent?.({
@@ -2983,7 +3606,51 @@ export class WorldRoom {
     this.broadcastTribeSync();
     const summaries = this.getTribeSummaries();
     const summary = summaries.find((t) => t.id === player.tribeId);
-    return { ok: true, tribe: summary };
+    return { ok: true, pending: false, tribe: summary };
+  }
+
+  public handleRespondTribeRequest(
+    leaderId: string,
+    targetPlayerId: string,
+    accept: boolean
+  ): { ok: boolean; error?: string } {
+    const leader = this.playersById.get(leaderId);
+    if (!leader) return { ok: false, error: 'Player not found.' };
+
+    const res = this.tribeManager.respondToJoinRequest(
+      leader,
+      targetPlayerId,
+      accept,
+      this.playersById
+    );
+    if (!res.ok) return { ok: false, error: res.error };
+
+    if (res.accepted && res.targetPlayer) {
+      this.syncPlayerInventory(res.targetPlayer);
+      this.onBroadcastRosterEvent?.({
+        type: 'PLAYER_TRIBE_CHANGED',
+        playerId: res.targetPlayer.id,
+        shortId: res.targetPlayer.shortId,
+        tribeId: res.targetPlayer.tribeId,
+        tribeTag: res.targetPlayer.tribeTag
+      });
+      this.onSendPlayerEvent?.(res.targetPlayer.id, {
+        type: 'ACTION_NOTICE',
+        message: `Accepted into Tribe [${res.tribeTag}]!`,
+        x: Math.round(res.targetPlayer.x),
+        y: Math.round(res.targetPlayer.y)
+      });
+    } else if (!res.accepted && res.targetPlayer) {
+      this.onSendPlayerEvent?.(res.targetPlayer.id, {
+        type: 'ACTION_NOTICE',
+        message: `Join request to [${res.tribeTag}] was declined.`,
+        x: Math.round(res.targetPlayer.x),
+        y: Math.round(res.targetPlayer.y)
+      });
+    }
+
+    this.broadcastTribeSync();
+    return { ok: true };
   }
 
   public handleLeaveTribe(playerId: string): { ok: boolean; error?: string } {
@@ -3154,10 +3821,17 @@ export class WorldRoom {
       });
     }
 
-    // 2. S2 & S5 Optimization: O(destroyed) Regrowth for felled trees, rocks, bushes + 5-min Ground Drop TTL cleanup
+    // 2. S2 & S5 Optimization: O(destroyed) Randomized Regrowth (never inside Tribe Totem 20x20 territory!) + 5-min Ground Drop TTL cleanup
     if (this.serverTick % 20 === 0) {
+      const isInsideClaimedTerritory = (rx: number, ry: number): boolean =>
+        Boolean(this.totemService.findClaimCoveringPoint(rx, ry, this.placedTotems.values()));
+
       for (const t of this.pendingTreeRespawns) {
         if (t.destroyedAt !== null && now - t.destroyedAt >= CONFIG.TREE_RESPAWN_MS) {
+          const relocated = this.world.relocateTree(t, isInsideClaimedTerritory);
+          if (!relocated && isInsideClaimedTerritory(t.x, t.y)) {
+            continue; // Stay cleared if original spot is claimed & no open spot rolled yet
+          }
           t.destroyedAt = null;
           t.hp = t.maxHp;
           this.pendingTreeRespawns.delete(t);
@@ -3171,6 +3845,8 @@ export class WorldRoom {
           this.onBroadcastRosterEvent?.({
             type: 'TREE_HIT',
             id: t.id,
+            x: t.x,
+            y: t.y,
             hp: t.hp,
             maxHp: t.maxHp,
             destroyed: false
@@ -3180,6 +3856,10 @@ export class WorldRoom {
 
       for (const r of this.pendingRockRespawns) {
         if (r.destroyedAt !== null && now - r.destroyedAt >= CONFIG.ROCK_RESPAWN_MS) {
+          const relocated = this.world.relocateRock(r, isInsideClaimedTerritory);
+          if (!relocated && isInsideClaimedTerritory(r.x, r.y)) {
+            continue;
+          }
           r.destroyedAt = null;
           r.hp = r.maxHp;
           this.pendingRockRespawns.delete(r);
@@ -3193,6 +3873,8 @@ export class WorldRoom {
           this.onBroadcastRosterEvent?.({
             type: 'ROCK_HIT',
             id: r.id,
+            x: r.x,
+            y: r.y,
             hp: r.hp,
             maxHp: r.maxHp,
             destroyed: false
@@ -3202,6 +3884,10 @@ export class WorldRoom {
 
       for (const b of this.pendingBushRespawns) {
         if (b.destroyedAt !== null && now - b.destroyedAt >= CONFIG.BUSH_RESPAWN_MS) {
+          const relocated = this.world.relocateBush(b, isInsideClaimedTerritory);
+          if (!relocated && isInsideClaimedTerritory(b.x, b.y)) {
+            continue;
+          }
           b.destroyedAt = null;
           b.hp = b.maxHp;
           b.hasFruit = b.spawnsFruit;
@@ -3210,6 +3896,8 @@ export class WorldRoom {
           this.onBroadcastRosterEvent?.({
             type: 'BUSH_HIT',
             id: b.id,
+            x: b.x,
+            y: b.y,
             hp: b.hp,
             maxHp: b.maxHp,
             hasFruit: b.hasFruit,
@@ -3228,6 +3916,8 @@ export class WorldRoom {
           this.onBroadcastRosterEvent?.({
             type: 'BUSH_HIT',
             id: b.id,
+            x: b.x,
+            y: b.y,
             hp: b.hp,
             maxHp: b.maxHp,
             hasFruit: true,
@@ -3251,22 +3941,12 @@ export class WorldRoom {
 
     this.spatialGrid.clear();
 
-    // 3. Step survival stats (Stamina/Hunger/Warmth + Campfire & Circular Hut Shelter), apply terrain slowdowns & knockback
+    // 3. Step survival stats (3 clean vitals: HP, Stamina, Hunger + Campfire Hearth Healing), apply terrain slowdowns & knockback
     const kbDecay = Math.exp(-CONFIG.KNOCKBACK_DAMPING * dt);
-    const hasTorchFn = (tx: number, ty: number, tr: number) =>
-      this.hasNearbyPlacedTorch(tx, ty, tr);
-    const shelterHeatFn = (px: number, py: number) => this.checkPlayerShelterHeat(px, py);
+    const shelterFn = (px: number, py: number) => this.checkPlayerShelter(px, py);
 
     for (const p of this.playersById.values()) {
-      const surv = this.survivalService.stepPlayerSurvival(
-        p,
-        dt,
-        now,
-        currCycle.phase,
-        this.placedTorches,
-        hasTorchFn,
-        shelterHeatFn
-      );
+      const surv = this.survivalService.stepPlayerSurvival(p, dt, now, shelterFn);
 
       if (surv.damageEvent) {
         this.combatService.applyEnvironmentalDamage(

@@ -2,10 +2,12 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { CONFIG } from '../config/index.js';
 import { getItemDef } from '../data/items/index.js';
 import type {
+  BlueprintStoredBuilds,
   InventorySlotItem,
   ItemId,
   SavedBaseBlueprintSlot
 } from '../models/types.js';
+import { sanitizeStoredBuilds } from '../world/BlueprintService.js';
 
 /**
  * Ultra-compact sparse inventory format (~90-300 bytes per player in JSONB!):
@@ -16,10 +18,55 @@ export interface CompactInventorySave {
   s: Array<[number, ItemId, number]>; // [slotIndex, itemId, count]
 }
 
+interface BlueprintSaveEnvelope {
+  __v: 2;
+  slot: SavedBaseBlueprintSlot | null;
+  storedBuilds: BlueprintStoredBuilds;
+}
+
 export interface LoadedPlayerSave {
   inventory: CompactInventorySave | null;
   blueprint: SavedBaseBlueprintSlot | null;
+  storedBuilds: BlueprintStoredBuilds;
   lastBlueprintDeployAt: number;
+}
+
+function encodeBlueprintColumn(
+  slot: SavedBaseBlueprintSlot | null,
+  storedBuilds: BlueprintStoredBuilds
+): BlueprintSaveEnvelope | null {
+  const cleanBuilds = sanitizeStoredBuilds(storedBuilds);
+  const hasStored = Object.keys(cleanBuilds).length > 0;
+  if (!slot && !hasStored) return null;
+  return {
+    __v: 2,
+    slot,
+    storedBuilds: cleanBuilds
+  };
+}
+
+function decodeBlueprintColumn(raw: unknown): {
+  blueprint: SavedBaseBlueprintSlot | null;
+  storedBuilds: BlueprintStoredBuilds;
+} {
+  if (!raw || typeof raw !== 'object') {
+    return { blueprint: null, storedBuilds: {} };
+  }
+  const obj = raw as Record<string, unknown>;
+  if (obj.__v === 2) {
+    return {
+      blueprint: (obj.slot as SavedBaseBlueprintSlot | null) ?? null,
+      storedBuilds: sanitizeStoredBuilds(obj.storedBuilds)
+    };
+  }
+  // Legacy v1 SavedBaseBlueprintSlot object stored directly in blueprint_save
+  if (typeof obj.totemLevel === 'number') {
+    return {
+      blueprint: obj as unknown as SavedBaseBlueprintSlot,
+      storedBuilds: {}
+    };
+  }
+  return { blueprint: null, storedBuilds: {} };
 }
 
 const MAX_SAVED_SLOTS = CONFIG.INVENTORY_TOTAL_SLOTS;
@@ -164,7 +211,7 @@ export class PlayerSaveService {
   private getOrCreateMem(ownerId: string): LoadedPlayerSave {
     let entry = this.memorySaves.get(ownerId);
     if (!entry) {
-      entry = { inventory: null, blueprint: null, lastBlueprintDeployAt: 0 };
+      entry = { inventory: null, blueprint: null, storedBuilds: {}, lastBlueprintDeployAt: 0 };
       this.memorySaves.set(ownerId, entry);
     }
     return entry;
@@ -174,7 +221,8 @@ export class PlayerSaveService {
     const cooldownActive =
       entry.lastBlueprintDeployAt > 0 &&
       entry.lastBlueprintDeployAt + CONFIG.BLUEPRINT_DEPLOY_COOLDOWN_MS > now;
-    return !entry.inventory && !entry.blueprint && !cooldownActive;
+    const hasStoredBuilds = Object.keys(entry.storedBuilds || {}).length > 0;
+    return !entry.inventory && !entry.blueprint && !hasStoredBuilds && !cooldownActive;
   }
 
   private async persistRow(ownerId: string, entry: LoadedPlayerSave): Promise<void> {
@@ -204,7 +252,7 @@ export class PlayerSaveService {
         {
           owner_id: ownerId,
           inventory_save: entry.inventory,
-          blueprint_save: entry.blueprint,
+          blueprint_save: encodeBlueprintColumn(entry.blueprint, entry.storedBuilds),
           last_blueprint_deploy_at: entry.lastBlueprintDeployAt,
           updated_at: new Date(now).toISOString()
         },
@@ -233,9 +281,11 @@ export class PlayerSaveService {
           .maybeSingle();
 
         if (data) {
+          const decodedBp = decodeBlueprintColumn(data.blueprint_save);
           const loaded: LoadedPlayerSave = {
             inventory: (data.inventory_save as CompactInventorySave | null) ?? null,
-            blueprint: (data.blueprint_save as SavedBaseBlueprintSlot | null) ?? null,
+            blueprint: decodedBp.blueprint,
+            storedBuilds: decodedBp.storedBuilds,
             lastBlueprintDeployAt: Number(data.last_blueprint_deploy_at || 0)
           };
           this.memorySaves.set(ownerId, loaded);
@@ -293,12 +343,14 @@ export class PlayerSaveService {
   public async saveBlueprintState(
     ownerId: string,
     blueprint: SavedBaseBlueprintSlot | null,
-    lastBlueprintDeployAt: number
+    lastBlueprintDeployAt: number,
+    storedBuilds: BlueprintStoredBuilds = {}
   ): Promise<void> {
     if (!isPersistableAccount(ownerId)) return;
     await this.enqueueWrite(ownerId, async () => {
       const entry = this.getOrCreateMem(ownerId);
       entry.blueprint = blueprint;
+      entry.storedBuilds = sanitizeStoredBuilds(storedBuilds);
       entry.lastBlueprintDeployAt = lastBlueprintDeployAt;
       await this.persistRow(ownerId, entry);
     });

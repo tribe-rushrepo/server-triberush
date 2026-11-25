@@ -13,7 +13,7 @@ export const WEAPON_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     combat: {
       cooldownMs: 420,
       durationMs: 310,
-      reach: 108, // Decent extended thrust reach
+      reach: 154, // Matches full extended spear thrust tip
       treeDmg: 0,
       bushDmg: 12,
       rockDmg: 0,
@@ -38,7 +38,7 @@ export const WEAPON_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     combat: {
       cooldownMs: 380,
       durationMs: 280,
-      reach: 74, // Normal range with balanced Tier-1 wooden blade damage
+      reach: 100, // Matches full extended wooden sword blade reach
       treeDmg: 0,
       bushDmg: 15,
       rockDmg: 0,

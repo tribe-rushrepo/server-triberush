@@ -420,7 +420,7 @@ export class AnimalService {
 
     const dirX = Math.cos(attacker.angle);
     const dirY = Math.sin(attacker.angle);
-    const nearby = this.queryNearby(attacker.x, attacker.y, stats.reach + 42);
+    const nearby = this.queryNearby(attacker.x, attacker.y, stats.reach + 52);
     let hits = 0;
 
     for (let i = 0; i < nearby.length; i++) {
@@ -437,7 +437,12 @@ export class AnimalService {
       const nx = dist > 0.001 ? dx / dist : dirX;
       const ny = dist > 0.001 ? dy / dist : dirY;
       const dot = nx * dirX + ny * dirY;
-      if (dot < 0.30) continue;
+      const isSpear = weaponId === 'wooden_spear';
+      const proj = dx * dirX + dy * dirY;
+      const perpDist = Math.abs(dx * -dirY + dy * dirX);
+      const inSpearCorridor =
+        isSpear && proj > 0 && proj <= maxReach && perpDist <= animal.radius + 20;
+      if (dot < 0.30 && !inSpearCorridor) continue;
 
       animal.lastDamagedAt = now;
       animal.hp = Math.max(0, animal.hp - stats.combatDmg);

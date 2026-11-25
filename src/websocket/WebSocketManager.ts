@@ -32,8 +32,13 @@ export class WebSocketManager {
   constructor() {
     const blueprintFile = path.resolve(process.cwd(), 'data', 'saved_blueprints.json');
     this.worldRoom = new WorldRoom(CONFIG.WORLD_SEED, blueprintFile);
-    this.worldRoom.blueprintService.onPersistOwnerState = (ownerId, slot, lastDeployAt) => {
-      void playerSaveService.saveBlueprintState(ownerId, slot, lastDeployAt);
+    this.worldRoom.blueprintService.onPersistOwnerState = (
+      ownerId,
+      slot,
+      lastDeployAt,
+      storedBuilds
+    ) => {
+      void playerSaveService.saveBlueprintState(ownerId, slot, lastDeployAt, storedBuilds);
     };
     this.worldRoom.onPersistPlayerInventory = (ownerId, compact) => {
       void playerSaveService.savePlayerInventory(ownerId, compact);
@@ -362,7 +367,8 @@ export class WebSocketManager {
               this.worldRoom.blueprintService.hydrateOwnerState(
                 playerId,
                 saved.blueprint,
-                saved.lastBlueprintDeployAt
+                saved.lastBlueprintDeployAt,
+                saved.storedBuilds
               );
             }
             const restoredInventory = saved?.inventory
@@ -420,8 +426,6 @@ export class WebSocketManager {
                 maxStamina: res.player.maxStamina,
                 hunger: Math.round(res.player.hunger),
                 maxHunger: res.player.maxHunger,
-                warmth: Math.round(res.player.warmth),
-                maxWarmth: res.player.maxWarmth,
                 tribeId: res.player.tribeId,
                 tribeTag: res.player.tribeTag,
                 spawnProtectionRemainingMs: Math.max(0, res.player.spawnProtectedUntil - nowMsJoin),
@@ -575,6 +579,69 @@ export class WebSocketManager {
             }
             break;
           }
+          case 'BLUEPRINT_PLACE_BUILD': {
+            const res = this.worldRoom.handleBlueprintPlaceBuild(
+              playerId,
+              msg.itemId,
+              msg.targetX,
+              msg.targetY,
+              msg.orientation,
+              msg.rotationQuarter as 0 | 1 | 2 | 3 | undefined
+            );
+            if (!res.ok && res.error) {
+              this.sendJsonToPlayer(playerId, {
+                type: 'ACTION_NOTICE',
+                message: res.error
+              });
+            }
+            break;
+          }
+          case 'BLUEPRINT_REMOVE_ENTITY': {
+            const res = this.worldRoom.handleBlueprintRemoveEntity(
+              playerId,
+              msg.targetKind,
+              msg.targetId
+            );
+            if (!res.ok && res.error) {
+              this.sendJsonToPlayer(playerId, {
+                type: 'ACTION_NOTICE',
+                message: res.error
+              });
+            }
+            break;
+          }
+          case 'BLUEPRINT_ROTATE_ENTITY': {
+            const res = this.worldRoom.handleBlueprintRotateEntity(
+              playerId,
+              msg.targetKind,
+              msg.targetId
+            );
+            if (!res.ok && res.error) {
+              this.sendJsonToPlayer(playerId, {
+                type: 'ACTION_NOTICE',
+                message: res.error
+              });
+            }
+            break;
+          }
+          case 'BLUEPRINT_MOVE_ENTITY': {
+            const res = this.worldRoom.handleBlueprintMoveEntity(
+              playerId,
+              msg.targetKind,
+              msg.targetId,
+              msg.targetX,
+              msg.targetY,
+              msg.orientation,
+              msg.rotationQuarter as 0 | 1 | 2 | 3 | undefined
+            );
+            if (!res.ok && res.error) {
+              this.sendJsonToPlayer(playerId, {
+                type: 'ACTION_NOTICE',
+                message: res.error
+              });
+            }
+            break;
+          }
           case 'EQUIP_ITEM': {
             const res = this.worldRoom.handleEquipHeldItem(playerId, msg.slot);
             if (!res.ok && res.error) {
@@ -606,7 +673,36 @@ export class WebSocketManager {
             break;
           }
           case 'TRIBE_CREATE': {
-            const res = this.worldRoom.handleCreateTribe(playerId, msg.name, msg.tag);
+            const res = this.worldRoom.handleCreateTribe(
+              playerId,
+              msg.name,
+              msg.tag,
+              msg.visibility
+            );
+            if (!res.ok && res.error) {
+              this.sendJsonToPlayer(playerId, {
+                type: 'ACTION_NOTICE',
+                message: res.error
+              });
+            }
+            break;
+          }
+          case 'TRIBE_SET_VISIBILITY': {
+            const res = this.worldRoom.handleSetTribeVisibility(playerId, msg.visibility);
+            if (!res.ok && res.error) {
+              this.sendJsonToPlayer(playerId, {
+                type: 'ACTION_NOTICE',
+                message: res.error
+              });
+            }
+            break;
+          }
+          case 'TRIBE_RESPOND_REQUEST': {
+            const res = this.worldRoom.handleRespondTribeRequest(
+              playerId,
+              msg.targetPlayerId,
+              msg.accept
+            );
             if (!res.ok && res.error) {
               this.sendJsonToPlayer(playerId, {
                 type: 'ACTION_NOTICE',

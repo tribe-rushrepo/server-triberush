@@ -145,11 +145,12 @@ describe('2. Server-Authoritative Survival Loop: 32 Max Stack, Stone & Coal Mini
     assert.strictEqual(player.inventory[1]?.itemId, 'wood');
     assert.strictEqual(player.inventory[1]?.count, 8);
 
-    // 2. Craft Wooden Pickaxe (12), Wooden Sword (12), and Wooden Chest (16)
+    // 2. Craft Wooden Pickaxe (12) & Wooden Sword (12); buildables (Wooden Chest, Tribe Totem, Walls) are blocked from Craft and built via Blueprint!
     assert.strictEqual(room.handleCraftItem('u1', 'admin_god_sword').ok, false);
     assert.strictEqual(room.handleCraftItem('u1', 'wooden_pickaxe').ok, true);
     assert.strictEqual(room.handleCraftItem('u1', 'wooden_sword').ok, true);
-    assert.strictEqual(room.handleCraftItem('u1', 'wooden_chest').ok, true);
+    assert.strictEqual(room.handleCraftItem('u1', 'wooden_chest').ok, false);
+    assert.strictEqual(room.handleCraftItem('u1', 'tribe_totem').ok, false);
 
     // 3. Stone Rock & Coal Rock must reject bare hands and break only with Wooden Pickaxe
     const stoneRock = room.world.rocks.find((r) => !r.hasCoal)!;
@@ -237,17 +238,23 @@ describe('2. Server-Authoritative Survival Loop: 32 Max Stack, Stone & Coal Mini
     p1.combatUntil = 0;
     p2.combatUntil = 0;
 
-    // 2. Create a Tribe [WOLF] (auto-awards 1 Tribe Totem!) and verify friendly fire is disabled once p2 joins
-    const createdTribe = room.handleCreateTribe('leader', 'Wolf Pack', 'WOLF');
+    // 2. Create a Public Tribe [WOLF] (NO free Tribe Totem awarded — must build via Blueprint!)
+    const createdTribe = room.handleCreateTribe('leader', 'Wolf Pack', 'WOLF', 'public');
     assert.strictEqual(createdTribe.ok, true);
     assert.strictEqual(p1.tribeTag, 'WOLF');
     const tribeId = createdTribe.tribe!.id;
+    assert.strictEqual(
+      p1.inventory.some((s) => s?.itemId === 'tribe_totem'),
+      false,
+      'Creating a Tribe must NOT award a free Tribe Totem'
+    );
 
-    // Place awarded Lv. 1 Tribe Totem so Tribe owns 30x30 Kingdom land around (12800, 12800)
-    const totemSlot = p1.inventory.findIndex((s) => s?.itemId === 'tribe_totem');
-    assert.ok(totemSlot >= 0, 'Creating a Tribe must award 1 Tribe Totem');
-    room.handleSelectSlot('leader', totemSlot);
-    const totemPlaced = room.handleUseOrPlaceItem('leader', 12800, 12800);
+    // Build Tribe Totem via Blueprint (20 Wood + 10 Stone deducted on place)
+    p1.inventory[1] = { itemId: 'blueprint', count: 1 };
+    p1.inventory[2] = { itemId: 'wood', count: 32 };
+    p1.inventory[3] = { itemId: 'stone', count: 10 };
+    room.handleSelectSlot('leader', 1);
+    const totemPlaced = room.handleBlueprintPlaceBuild('leader', 'tribe_totem', 12800, 12800);
     assert.strictEqual(totemPlaced.ok, true);
     room.handleSelectSlot('leader', 0);
 
@@ -274,10 +281,10 @@ describe('2. Server-Authoritative Survival Loop: 32 Max Stack, Stone & Coal Mini
     assert.strictEqual(overflowTribeJoin.ok, false);
     assert.match(overflowTribeJoin.error || '', /30\/30/);
 
-    // 4. Shared Tribe Chest placed inside Tribe Totem land allows tribemates and blocks outsiders ('ally-31')
-    p1.inventory[1] = { itemId: 'wooden_chest', count: 1 };
-    room.handleSelectSlot('leader', 1);
-    const chestRes = room.handleUseOrPlaceItem('leader', 12896, 12832);
+    // 4. Shared Tribe Chest built via Blueprint inside Tribe Totem land allows tribemates and blocks outsiders ('ally-31')
+    p1.inventory[2] = { itemId: 'wood', count: 20 };
+    room.handleSelectSlot('leader', 1); // Blueprint slot
+    const chestRes = room.handleBlueprintPlaceBuild('leader', 'wooden_chest', 12896, 12832);
     assert.strictEqual(chestRes.ok, true);
     const chestId = chestRes.chest!.id;
 
@@ -666,12 +673,15 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.strictEqual(noTotemWall.ok, false);
     assert.match(noTotemWall.error || '', /Tribe Totem/);
 
-    // 4. Create Tribe -> awards Tribe Totem -> place at (12800, 12800) -> claims fixed 20x20 squares!
-    assert.strictEqual(room.handleCreateTribe('king-1', 'Oak Kingdom', 'KING').ok, true);
-    const totemIdx = leader.inventory.findIndex((s) => s?.itemId === 'tribe_totem');
-    assert.ok(totemIdx >= 0);
-    room.handleSelectSlot('king-1', totemIdx);
-    const placedTotem = room.handleUseOrPlaceItem('king-1', 12800, 12800);
+    // 4. Create Tribe -> NO free Totem -> build Tribe Totem via Blueprint at (12800, 12800) -> claims fixed 20x20 squares!
+    assert.strictEqual(room.handleCreateTribe('king-1', 'Oak Kingdom', 'KING', 'public').ok, true);
+    assert.strictEqual(leader.inventory.some((s) => s?.itemId === 'tribe_totem'), false);
+    const bpIdx = leader.inventory.findIndex((s) => s?.itemId === 'blueprint');
+    assert.ok(bpIdx >= 0);
+    leader.inventory[4] = { itemId: 'wood', count: 32 };
+    leader.inventory[5] = { itemId: 'stone', count: 10 };
+    room.handleSelectSlot('king-1', bpIdx);
+    const placedTotem = room.handleBlueprintPlaceBuild('king-1', 'tribe_totem', 12800, 12800);
     assert.strictEqual(placedTotem.ok, true);
     const totem = placedTotem.totem!;
     assert.strictEqual(totem.level, 1);
@@ -683,10 +693,11 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.strictEqual(totem.level, 1);
     assert.strictEqual(totem.sizeTiles, 20);
 
-    // 6. Place Pure-Wood Wall, Small Circular Hut (fixed rotation 0), Watchtower (rotatable quarter = 2), Campfire & Chest inside Totem!
+    // 6. Place Pure-Wood Wall (2500 HP), Small Circular Hut (fixed rotation 0), Watchtower (rotatable quarter = 2), Campfire & Chest inside Totem!
     room.handleSelectSlot('king-1', 2);
     const wallRes = room.handleUseOrPlaceItem('king-1', 12864, 12736, 'h');
     assert.strictEqual(wallRes.ok, true);
+    assert.strictEqual(wallRes.wall?.maxHp, 2500);
 
     leader.inventory[3] = { itemId: 'watchtower', count: 1 };
     room.handleSelectSlot('king-1', 3);
@@ -710,12 +721,9 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     const chRes = room.handleUseOrPlaceItem('king-1', 12896, 12896);
     assert.strictEqual(chRes.ok, true);
 
-    // 7. Anti-Abuse Gate Check A: Non-empty Chest MUST block Blueprint Save & Pack!
+    // 7. Phase 7: Store items inside Wooden Chest — Blueprint Save & Pack MUST preserve all Chest loot!
     chRes.chest!.slots[0] = { itemId: 'wood', count: 5 };
-    const blockedNonEmpty = room.handleSaveBlueprintBuild('king-1');
-    assert.strictEqual(blockedNonEmpty.ok, false);
-    assert.match(blockedNonEmpty.error || '', /Empty all Wooden Chests/);
-    chRes.chest!.slots[0] = null;
+    chRes.chest!.slots[3] = { itemId: 'coal', count: 7 };
 
     // 8. Anti-Abuse Gate Check B: Recent Raid Damage (< 60s) MUST block Blueprint Save & Pack!
     wallRes.wall!.lastDamagedAt = Date.now();
@@ -724,7 +732,7 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.match(blockedRaidLock.error || '', /Raid Lock/);
     wallRes.wall!.lastDamagedAt = 0;
 
-    // 9. Valid Save & Pack consumes 1 Blueprint and packs live Totem (Lv. 2) + builds with ZERO duplication!
+    // 9. Valid Save & Pack consumes 1 Blueprint and packs live Totem + builds + Chest loot with ZERO duplication!
     const tmpBlueprintFile = path.join(
       os.tmpdir(),
       `triberush-blueprint-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
@@ -736,12 +744,13 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
       host.x = 12800;
       host.y = 12800;
       assert.strictEqual(persistedRoom.handleCreateTribe('king-persist', 'Persist Clan', 'PRST').ok, true);
-      const pTotemIdx = host.inventory.findIndex((s) => s?.itemId === 'tribe_totem');
-      persistedRoom.handleSelectSlot('king-persist', pTotemIdx);
-      const pTotemRes = persistedRoom.handleUseOrPlaceItem('king-persist', 12800, 12800);
+      host.inventory[0] = { itemId: 'blueprint', count: 1 };
+      host.inventory[1] = { itemId: 'wood', count: 20 };
+      host.inventory[2] = { itemId: 'stone', count: 10 };
+      persistedRoom.handleSelectSlot('king-persist', 0);
+      const pTotemRes = persistedRoom.handleBlueprintPlaceBuild('king-persist', 'tribe_totem', 12800, 12800);
       assert.strictEqual(pTotemRes.ok, true);
       assert.strictEqual(pTotemRes.totem!.sizeTiles, 20);
-      host.inventory[2] = { itemId: 'blueprint', count: 1 };
       assert.strictEqual(persistedRoom.handleSaveBlueprintBuild('king-persist').ok, true);
 
       // Tribe Host disconnects + empty-world Day 1 reset runs -> saved slot MUST NOT disappear!
@@ -788,7 +797,7 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.match(blockedNearEnemy.error || '', /enemy players/);
     room.removePlayer('invader-9');
 
-    // 11. Deploy saved base onto open empty land restores fixed 20x20 Totem + Wall + Watchtower (rot 2) + Hut + Campfire + Chest & consumes the 1 slot!
+    // 11. Deploy saved base onto open empty land restores fixed 20x20 Totem + Wall + Watchtower (rot 2) + Hut + Campfire + Chest WITH LOOT & consumes the 1 slot!
     const deployed = room.handleLoadBlueprintBuild('king-1', 12800, 12800);
     assert.strictEqual(deployed.ok, true);
     assert.strictEqual(room.blueprintService.getSlot('king-1'), null, 'Single slot must be consumed on deploy (zero cloning)');
@@ -798,6 +807,12 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.strictEqual(restoredTotem.sizeTiles, 20);
     assert.strictEqual(room.placedWalls.size, 1);
     assert.strictEqual(room.placedStructures.size, 3);
+    assert.strictEqual(room.placedChests.size, 1);
+    const restoredChest = Array.from(room.placedChests.values())[0];
+    assert.strictEqual(restoredChest.slots[0]?.itemId, 'wood');
+    assert.strictEqual(restoredChest.slots[0]?.count, 5);
+    assert.strictEqual(restoredChest.slots[3]?.itemId, 'coal');
+    assert.strictEqual(restoredChest.slots[3]?.count, 7);
     const restoredWt = Array.from(room.placedStructures.values()).find((s) => s.kind === 'watchtower');
     assert.strictEqual(restoredWt?.rotationQuarter, 2);
 
@@ -820,15 +835,16 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     member.x = 12850;
     member.y = 12800;
 
-    // Create Tribe and place fixed 20x20 Totem
+    // Create Tribe and build fixed 20x20 Totem via Blueprint
     const created = room.handleCreateTribe('totem-boss', 'Oak Empire', 'OAK');
     assert.strictEqual(created.ok, true);
     assert.strictEqual(room.handleJoinTribe('totem-ally', created.tribe!.id).ok, true);
 
-    const totemSlot = leader.inventory.findIndex((s) => s?.itemId === 'tribe_totem');
-    assert.ok(totemSlot >= 0);
-    room.handleSelectSlot('totem-boss', totemSlot);
-    const placed = room.handleUseOrPlaceItem('totem-boss', 12800, 12800);
+    leader.inventory[0] = { itemId: 'blueprint', count: 1 };
+    leader.inventory[1] = { itemId: 'wood', count: 20 };
+    leader.inventory[2] = { itemId: 'stone', count: 10 };
+    room.handleSelectSlot('totem-boss', 0);
+    const placed = room.handleBlueprintPlaceBuild('totem-boss', 'tribe_totem', 12800, 12800);
     assert.strictEqual(placed.ok, true);
     const totem = placed.totem!;
     assert.strictEqual(totem.sizeTiles, 20);
@@ -864,12 +880,17 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.strictEqual(leader.tribeId, null);
     assert.strictEqual(member.tribeId, null);
 
-    // Solo Leader creating a Tribe, placing Totem, and Leaving Tribe also auto-removes the Totem!
+    // Solo Leader creating a Tribe, building Totem via Blueprint, and Leaving Tribe also auto-removes the Totem!
     const soloTribe = room.handleCreateTribe('totem-boss', 'Solo Clan', 'SOLO');
     assert.strictEqual(soloTribe.ok, true);
-    const soloSlot = leader.inventory.findIndex((s) => s?.itemId === 'tribe_totem');
-    room.handleSelectSlot('totem-boss', soloSlot);
-    assert.strictEqual(room.handleUseOrPlaceItem('totem-boss', 12800, 12800).ok, true);
+    leader.inventory[0] = { itemId: 'blueprint', count: 1 };
+    leader.inventory[1] = { itemId: 'wood', count: 20 };
+    leader.inventory[2] = { itemId: 'stone', count: 10 };
+    room.handleSelectSlot('totem-boss', 0);
+    assert.strictEqual(
+      room.handleBlueprintPlaceBuild('totem-boss', 'tribe_totem', 12800, 12800).ok,
+      true
+    );
     assert.strictEqual(room.placedTotems.size, 1);
     assert.strictEqual(room.handleLeaveTribe('totem-boss').ok, true);
     assert.strictEqual(room.placedTotems.size, 0, 'Last member leaving Tribe must remove its placed Totem');
@@ -982,5 +1003,257 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     }
     assert.strictEqual(victim.isDead, true);
     assert.strictEqual(await saveSvc.loadPlayerSave('acc-victim-88'), null);
+  });
+});
+
+describe('4. Phase 7: Blueprint Build/Move/Rotate/Remove, Structure Immunity, 2500 HP Walls, Extended Weapon Ranges, Random Territory-Safe Respawns & Private Tribes', () => {
+  it('should enforce friendly structure immunity (2500 HP Walls & Campfires only damageable by outsiders), extended Spear/Axe ranges, and zero warmth/cold drain with slower Hunger', () => {
+    const room = new WorldRoom(20261122);
+    const builder = room.joinPlayer(makeMockExplorer('p7-builder', 'Builder')).player!;
+    const ally = room.joinPlayer(makeMockExplorer('p7-ally', 'Ally')).player!;
+    const outsider = room.joinPlayer(makeMockExplorer('p7-raider', 'Outsider')).player!;
+
+    builder.spawnProtectedUntil = 0;
+    ally.spawnProtectedUntil = 0;
+    outsider.spawnProtectedUntil = 0;
+    builder.x = 12800;
+    builder.y = 12800;
+    ally.x = 12800;
+    ally.y = 12800;
+
+    // 1. Create Tribe & build Totem + Wall (2500 HP) + Campfire via Blueprint
+    const tr = room.handleCreateTribe('p7-builder', 'Iron Bastion', 'IRON', 'public');
+    assert.strictEqual(tr.ok, true);
+    assert.strictEqual(room.handleJoinTribe('p7-ally', tr.tribe!.id).ok, true);
+
+    builder.inventory[0] = { itemId: 'blueprint', count: 1 };
+    builder.inventory[1] = { itemId: 'wood', count: 32 };
+    builder.inventory[2] = { itemId: 'stone', count: 10 };
+    builder.inventory[3] = { itemId: 'stick', count: 5 };
+    builder.inventory[4] = { itemId: 'coal', count: 10 };
+    builder.inventory[6] = { itemId: 'wood', count: 32 };
+    room.handleSelectSlot('p7-builder', 0);
+
+    assert.strictEqual(
+      room.handleBlueprintPlaceBuild('p7-builder', 'tribe_totem', 12800, 12800).ok,
+      true
+    );
+    const wallRes = room.handleBlueprintPlaceBuild('p7-builder', 'wooden_wall', 12864, 12736, 'h');
+    assert.strictEqual(wallRes.ok, true);
+    assert.strictEqual(wallRes.wall!.hp, 2500);
+    assert.strictEqual(wallRes.wall!.maxHp, 2500);
+
+    const cfRes = room.handleBlueprintPlaceBuild('p7-builder', 'campfire', 12800, 12928);
+    assert.strictEqual(cfRes.ok, true);
+
+    // 2. Owner and Tribemate MUST deal 0 damage to their own Wall and Campfire
+    builder.inventory[5] = { itemId: 'wooden_axe', count: 1 };
+    ally.inventory[0] = { itemId: 'wooden_axe', count: 1 };
+    room.handleSelectSlot('p7-builder', 5);
+    room.handleSelectSlot('p7-ally', 0);
+
+    builder.x = wallRes.wall!.x;
+    builder.y = wallRes.wall!.y + 42;
+    builder.lastSwingAt = 0;
+    room.handleSwing('p7-builder', -Math.PI / 2);
+    assert.strictEqual(wallRes.wall!.hp, 2500, 'Owner must not damage own Wall');
+
+    ally.x = cfRes.structure!.x - 50;
+    ally.y = cfRes.structure!.y;
+    ally.lastSwingAt = 0;
+    room.handleSwing('p7-ally', 0);
+    assert.strictEqual(cfRes.structure!.hp, cfRes.structure!.maxHp, 'Tribemate must not damage Tribe Campfire');
+
+    // 3. Outsider CAN damage both the Wall and Campfire!
+    outsider.inventory[0] = { itemId: 'wooden_axe', count: 1 };
+    room.handleSelectSlot('p7-raider', 0);
+    outsider.x = wallRes.wall!.x;
+    outsider.y = wallRes.wall!.y + 42;
+    outsider.lastSwingAt = 0;
+    room.handleSwing('p7-raider', -Math.PI / 2);
+    assert.ok(wallRes.wall!.hp < 2500, 'Outsider must be able to damage rival Wall');
+
+    outsider.x = cfRes.structure!.x - 50;
+    outsider.y = cfRes.structure!.y;
+    outsider.lastSwingAt = 0;
+    room.handleSwing('p7-raider', 0);
+    assert.ok(cfRes.structure!.hp < cfRes.structure!.maxHp, 'Outsider must be able to damage rival Campfire');
+
+    // 4. Extended Wooden Spear reach (154u) hits an animal cleanly at 138u distance!
+    const cow = room.animalService.animals.find((a) => a.kind === 'cow' && !a.isDead)!;
+    outsider.inventory[1] = { itemId: 'wooden_spear', count: 1 };
+    room.handleSelectSlot('p7-raider', 1);
+    outsider.x = 14000;
+    outsider.y = 14000;
+    cow.x = 14138;
+    cow.y = 14000;
+    cow.wanderTargetX = cow.x;
+    cow.wanderTargetY = cow.y;
+    const now = Date.now();
+    cow.wanderWaitUntil = now + 10000;
+    cow.lastDamagedAt = 0;
+    room.animalService.step(0.01, now - 10, [outsider]);
+    const hpBeforeSpear = cow.hp;
+    outsider.lastSwingAt = 0;
+    const spearSwing = room.handleSwing('p7-raider', 0);
+    assert.strictEqual(spearSwing.ok, true);
+    assert.ok(cow.hp < hpBeforeSpear, 'Extended Wooden Spear (154u) must hit target at 138u');
+
+    // 5. Nighttime survival: zero freezing HP loss + balanced slower hunger drain + Campfire healing when hunger >= 60
+    builder.hp = 80;
+    builder.hunger = 90;
+    builder.x = cfRes.structure!.x + 40;
+    builder.y = cfRes.structure!.y;
+    builder.lastHearthHealAt = 0;
+    room.handleInputState('p7-builder', 1, 0, 0, false);
+    room.stepSimulation(1.0);
+    assert.ok(builder.hp >= 81, 'Campfire must heal +1 HP/s without any freezing damage');
+    assert.ok(builder.hunger > 89.8, 'Balanced slower hunger drain should drain ~0.085/s walking');
+  });
+
+  it('should let ALL Tribe members move, rotate, and remove builds into Blueprint storedBuilds (reusable via Use & persisted in Supabase save)', async () => {
+    const saveSvc = new PlayerSaveService(false);
+    const room = new WorldRoom(20261122);
+    room.blueprintService.onPersistOwnerState = (ownerId, slot, lastDeployAt, storedBuilds) => {
+      void saveSvc.saveBlueprintState(ownerId, slot, lastDeployAt, storedBuilds);
+    };
+
+    const leader = room.joinPlayer(makeMockExplorer('acc-bp-lead', 'Lead')).player!;
+    const member = room.joinPlayer(makeMockExplorer('acc-bp-mem', 'Member')).player!;
+    leader.x = 12800;
+    leader.y = 12800;
+    member.x = 12800;
+    member.y = 12800;
+
+    const tr = room.handleCreateTribe('acc-bp-lead', 'Builders', 'BLD', 'public');
+    assert.strictEqual(tr.ok, true);
+    assert.strictEqual(room.handleJoinTribe('acc-bp-mem', tr.tribe!.id).ok, true);
+
+    leader.inventory[0] = { itemId: 'blueprint', count: 1 };
+    leader.inventory[1] = { itemId: 'wood', count: 32 };
+    leader.inventory[2] = { itemId: 'stone', count: 10 };
+    leader.inventory[3] = { itemId: 'stick', count: 5 };
+    leader.inventory[4] = { itemId: 'coal', count: 10 };
+    leader.inventory[5] = { itemId: 'wood', count: 32 };
+    room.handleSelectSlot('acc-bp-lead', 0);
+
+    assert.strictEqual(
+      room.handleBlueprintPlaceBuild('acc-bp-lead', 'tribe_totem', 12800, 12800).ok,
+      true
+    );
+    const cfRes = room.handleBlueprintPlaceBuild('acc-bp-lead', 'campfire', 12800, 12928);
+    assert.strictEqual(cfRes.ok, true);
+    const chRes = room.handleBlueprintPlaceBuild('acc-bp-lead', 'wooden_chest', 12896, 12896);
+    assert.strictEqual(chRes.ok, true);
+    chRes.chest!.slots[0] = { itemId: 'leather', count: 9 };
+
+    // Tribemate (non-leader) holding Blueprint can MOVE Chest (keeping items!) and REMOVE Campfire (storing 1x!)
+    member.inventory[0] = { itemId: 'blueprint', count: 1 };
+    room.handleSelectSlot('acc-bp-mem', 0);
+
+    const movedChest = room.handleBlueprintMoveEntity(
+      'acc-bp-mem',
+      'chest',
+      chRes.chest!.id,
+      12704,
+      12896
+    );
+    assert.strictEqual(movedChest.ok, true);
+    assert.strictEqual(chRes.chest!.slots[0]?.itemId, 'leather');
+    assert.strictEqual(chRes.chest!.slots[0]?.count, 9);
+
+    const removedCf = room.handleBlueprintRemoveEntity(
+      'acc-bp-mem',
+      'structure',
+      cfRes.structure!.id
+    );
+    assert.strictEqual(removedCf.ok, true);
+    assert.strictEqual(room.placedStructures.size, 0);
+    assert.strictEqual(room.blueprintService.getStoredBuildCount('acc-bp-mem', 'campfire'), 1);
+
+    // Stored build count persists into PlayerSaveService v2 JSONB envelope!
+    const saved = await saveSvc.loadPlayerSave('acc-bp-mem');
+    assert.ok(saved !== null);
+    assert.strictEqual(saved.storedBuilds.campfire, 1);
+
+    // Placing Campfire again uses the stored 1x for FREE (with 0 materials in inventory!) and decrements back to 0!
+    const reusedCf = room.handleBlueprintPlaceBuild('acc-bp-mem', 'campfire', 12800, 12928);
+    assert.strictEqual(reusedCf.ok, true);
+    assert.strictEqual(reusedCf.usedStored, true);
+    assert.strictEqual(room.blueprintService.getStoredBuildCount('acc-bp-mem', 'campfire'), 0);
+  });
+
+  it('should support Private Tribes with join request Accept/Decline and relocate felled resources strictly outside claimed Totem territories', () => {
+    const room = new WorldRoom(20261122);
+    const leader = room.joinPlayer(makeMockExplorer('priv-lead', 'Chief')).player!;
+    const req1 = room.joinPlayer(makeMockExplorer('priv-req1', 'ApplicantOne')).player!;
+    const req2 = room.joinPlayer(makeMockExplorer('priv-req2', 'ApplicantTwo')).player!;
+
+    // 1. Create Private Tribe
+    const tr = room.handleCreateTribe('priv-lead', 'Secret Circle', 'SEC', 'private');
+    assert.strictEqual(tr.ok, true);
+    assert.strictEqual(tr.tribe!.visibility, 'private');
+
+    // 2. Joining a Private Tribe creates a pending request instead of immediate membership
+    const j1 = room.handleJoinTribe('priv-req1', tr.tribe!.id);
+    assert.strictEqual(j1.ok, true);
+    assert.strictEqual(j1.pending, true);
+    assert.strictEqual(req1.tribeId, null);
+
+    const j2 = room.handleJoinTribe('priv-req2', tr.tribe!.id);
+    assert.strictEqual(j2.ok, true);
+    assert.strictEqual(j2.pending, true);
+    assert.strictEqual(req2.tribeId, null);
+
+    // 3. Leader declines ApplicantOne and accepts ApplicantTwo
+    const declined = room.handleRespondTribeRequest('priv-lead', 'priv-req1', false);
+    assert.strictEqual(declined.ok, true);
+    assert.strictEqual(req1.tribeId, null);
+
+    const accepted = room.handleRespondTribeRequest('priv-lead', 'priv-req2', true);
+    assert.strictEqual(accepted.ok, true);
+    assert.strictEqual(req2.tribeId, tr.tribe!.id);
+    assert.strictEqual(req2.tribeTag, 'SEC');
+
+    // 4. Switching Tribe to Public allows ApplicantOne to join immediately
+    assert.strictEqual(room.handleSetTribeVisibility('priv-lead', 'public').ok, true);
+    const directJoin = room.handleJoinTribe('priv-req1', tr.tribe!.id);
+    assert.strictEqual(directJoin.ok, true);
+    assert.strictEqual(directJoin.pending, false);
+    assert.strictEqual(req1.tribeId, tr.tribe!.id);
+
+    // 5. Randomized resource respawn relocates felled tree to a brand-new coordinate outside any Tribe Totem claim!
+    leader.x = 12800;
+    leader.y = 12800;
+    leader.inventory[0] = { itemId: 'blueprint', count: 1 };
+    leader.inventory[1] = { itemId: 'wood', count: 20 };
+    leader.inventory[2] = { itemId: 'stone', count: 10 };
+    leader.inventory[3] = { itemId: 'wooden_axe', count: 1 };
+    room.handleSelectSlot('priv-lead', 0);
+    const totemRes = room.handleBlueprintPlaceBuild('priv-lead', 'tribe_totem', 12800, 12800);
+    assert.strictEqual(totemRes.ok, true);
+
+    const tree = room.world.trees[0];
+    const oldX = tree.x;
+    const oldY = tree.y;
+    leader.x = tree.x - tree.trunkRadius - 32;
+    leader.y = tree.y;
+    room.handleSelectSlot('priv-lead', 3);
+    while (tree.destroyedAt === null) {
+      leader.lastSwingAt = 0;
+      room.handleSwing('priv-lead', 0);
+    }
+    tree.destroyedAt = Date.now() - CONFIG.TREE_RESPAWN_MS - 1000;
+    for (let tick = 0; tick < 20; tick++) {
+      room.stepSimulation(0.05);
+    }
+
+    assert.strictEqual(tree.destroyedAt, null, 'Tree should respawn after timer');
+    assert.ok(tree.x !== oldX || tree.y !== oldY, 'Respawned tree must relocate to a new random coordinate');
+    assert.strictEqual(
+      room.totemService.findClaimCoveringPoint(tree.x, tree.y, room.placedTotems.values()),
+      null,
+      'Respawned resources must never spawn inside a claimed Tribe Totem territory'
+    );
   });
 });

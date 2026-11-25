@@ -297,6 +297,15 @@ export interface SavedBlueprintPointItem {
   dy: number;
 }
 
+export interface SavedBlueprintChestItem {
+  dx: number;
+  dy: number;
+  items?: Array<[number, ItemId, number]>; // Sparse [slotIndex, itemId, count] preserving chest loot!
+}
+
+export type BlueprintStoredBuilds = Record<string, number>;
+export type BlueprintTargetKind = 'wall' | 'structure' | 'chest' | 'torch' | 'totem';
+
 export interface SavedBaseBlueprintSlot {
   ownerId: string;
   totemLevel: number;
@@ -304,21 +313,31 @@ export interface SavedBaseBlueprintSlot {
   huntCounts: Record<AnimalKind, number>;
   walls: SavedBlueprintWallItem[];
   structures: SavedBlueprintStructureItem[];
-  chests: SavedBlueprintPointItem[];
+  chests: SavedBlueprintChestItem[];
   torches: SavedBlueprintPointItem[];
   savedAt: number;
+}
+
+export type TribeVisibility = 'public' | 'private';
+
+export interface TribeJoinRequest {
+  playerId: string;
+  username: string;
+  requestedAt: number;
 }
 
 export interface TribeSummary {
   id: string;
   name: string;
   tag: string;
+  visibility: TribeVisibility;
   leaderId: string;
   leaderName: string;
   memberCount: number;
   maxMembers: number;
   memberIds: string[];
   memberShortIds: number[];
+  pendingRequests?: TribeJoinRequest[];
 }
 
 export type DayPhaseName = 'DAYTIME' | 'SUNSET' | 'NIGHTTIME' | 'SUNRISE';
@@ -373,10 +392,7 @@ export interface ActiveWorldPlayer {
   maxStamina: number;
   hunger: number;
   maxHunger: number;
-  warmth: number;
-  maxWarmth: number;
   lastStarveTickAt: number;
-  lastFreezeTickAt: number;
   lastHearthHealAt: number;
   lastDamagedAt: number;
   spawnProtectedUntil: number;

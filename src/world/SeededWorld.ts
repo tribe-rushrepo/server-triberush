@@ -244,6 +244,9 @@ export class SeededWorld {
   private treeBuckets: Map<number, WorldTreeNode[]> = new Map();
   private rockBuckets: Map<number, WorldRockNode[]> = new Map();
   private bushBuckets: Map<number, WorldBushNode[]> = new Map();
+  public readonly relocatedTreeIds: Set<number> = new Set();
+  public readonly relocatedRockIds: Set<number> = new Set();
+  public readonly relocatedBushIds: Set<number> = new Set();
   private gridCols: number;
 
   constructor(seed: number = CONFIG.WORLD_SEED, size: number = CONFIG.WORLD_SIZE) {
@@ -273,7 +276,101 @@ export class SeededWorld {
     this.treeBuckets.clear();
     this.rockBuckets.clear();
     this.bushBuckets.clear();
+    this.relocatedTreeIds.clear();
+    this.relocatedRockIds.clear();
+    this.relocatedBushIds.clear();
     this.generateOakBiome();
+  }
+
+  private removeNodeBucket<T extends { id: number; x: number; y: number }>(
+    buckets: Map<number, T[]>,
+    node: T,
+    marginRadius: number
+  ): void {
+    const minCx = Math.max(0, Math.floor((node.x - marginRadius) / COLLISION_CELL_SIZE));
+    const maxCx = Math.min(this.gridCols - 1, Math.floor((node.x + marginRadius) / COLLISION_CELL_SIZE));
+    const minCy = Math.max(0, Math.floor((node.y - marginRadius) / COLLISION_CELL_SIZE));
+    const maxCy = Math.min(this.gridCols - 1, Math.floor((node.y + marginRadius) / COLLISION_CELL_SIZE));
+
+    for (let cy = minCy; cy <= maxCy; cy++) {
+      for (let cx = minCx; cx <= maxCx; cx++) {
+        const list = buckets.get(this.bucketKey(cx, cy));
+        if (!list) continue;
+        for (let i = list.length - 1; i >= 0; i--) {
+          if (list[i].id === node.id) {
+            list.splice(i, 1);
+          }
+        }
+      }
+    }
+  }
+
+  private findRandomResourceSpawn(
+    clearanceRadius: number,
+    isBlockedByTerritory: (x: number, y: number) => boolean
+  ): { x: number; y: number } | null {
+    const margin = 300;
+    const span = this.size - margin * 2;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const cx = Math.round(margin + Math.random() * span);
+      const cy = Math.round(margin + Math.random() * span);
+      if (isBlockedByTerritory(cx, cy)) continue;
+      if (this.overlapsWaterOrMud(cx, cy, clearanceRadius + 16)) continue;
+      if (this.overlapsAnySolid(cx, cy, clearanceRadius + 24)) continue;
+      return { x: cx, y: cy };
+    }
+    return null;
+  }
+
+  /**
+   * Relocates a felled tree to a brand-new random valid position outside all claimed Tribe Totem territories.
+   */
+  public relocateTree(
+    tree: WorldTreeNode,
+    isBlockedByTerritory: (x: number, y: number) => boolean
+  ): boolean {
+    const nextPos = this.findRandomResourceSpawn(tree.trunkRadius + 14, isBlockedByTerritory);
+    if (!nextPos) return false;
+    this.removeNodeBucket(this.treeBuckets, tree, tree.canopyRadius + 90);
+    tree.x = nextPos.x;
+    tree.y = nextPos.y;
+    this.insertNodeBucket(this.treeBuckets, tree, tree.canopyRadius + 90);
+    this.relocatedTreeIds.add(tree.id);
+    return true;
+  }
+
+  /**
+   * Relocates a mined rock to a brand-new random valid position outside all claimed Tribe Totem territories.
+   */
+  public relocateRock(
+    rock: WorldRockNode,
+    isBlockedByTerritory: (x: number, y: number) => boolean
+  ): boolean {
+    const nextPos = this.findRandomResourceSpawn(rock.radius + 14, isBlockedByTerritory);
+    if (!nextPos) return false;
+    this.removeNodeBucket(this.rockBuckets, rock, rock.radius + 130);
+    rock.x = nextPos.x;
+    rock.y = nextPos.y;
+    this.insertNodeBucket(this.rockBuckets, rock, rock.radius + 130);
+    this.relocatedRockIds.add(rock.id);
+    return true;
+  }
+
+  /**
+   * Relocates a destroyed bush to a brand-new random valid position outside all claimed Tribe Totem territories.
+   */
+  public relocateBush(
+    bush: WorldBushNode,
+    isBlockedByTerritory: (x: number, y: number) => boolean
+  ): boolean {
+    const nextPos = this.findRandomResourceSpawn(bush.radius + 10, isBlockedByTerritory);
+    if (!nextPos) return false;
+    this.removeNodeBucket(this.bushBuckets, bush, bush.radius + 130);
+    bush.x = nextPos.x;
+    bush.y = nextPos.y;
+    this.insertNodeBucket(this.bushBuckets, bush, bush.radius + 130);
+    this.relocatedBushIds.add(bush.id);
+    return true;
   }
 
   private insertNodeBucket<T extends { x: number; y: number }>(

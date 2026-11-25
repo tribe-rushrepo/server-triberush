@@ -3,6 +3,8 @@ import path from 'path';
 import { CONFIG } from '../config/index.js';
 import type {
   ActiveWorldPlayer,
+  BlueprintStoredBuilds,
+  ItemId,
   SavedBaseBlueprintSlot,
   WorldPlacedChest,
   WorldPlacedStructure,
@@ -24,22 +26,48 @@ export interface BlueprintSlotSummary {
   torchCount: number;
   savedAt: number;
   deployCooldownRemainingMs: number;
+  storedBuilds: BlueprintStoredBuilds;
 }
 
 interface PersistedBlueprintPayload {
   slots: Record<string, SavedBaseBlueprintSlot>;
   lastDeployAt: Record<string, number>;
+  storedBuilds?: Record<string, BlueprintStoredBuilds>;
+}
+
+const ALLOWED_STORED_BUILD_IDS = new Set<string>([
+  'tribe_totem',
+  'wooden_wall',
+  'campfire',
+  'wooden_chest',
+  'torch',
+  'hut',
+  'watchtower'
+]);
+
+export function sanitizeStoredBuilds(raw: unknown): BlueprintStoredBuilds {
+  const clean: BlueprintStoredBuilds = {};
+  if (!raw || typeof raw !== 'object') return clean;
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (!ALLOWED_STORED_BUILD_IDS.has(key)) continue;
+    if (typeof val === 'number' && Number.isFinite(val) && val > 0) {
+      clean[key] = Math.min(200, Math.floor(val));
+    }
+  }
+  return clean;
 }
 
 export class BlueprintService {
   private readonly slotsByOwnerId = new Map<string, SavedBaseBlueprintSlot>();
   private readonly lastDeployAtByOwnerId = new Map<string, number>();
+  private readonly storedBuildsByOwnerId = new Map<string, BlueprintStoredBuilds>();
   private readonly storageFilePath: string | null;
   public onPersistOwnerState:
     | ((
         ownerId: string,
         slot: SavedBaseBlueprintSlot | null,
-        lastDeployAt: number
+        lastDeployAt: number,
+        storedBuilds: BlueprintStoredBuilds
       ) => void)
     | null = null;
 
@@ -51,12 +79,13 @@ export class BlueprintService {
   }
 
   /**
-   * Hydrates a player's saved Blueprint slot & deploy cooldown from Supabase on JOIN_WORLD.
+   * Hydrates a player's saved Blueprint slot, stored removed builds, and deploy cooldown from Supabase on JOIN_WORLD.
    */
   public hydrateOwnerState(
     ownerId: string,
     slot: SavedBaseBlueprintSlot | null,
-    lastDeployAt: number
+    lastDeployAt: number,
+    storedBuilds?: BlueprintStoredBuilds | null
   ): void {
     if (slot && typeof slot.totemLevel === 'number') {
       this.slotsByOwnerId.set(ownerId, {
@@ -71,10 +100,61 @@ export class BlueprintService {
         this.lastDeployAtByOwnerId.set(ownerId, lastDeployAt);
       }
     }
+    if (storedBuilds && typeof storedBuilds === 'object') {
+      const clean = sanitizeStoredBuilds(storedBuilds);
+      if (Object.keys(clean).length > 0) {
+        this.storedBuildsByOwnerId.set(ownerId, clean);
+      }
+    }
   }
 
   public getLastDeployTimestamp(ownerId: string): number {
     return this.lastDeployAtByOwnerId.get(ownerId) || 0;
+  }
+
+  public getStoredBuilds(ownerId: string): BlueprintStoredBuilds {
+    const map = this.storedBuildsByOwnerId.get(ownerId);
+    return map ? { ...map } : {};
+  }
+
+  public getStoredBuildCount(ownerId: string, itemId: string): number {
+    return this.storedBuildsByOwnerId.get(ownerId)?.[itemId] || 0;
+  }
+
+  public addStoredBuild(ownerId: string, itemId: string, delta = 1): number {
+    if (!ALLOWED_STORED_BUILD_IDS.has(itemId) || delta <= 0) return 0;
+    const current = this.storedBuildsByOwnerId.get(ownerId) || {};
+    const nextCount = Math.min(200, (current[itemId] || 0) + Math.floor(delta));
+    current[itemId] = nextCount;
+    this.storedBuildsByOwnerId.set(ownerId, current);
+    this.persistToDisk();
+    this.onPersistOwnerState?.(
+      ownerId,
+      this.slotsByOwnerId.get(ownerId) || null,
+      this.getLastDeployTimestamp(ownerId),
+      this.getStoredBuilds(ownerId)
+    );
+    return nextCount;
+  }
+
+  public consumeStoredBuild(ownerId: string, itemId: string): boolean {
+    const current = this.storedBuildsByOwnerId.get(ownerId);
+    if (!current || !current[itemId] || current[itemId] <= 0) return false;
+    current[itemId] -= 1;
+    if (current[itemId] <= 0) {
+      delete current[itemId];
+    }
+    if (Object.keys(current).length === 0) {
+      this.storedBuildsByOwnerId.delete(ownerId);
+    }
+    this.persistToDisk();
+    this.onPersistOwnerState?.(
+      ownerId,
+      this.slotsByOwnerId.get(ownerId) || null,
+      this.getLastDeployTimestamp(ownerId),
+      this.getStoredBuilds(ownerId)
+    );
+    return true;
   }
 
   private loadFromDisk(): void {
@@ -101,6 +181,14 @@ export class BlueprintService {
           }
         }
       }
+      if (parsed.storedBuilds && typeof parsed.storedBuilds === 'object') {
+        for (const [ownerId, builds] of Object.entries(parsed.storedBuilds)) {
+          const clean = sanitizeStoredBuilds(builds);
+          if (Object.keys(clean).length > 0) {
+            this.storedBuildsByOwnerId.set(ownerId, clean);
+          }
+        }
+      }
     } catch {
       // Non-fatal: start fresh if file is unreadable
     }
@@ -115,7 +203,8 @@ export class BlueprintService {
       }
       const payload: PersistedBlueprintPayload = {
         slots: Object.fromEntries(this.slotsByOwnerId.entries()),
-        lastDeployAt: Object.fromEntries(this.lastDeployAtByOwnerId.entries())
+        lastDeployAt: Object.fromEntries(this.lastDeployAtByOwnerId.entries()),
+        storedBuilds: Object.fromEntries(this.storedBuildsByOwnerId.entries())
       };
       const tmpPath = `${this.storageFilePath}.tmp`;
       fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2), 'utf8');
@@ -138,18 +227,25 @@ export class BlueprintService {
   public recordDeployTimestamp(ownerId: string, now = Date.now()): void {
     this.lastDeployAtByOwnerId.set(ownerId, now);
     this.persistToDisk();
-    this.onPersistOwnerState?.(ownerId, this.slotsByOwnerId.get(ownerId) || null, now);
+    this.onPersistOwnerState?.(
+      ownerId,
+      this.slotsByOwnerId.get(ownerId) || null,
+      now,
+      this.getStoredBuilds(ownerId)
+    );
   }
 
   public clearAll(): void {
     this.slotsByOwnerId.clear();
     this.lastDeployAtByOwnerId.clear();
+    this.storedBuildsByOwnerId.clear();
     this.persistToDisk();
   }
 
   public getSummary(player: ActiveWorldPlayer, now = Date.now()): BlueprintSlotSummary {
     const slot = this.slotsByOwnerId.get(player.id);
     const cooldownRem = this.getDeployCooldownRemainingMs(player.id, now);
+    const storedBuilds = this.getStoredBuilds(player.id);
 
     if (!slot) {
       return {
@@ -163,7 +259,8 @@ export class BlueprintService {
         chestCount: 0,
         torchCount: 0,
         savedAt: 0,
-        deployCooldownRemainingMs: cooldownRem
+        deployCooldownRemainingMs: cooldownRem,
+        storedBuilds
       };
     }
 
@@ -187,7 +284,8 @@ export class BlueprintService {
       chestCount: slot.chests.length,
       torchCount: slot.torches.length,
       savedAt: slot.savedAt,
-      deployCooldownRemainingMs: cooldownRem
+      deployCooldownRemainingMs: cooldownRem,
+      storedBuilds
     };
   }
 
@@ -287,13 +385,7 @@ export class BlueprintService {
     for (const c of params.chests) {
       if (c.ownerTribeId !== totem.tribeId && c.ownerId !== player.id) continue;
       if (!totemService.isPointInsideTotem(totem, c.x, c.y, -2)) continue;
-      const hasAnyLoot = c.slots.some((slot) => slot !== null && slot.count > 0);
-      if (hasAnyLoot) {
-        return {
-          ok: false,
-          reason: 'Empty all Wooden Chests inside your base before saving Blueprint.'
-        };
-      }
+      // Phase 7: Chest contents are compactly packed and restored with Save & Pack / Load Base!
       capturedChests.push(c);
     }
 
@@ -339,10 +431,18 @@ export class BlueprintService {
         dy: s.y - totem.y,
         rotationQuarter: s.rotationQuarter
       })),
-      chests: chests.map((c) => ({
-        dx: c.x - totem.x,
-        dy: c.y - totem.y
-      })),
+      chests: chests.map((c) => {
+        const sparseItems: Array<[number, ItemId, number]> = [];
+        for (let idx = 0; idx < c.slots.length; idx++) {
+          const item = c.slots[idx];
+          if (item && item.count > 0 && item.itemId !== 'tribe_totem') {
+            sparseItems.push([idx, item.itemId, Math.floor(item.count)]);
+          }
+        }
+        return sparseItems.length > 0
+          ? { dx: c.x - totem.x, dy: c.y - totem.y, items: sparseItems }
+          : { dx: c.x - totem.x, dy: c.y - totem.y };
+      }),
       torches: torches.map((t) => ({
         dx: t.x - totem.x,
         dy: t.y - totem.y
@@ -351,19 +451,29 @@ export class BlueprintService {
     };
     this.slotsByOwnerId.set(ownerId, slot);
     this.persistToDisk();
-    this.onPersistOwnerState?.(ownerId, slot, this.getLastDeployTimestamp(ownerId));
+    this.onPersistOwnerState?.(
+      ownerId,
+      slot,
+      this.getLastDeployTimestamp(ownerId),
+      this.getStoredBuilds(ownerId)
+    );
     return slot;
   }
 
   /**
-   * Consumes the 1 saved slot on successful deployment so a base can NEVER be cloned twice!
+   * Consumes the 1 saved slot on successful deployment so a base (and its packed chest loot) can NEVER be cloned twice!
    */
   public consumeSlot(ownerId: string): SavedBaseBlueprintSlot | null {
     const slot = this.slotsByOwnerId.get(ownerId) || null;
     if (slot) {
       this.slotsByOwnerId.delete(ownerId);
       this.persistToDisk();
-      this.onPersistOwnerState?.(ownerId, null, this.getLastDeployTimestamp(ownerId));
+      this.onPersistOwnerState?.(
+        ownerId,
+        null,
+        this.getLastDeployTimestamp(ownerId),
+        this.getStoredBuilds(ownerId)
+      );
     }
     return slot;
   }

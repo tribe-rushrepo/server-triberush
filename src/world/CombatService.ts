@@ -87,7 +87,12 @@ export class CombatService {
       const nx = dist > 0.001 ? dx / dist : dirX;
       const ny = dist > 0.001 ? dy / dist : dirY;
       const dot = nx * dirX + ny * dirY;
-      if (dot < 0.32) continue;
+      const isSpear = weaponId === 'wooden_spear';
+      const proj = dx * dirX + dy * dirY;
+      const perpDist = Math.abs(dx * -dirY + dy * dirX);
+      const inSpearCorridor =
+        isSpear && proj > 0 && proj <= maxReach && perpDist <= CONFIG.PLAYER_RADIUS + 20;
+      if (dot < 0.32 && !inSpearCorridor) continue;
 
       // Phase 5: 10s Server-Authoritative Spawn Protection Shield blocks PvP damage & knockback
       if (now < target.spawnProtectedUntil) {
@@ -244,7 +249,6 @@ export class CombatService {
     player.hp = player.maxHp;
     player.stamina = player.maxStamina;
     player.hunger = player.maxHunger;
-    player.warmth = player.maxWarmth;
     player.isExhausted = false;
     player.combatUntil = 0;
     player.spawnProtectedUntil = now + CONFIG.SPAWN_PROTECTION_MS;
@@ -257,7 +261,6 @@ export class CombatService {
       maxHp: player.maxHp,
       stamina: player.stamina,
       hunger: player.hunger,
-      warmth: player.warmth,
       spawnProtectionRemainingMs: CONFIG.SPAWN_PROTECTION_MS,
       combatRemainingMs: 0
     });

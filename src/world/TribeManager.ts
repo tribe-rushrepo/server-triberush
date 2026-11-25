@@ -2,7 +2,9 @@ import { CONFIG } from '../config/index.js';
 import type {
   ActiveWorldPlayer,
   AnimalKind,
+  TribeJoinRequest,
   TribeSummary,
+  TribeVisibility,
   WorldPlacedChest
 } from '../models/types.js';
 
@@ -15,9 +17,11 @@ interface InternalTribe {
   id: string;
   name: string;
   tag: string;
+  visibility: TribeVisibility;
   leaderId: string;
   leaderName: string;
   memberIds: Set<string>;
+  pendingRequests: Map<string, TribeJoinRequest>;
   createdAt: number;
   relocatedTotemState: RelocatedTotemState | null;
 }
@@ -52,21 +56,36 @@ export class TribeManager {
         id: t.id,
         name: t.name,
         tag: t.tag,
+        visibility: t.visibility,
         leaderId: t.leaderId,
         leaderName: t.leaderName,
         memberCount: t.memberIds.size,
         maxMembers: CONFIG.MAX_TRIBE_MEMBERS,
         memberIds,
-        memberShortIds
+        memberShortIds,
+        pendingRequests: Array.from(t.pendingRequests.values()).sort(
+          (a, b) => a.requestedAt - b.requestedAt
+        )
       });
     }
     return list;
   }
 
+  public clearPendingRequestsForPlayer(playerId: string): boolean {
+    let changed = false;
+    for (const t of this.tribesById.values()) {
+      if (t.pendingRequests.delete(playerId)) {
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   public createTribe(
     leader: ActiveWorldPlayer,
     rawName: string,
-    rawTag: string
+    rawTag: string,
+    visibility: TribeVisibility = 'public'
   ): { ok: boolean; tribe?: InternalTribe; error?: string } {
     if (leader.tribeId) {
       return { ok: false, error: 'Leave your current Tribe first.' };
@@ -94,13 +113,16 @@ export class TribeManager {
       id,
       name,
       tag,
+      visibility: visibility === 'private' ? 'private' : 'public',
       leaderId: leader.id,
       leaderName: leader.username,
       memberIds: new Set([leader.id]),
+      pendingRequests: new Map(),
       createdAt: Date.now(),
       relocatedTotemState: null
     };
 
+    this.clearPendingRequestsForPlayer(leader.id);
     this.tribesById.set(id, tribe);
     this.tribesByTag.set(tag, tribe);
     leader.tribeId = id;
@@ -108,10 +130,33 @@ export class TribeManager {
     return { ok: true, tribe };
   }
 
+  public setVisibility(
+    leader: ActiveWorldPlayer,
+    visibility: TribeVisibility
+  ): { ok: boolean; visibility?: TribeVisibility; error?: string } {
+    if (!leader.tribeId) return { ok: false, error: 'Not in a Tribe.' };
+    const tribe = this.tribesById.get(leader.tribeId);
+    if (!tribe || tribe.leaderId !== leader.id) {
+      return { ok: false, error: 'Only the Tribe Leader can change Tribe privacy.' };
+    }
+    tribe.visibility = visibility === 'private' ? 'private' : 'public';
+    if (tribe.visibility === 'public') {
+      tribe.pendingRequests.clear();
+    }
+    return { ok: true, visibility: tribe.visibility };
+  }
+
   public joinTribe(
     player: ActiveWorldPlayer,
     tribeId: string
-  ): { ok: boolean; error?: string } {
+  ): {
+    ok: boolean;
+    pending?: boolean;
+    leaderId?: string;
+    tribeTag?: string;
+    tribeName?: string;
+    error?: string;
+  } {
     if (player.tribeId) {
       return { ok: false, error: 'You are already in a Tribe.' };
     }
@@ -126,10 +171,93 @@ export class TribeManager {
       };
     }
 
+    if (tribe.visibility === 'private') {
+      if (tribe.pendingRequests.has(player.id)) {
+        return { ok: false, error: `Join request already sent to [${tribe.tag}].` };
+      }
+      tribe.pendingRequests.set(player.id, {
+        playerId: player.id,
+        username: player.username,
+        requestedAt: Date.now()
+      });
+      return {
+        ok: true,
+        pending: true,
+        leaderId: tribe.leaderId,
+        tribeTag: tribe.tag,
+        tribeName: tribe.name
+      };
+    }
+
+    this.clearPendingRequestsForPlayer(player.id);
     tribe.memberIds.add(player.id);
     player.tribeId = tribe.id;
     player.tribeTag = tribe.tag;
-    return { ok: true };
+    return { ok: true, pending: false, tribeTag: tribe.tag, tribeName: tribe.name };
+  }
+
+  public respondToJoinRequest(
+    leader: ActiveWorldPlayer,
+    targetPlayerId: string,
+    accept: boolean,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>
+  ): {
+    ok: boolean;
+    accepted?: boolean;
+    targetPlayer?: ActiveWorldPlayer;
+    tribeTag?: string;
+    tribeName?: string;
+    error?: string;
+  } {
+    if (!leader.tribeId) return { ok: false, error: 'Not in a Tribe.' };
+    const tribe = this.tribesById.get(leader.tribeId);
+    if (!tribe || tribe.leaderId !== leader.id) {
+      return { ok: false, error: 'Only the Tribe Leader can manage join requests.' };
+    }
+    const req = tribe.pendingRequests.get(targetPlayerId);
+    if (!req) {
+      return { ok: false, error: 'Join request no longer exists.' };
+    }
+    tribe.pendingRequests.delete(targetPlayerId);
+
+    const target = playersById.get(targetPlayerId);
+    if (!accept) {
+      return {
+        ok: true,
+        accepted: false,
+        targetPlayer: target,
+        tribeTag: tribe.tag,
+        tribeName: tribe.name
+      };
+    }
+
+    if (!target) {
+      return { ok: false, error: 'Player is no longer online.' };
+    }
+    if (target.tribeId) {
+      return { ok: false, error: `${target.username} already joined another Tribe.` };
+    }
+    if (Date.now() < target.combatUntil) {
+      return { ok: false, error: `${target.username} is currently in Combat Mode.` };
+    }
+    if (tribe.memberIds.size >= CONFIG.MAX_TRIBE_MEMBERS) {
+      return {
+        ok: false,
+        error: `Tribe [${tribe.tag}] is full (${CONFIG.MAX_TRIBE_MEMBERS}/${CONFIG.MAX_TRIBE_MEMBERS}).`
+      };
+    }
+
+    this.clearPendingRequestsForPlayer(target.id);
+    tribe.memberIds.add(target.id);
+    target.tribeId = tribe.id;
+    target.tribeTag = tribe.tag;
+    return {
+      ok: true,
+      accepted: true,
+      targetPlayer: target,
+      tribeTag: tribe.tag,
+      tribeName: tribe.name
+    };
   }
 
   public setRelocatedTotemState(tribeId: string, state: RelocatedTotemState | null): void {

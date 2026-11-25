@@ -115,6 +115,19 @@ export class TotemService {
     return null;
   }
 
+  public findClaimCoveringPoint(
+    x: number,
+    y: number,
+    totems: Iterable<WorldPlacedTotem>
+  ): WorldPlacedTotem | null {
+    for (const t of totems) {
+      if (this.isPointInsideTotem(t, x, y, 0)) {
+        return t;
+      }
+    }
+    return null;
+  }
+
   public recordAnimalKillForTribe(
     _tribeId: string | null | undefined,
     _kind: AnimalKind,
