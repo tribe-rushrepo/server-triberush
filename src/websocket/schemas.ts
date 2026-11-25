@@ -14,7 +14,8 @@ export const InputStateSchema = z.object({
   moveX: z.number().min(-1).max(1),
   moveY: z.number().min(-1).max(1),
   angle: z.number().min(-Math.PI * 2).max(Math.PI * 2),
-  sprint: z.boolean().optional()
+  sprint: z.boolean().optional(),
+  seq: z.number().int().min(0).max(65535).optional()
 });
 
 export const SwingSchema = z.object({

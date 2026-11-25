@@ -338,12 +338,15 @@ describe('2. Server-Authoritative Survival Loop: 32 Max Stack, Stone & Coal Mini
       onRosterEvent: () => {}
     });
 
+    room.handleInputState('p-1', 1, 0, 0, false, 427);
     room.stepSimulation(0.05);
     assert.ok(snapshotBuf !== null);
     const buf = snapshotBuf as Buffer;
     assert.strictEqual(buf.readUInt8(0), BINARY_PACKET_SNAPSHOT);
     const count = buf.readUInt8(1);
     assert.ok(count >= 1 && count <= 100);
+    assert.strictEqual(SNAPSHOT_HEADER_BYTES, 10);
+    assert.strictEqual(buf.readUInt16LE(8), 427, 'Binary snapshot header must echo viewer ackSeq');
     assert.strictEqual(SNAPSHOT_PLAYER_STRIDE, 18);
     assert.strictEqual(buf.length, SNAPSHOT_HEADER_BYTES + count * SNAPSHOT_PLAYER_STRIDE);
   });
@@ -1298,12 +1301,15 @@ describe('4. Phase 7: Blueprint Build/Move/Rotate/Remove, Structure Immunity, 25
     assert.strictEqual(req2.tribeId, tr.tribe!.id);
     assert.strictEqual(req2.tribeTag, 'SEC');
 
-    // 4. Switching Tribe to Public allows ApplicantOne to join immediately
-    assert.strictEqual(room.handleSetTribeVisibility('priv-lead', 'public').ok, true);
-    const directJoin = room.handleJoinTribe('priv-req1', tr.tribe!.id);
-    assert.strictEqual(directJoin.ok, true);
-    assert.strictEqual(directJoin.pending, false);
-    assert.strictEqual(req1.tribeId, tr.tribe!.id);
+    // 4. Phase 8: Host is NOT allowed to change Public <-> Private once Tribe is created!
+    const lockedSwitch = room.handleSetTribeVisibility('priv-lead', 'public');
+    assert.strictEqual(lockedSwitch.ok, false);
+    assert.match(lockedSwitch.error || '', /locked/i);
+    // Declined applicant still cannot join Private Tribe without a fresh accepted request
+    const retryJoin = room.handleJoinTribe('priv-req1', tr.tribe!.id);
+    assert.strictEqual(retryJoin.ok, true);
+    assert.strictEqual(retryJoin.pending, true);
+    assert.strictEqual(req1.tribeId, null);
 
     // 5. Randomized resource respawn relocates felled tree to a brand-new coordinate outside any Tribe Totem claim!
     leader.x = 12800;

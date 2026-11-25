@@ -1,0 +1,292 @@
+import { CONFIG } from '../../config/index.js';
+import {
+  MARBLE_PALETTE_ORDER,
+  type ActiveWorldPlayer,
+  type InventorySlotItem,
+  type PlayerProfileData
+} from '../../models/types.js';
+import {
+  encodeCompactInventory,
+  type CompactInventorySave
+} from '../../services/PlayerSaveService.js';
+import {
+  broadcastWatchtowerRadars,
+  stepResourceRegrowthAndDrops
+} from './SnapshotHandler.js';
+import { checkPlayerShelterCore } from './TotemHutHandler.js';
+import type { WorldRoomContext } from './roomContext.js';
+
+export interface LifecycleHooks {
+  allocateShortId: () => number;
+  getEmptySince: () => number | null;
+  setEmptySince: (ts: number | null) => void;
+  resetWorldToDayOne: () => void;
+  persistPlayerInventory: (ownerId: string, compact: CompactInventorySave | null) => void;
+}
+
+export function joinPlayerCore(
+  ctx: WorldRoomContext,
+  hooks: LifecycleHooks,
+  profile: PlayerProfileData,
+  preferredColorIndex?: number,
+  restoredInventory?: {
+    hasBackpack: boolean;
+    unlockedSlots: number;
+    inventory: Array<InventorySlotItem | null>;
+  } | null
+): { ok: boolean; player?: ActiveWorldPlayer; error?: string } {
+  const existing = ctx.playersById.get(profile.id);
+  if (existing) {
+    hooks.setEmptySince(null);
+    return { ok: true, player: existing };
+  }
+  if (ctx.playersById.size >= CONFIG.MAX_PLAYERS) {
+    return {
+      ok: false,
+      error: `${CONFIG.REGION_NAME} region is full (${CONFIG.MAX_PLAYERS}/${CONFIG.MAX_PLAYERS}). Please select another region.`
+    };
+  }
+  const emptySince = hooks.getEmptySince();
+  if (
+    ctx.playersById.size === 0 &&
+    emptySince !== null &&
+    Date.now() - emptySince >= CONFIG.EMPTY_RESET_GRACE_MS
+  ) {
+    hooks.resetWorldToDayOne();
+  }
+  hooks.setEmptySince(null);
+
+  const shortId = hooks.allocateShortId();
+  const colorIndex =
+    typeof preferredColorIndex === 'number' &&
+    preferredColorIndex >= 0 &&
+    preferredColorIndex < MARBLE_PALETTE_ORDER.length
+      ? preferredColorIndex
+      : (shortId - 1) % MARBLE_PALETTE_ORDER.length;
+  const color = MARBLE_PALETTE_ORDER[colorIndex];
+  const spawn = ctx.world.getRandomSafeSpawnPosition(
+    Array.from(ctx.playersById.values()),
+    null
+  );
+  const title =
+    profile.earnedTitle?.toUpperCase() === 'AEON'
+      ? 'AEON'
+      : profile.isAdmin
+        ? 'The Game Master'
+        : profile.elo >= 3800
+          ? 'Grandmaster'
+          : profile.elo >= 2800
+            ? 'Master'
+            : profile.elo >= 1800
+              ? 'Expert'
+              : null;
+
+  const now = Date.now();
+  const player: ActiveWorldPlayer = {
+    id: profile.id,
+    shortId,
+    username: profile.username,
+    elo: profile.elo,
+    title,
+    isAdmin: profile.isAdmin,
+    colorIndex,
+    color,
+    x: spawn.x,
+    y: spawn.y,
+    vx: 0,
+    vy: 0,
+    kbVx: 0,
+    kbVy: 0,
+    moveX: 0,
+    moveY: 0,
+    isSprinting: false,
+    isExhausted: false,
+    lastSprintAt: 0,
+    angle: 0,
+    activeSlot: 0,
+    unlockedSlots: restoredInventory
+      ? restoredInventory.unlockedSlots
+      : CONFIG.INVENTORY_UNLOCKED_SLOTS,
+    hasBackpack: restoredInventory ? restoredInventory.hasBackpack : false,
+    inventory: restoredInventory
+      ? Array.from({ length: CONFIG.INVENTORY_TOTAL_SLOTS }, (_, idx) => {
+          const slot = restoredInventory.inventory[idx];
+          return slot ? { itemId: slot.itemId, count: slot.count } : null;
+        })
+      : Array(CONFIG.INVENTORY_TOTAL_SLOTS).fill(null),
+    hp: CONFIG.PLAYER_MAX_HP,
+    maxHp: CONFIG.PLAYER_MAX_HP,
+    stamina: CONFIG.PLAYER_MAX_STAMINA,
+    maxStamina: CONFIG.PLAYER_MAX_STAMINA,
+    hunger: CONFIG.PLAYER_MAX_HUNGER,
+    maxHunger: CONFIG.PLAYER_MAX_HUNGER,
+    lastStarveTickAt: now,
+    lastHearthHealAt: now,
+    lastDamagedAt: 0,
+    spawnProtectedUntil: now + CONFIG.SPAWN_PROTECTION_MS,
+    combatUntil: 0,
+    homeHutId: null,
+    score: 0,
+    animalKills: 0,
+    pvpKills: 0,
+    structuresBuilt: 0,
+    lastBlueprintDeployAt: 0,
+    isDead: false,
+    diedAt: 0,
+    killedByText: null,
+    swingHand: 0,
+    swingUntil: 0,
+    lastSwingAt: 0,
+    tribeId: null,
+    tribeTag: null,
+    lastChatAt: 0,
+    joinedAt: now
+  };
+
+  ctx.playersById.set(player.id, player);
+  ctx.playersByShortId.set(player.shortId, player);
+  ctx.emitRosterEvent({
+    type: 'PLAYER_JOINED',
+    player: {
+      id: player.id,
+      shortId: player.shortId,
+      username: player.username,
+      elo: player.elo,
+      title: player.title,
+      isAdmin: player.isAdmin,
+      colorIndex: player.colorIndex,
+      color: player.color,
+      tribeId: player.tribeId,
+      tribeTag: player.tribeTag
+    },
+    onlinePlayers: ctx.playersById.size
+  });
+  return { ok: true, player };
+}
+
+export function removePlayerCore(
+  ctx: WorldRoomContext,
+  hooks: LifecycleHooks,
+  playerId: string
+): void {
+  const existing = ctx.playersById.get(playerId);
+  if (!existing) return;
+
+  const wasInCombat = !existing.isDead && Date.now() < existing.combatUntil;
+  if (wasInCombat) {
+    ctx.combatService.spillAllInventoryLoot(existing, {
+      onSpawnDrop: (itemId, count, ox, oy) => ctx.spawnGroundDrop(itemId, count, ox, oy)
+    });
+    ctx.clearPlayerInventoryPersistence(existing.id);
+  } else if (existing.isDead) {
+    ctx.clearPlayerInventoryPersistence(existing.id);
+  } else {
+    const compact = encodeCompactInventory(
+      existing.inventory,
+      existing.unlockedSlots,
+      existing.hasBackpack
+    );
+    hooks.persistPlayerInventory(existing.id, compact);
+  }
+
+  const clearedPending = ctx.tribeManager.clearPendingRequestsForPlayer(existing.id);
+  if (existing.tribeId) {
+    const leaveRes = ctx.tribeManager.leaveTribe(existing, ctx.playersById);
+    if (leaveRes.disbandedTribeId) {
+      ctx.removeTotemForTribe(leaveRes.disbandedTribeId);
+    }
+    ctx.broadcastTribeSync();
+  } else if (clearedPending) {
+    ctx.broadcastTribeSync();
+  }
+
+  ctx.playersById.delete(playerId);
+  ctx.playersByShortId.delete(existing.shortId);
+  if (ctx.playersById.size === 0) hooks.setEmptySince(Date.now());
+
+  ctx.emitRosterEvent({
+    type: 'PLAYER_LEFT',
+    shortId: existing.shortId,
+    playerId: existing.id,
+    onlinePlayers: ctx.playersById.size
+  });
+}
+
+export function stepPlayersAndWorldCore(
+  ctx: WorldRoomContext,
+  dt: number,
+  now: number,
+  serverTick: number,
+  hasPlayerEventCb: boolean
+): void {
+  if (serverTick % 20 === 0) {
+    stepResourceRegrowthAndDrops(ctx, now);
+  }
+
+  ctx.spatialGrid.clear();
+  const kbDecay = Math.exp(-CONFIG.KNOCKBACK_DAMPING * dt);
+  const shelterFn = (px: number, py: number) => checkPlayerShelterCore(ctx, px, py);
+
+  for (const p of ctx.playersById.values()) {
+    const surv = ctx.survivalService.stepPlayerSurvival(p, dt, now, shelterFn);
+    if (surv.damageEvent) {
+      ctx.combatService.applyEnvironmentalDamage(
+        surv.damageEvent.player,
+        surv.damageEvent.damage,
+        surv.damageEvent.cause,
+        {
+          onSpawnDrop: (itemId, count, ox, oy) => ctx.spawnGroundDrop(itemId, count, ox, oy),
+          onBroadcastProximityEvent: (x, y, payload) =>
+            ctx.broadcastProximityEvent(x, y, payload),
+          onBroadcastGlobalEvent: (payload) => ctx.emitRosterEvent(payload),
+          onSendPlayerEvent: (pid, payload) => ctx.emitPlayerEvent(pid, payload),
+          onSyncInventory: (v) => ctx.syncPlayerInventory(v),
+          onPlayerDied: (victim) => ctx.clearPlayerInventoryPersistence(victim.id)
+        }
+      );
+    } else if (surv.vitalsChanged && serverTick % 8 === 0) {
+      ctx.syncPlayerVitals(p);
+    }
+
+    if (p.isDead) {
+      p.vx = 0;
+      p.vy = 0;
+      p.kbVx = 0;
+      p.kbVy = 0;
+      ctx.spatialGrid.insert(p);
+      continue;
+    }
+
+    const terrainMult = ctx.world.getMovementSpeedMultiplier(p.x, p.y);
+    const effectiveSpeed = surv.effectiveBaseSpeed * terrainMult;
+    p.vx = p.moveX * effectiveSpeed;
+    p.vy = p.moveY * effectiveSpeed;
+
+    p.kbVx *= kbDecay;
+    p.kbVy *= kbDecay;
+    if (Math.hypot(p.kbVx, p.kbVy) < 4) {
+      p.kbVx = 0;
+      p.kbVy = 0;
+    }
+
+    const totalVx = p.vx + p.kbVx;
+    const totalVy = p.vy + p.kbVy;
+    if (totalVx !== 0 || totalVy !== 0) {
+      const resolved = ctx.world.resolvePlayerPosition(
+        p.x + totalVx * dt,
+        p.y + totalVy * dt,
+        CONFIG.PLAYER_RADIUS
+      );
+      p.x = resolved.x;
+      p.y = resolved.y;
+    }
+
+    ctx.spatialGrid.insert(p);
+  }
+
+  ctx.animalService.step(dt, now, Array.from(ctx.playersById.values()));
+
+  if (serverTick % 20 === 0 && hasPlayerEventCb) {
+    broadcastWatchtowerRadars(ctx);
+  }
+}

@@ -2,13 +2,10 @@ import crypto from 'crypto';
 import path from 'path';
 import type { WebSocket } from 'ws';
 import { CONFIG } from '../config/index.js';
-import { getClientCatalogPayload } from '../data/items/index.js';
 import { tribeRushAuthService } from '../services/AuthService.js';
-import {
-  decodeCompactInventory,
-  playerSaveService
-} from '../services/PlayerSaveService.js';
+import { playerSaveService } from '../services/PlayerSaveService.js';
 import { WorldRoom } from '../world/WorldRoom.js';
+import { dispatchClientMessage } from './messageRouter.js';
 import { ClientMessageSchema } from './schemas.js';
 
 const MAX_BINARY_BUFFERED_BYTES = 64 * 1024; // 64 KB backpressure guard
@@ -110,7 +107,6 @@ export class WebSocketManager {
     clearInterval(this.heartbeatInterval);
     this.worldRoom.stopSimulationLoop();
 
-    // Flush all safe online players' compact inventories to Supabase before closing sockets
     const snapshots = this.worldRoom.getAllSafePlayerInventorySnapshots();
     for (const snap of snapshots) {
       void playerSaveService.savePlayerInventory(snap.ownerId, snap.compact);
@@ -158,7 +154,10 @@ export class WebSocketManager {
     }
   }
 
-  public sendJsonToPlayers(playerIds: ReadonlyArray<string>, payload: Record<string, unknown>): void {
+  public sendJsonToPlayers(
+    playerIds: ReadonlyArray<string>,
+    payload: Record<string, unknown>
+  ): void {
     if (playerIds.length === 0) return;
     const raw = JSON.stringify(payload);
     for (let i = 0; i < playerIds.length; i++) {
@@ -181,7 +180,6 @@ export class WebSocketManager {
     if (!set || set.size === 0) return;
     for (const ws of set) {
       if (ws.readyState === 1) {
-        // S7 Backpressure guard: drop non-critical 20Hz snapshot frame if client socket buffer > 64 KB
         if (typeof ws.bufferedAmount === 'number' && ws.bufferedAmount > MAX_BINARY_BUFFERED_BYTES) {
           continue;
         }
@@ -229,7 +227,6 @@ export class WebSocketManager {
       return;
     }
 
-    // S8 Per-IP concurrent connection cap (strict in production, generous on localhost for multi-tab testing)
     const rawIp = String((socket as any)?._socket?.remoteAddress || '127.0.0.1');
     const isLocalIp = rawIp === '127.0.0.1' || rawIp === '::1' || rawIp.endsWith('127.0.0.1');
     const maxPerIp = CONFIG.NODE_ENV === 'production' && !isLocalIp ? 6 : 32;
@@ -265,7 +262,6 @@ export class WebSocketManager {
       set = new Set();
       this.socketsByPlayer.set(playerId, set);
     } else if (set.size > 0) {
-      // S8 Single active session per authenticated playerId: close stale duplicate tabs cleanly
       for (const oldWs of set) {
         if (oldWs !== socket && oldWs.readyState === 1) {
           try {
@@ -300,7 +296,6 @@ export class WebSocketManager {
       try {
         socket.__isAlive = true;
 
-        // S8 Sliding-window per-socket WebSocket packet flood guard
         const nowMs = Date.now();
         if (!socket.__msgWindowStart || nowMs - socket.__msgWindowStart >= 1000) {
           socket.__msgWindowStart = nowMs;
@@ -329,447 +324,21 @@ export class WebSocketManager {
           return;
         }
 
-        const msg = validated.data;
-
-        switch (msg.type) {
-          case 'PING': {
-            this.sendJsonToPlayer(playerId, {
-              type: 'PONG',
-              serverNow: Date.now(),
-              onlinePlayers: this.getOnlinePlayerCount()
-            });
-            break;
-          }
-          case 'JOIN_WORLD': {
-            const profile = await tribeRushAuthService.getPlayerByIdAsync(playerId, username);
-            if (!profile || profile.isBanned) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ERROR',
-                message: 'Account not found or suspended.'
-              });
-              return;
-            }
-            const alreadyInWorld = Boolean(this.worldRoom.getPlayer(playerId));
-            const saved = !alreadyInWorld
-              ? await playerSaveService.loadPlayerSave(playerId)
-              : null;
-
-            // Abort join if socket closed or server began shutting down while awaiting Supabase
-            if (
-              this.isShuttingDown ||
-              socket.readyState !== 1 ||
-              !this.socketsByPlayer.get(playerId)?.has(socket)
-            ) {
-              return;
-            }
-
-            if (saved) {
-              this.worldRoom.blueprintService.hydrateOwnerState(
-                playerId,
-                saved.blueprint,
-                saved.lastBlueprintDeployAt,
-                saved.storedBuilds
-              );
-            }
-            const restoredInventory = saved?.inventory
-              ? decodeCompactInventory(saved.inventory)
-              : null;
-
-            const res = this.worldRoom.joinPlayer(profile, msg.colorIndex, restoredInventory);
-            if (!res.ok || !res.player) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ERROR',
-                message: res.error || 'Could not enter world.'
-              });
-              return;
-            }
-
-            // Anti-Dupe Consume-on-Join: clear stored DB inventory once hydrated into active session
-            if (!alreadyInWorld && saved?.inventory) {
-              void playerSaveService.clearPlayerInventory(playerId);
-            }
-            const dynamicState = this.worldRoom.getDynamicWorldStateSnapshot();
-            const nowMsJoin = Date.now();
-            this.sendJsonToPlayer(playerId, {
-              type: 'WORLD_JOINED',
-              region: CONFIG.REGION_NAME,
-              regionId: CONFIG.REGION_ID,
-              maxPlayers: CONFIG.MAX_PLAYERS,
-              onlinePlayers: this.getOnlinePlayerCount(),
-              worldSeed: this.worldRoom.world.seed,
-              worldSize: CONFIG.WORLD_SIZE,
-              tickRateHz: CONFIG.TICK_RATE_HZ,
-              selfShortId: res.player.shortId,
-              x: res.player.x,
-              y: res.player.y,
-              colorIndex: res.player.colorIndex,
-              color: res.player.color,
-              activeSlot: res.player.activeSlot,
-              self: {
-                id: res.player.id,
-                shortId: res.player.shortId,
-                username: res.player.username,
-                elo: res.player.elo,
-                title: res.player.title,
-                isAdmin: res.player.isAdmin,
-                colorIndex: res.player.colorIndex,
-                color: res.player.color,
-                x: res.player.x,
-                y: res.player.y,
-                activeSlot: res.player.activeSlot,
-                unlockedSlots: res.player.unlockedSlots,
-                hasBackpack: res.player.hasBackpack,
-                inventory: res.player.inventory.slice(0, res.player.unlockedSlots),
-                hp: Math.round(res.player.hp),
-                maxHp: res.player.maxHp,
-                stamina: Math.round(res.player.stamina),
-                maxStamina: res.player.maxStamina,
-                hunger: Math.round(res.player.hunger),
-                maxHunger: res.player.maxHunger,
-                tribeId: res.player.tribeId,
-                tribeTag: res.player.tribeTag,
-                spawnProtectionRemainingMs: Math.max(0, res.player.spawnProtectedUntil - nowMsJoin),
-                combatRemainingMs: Math.max(0, res.player.combatUntil - nowMsJoin),
-                blueprintSlot: this.worldRoom.blueprintService.getSummary(res.player, nowMsJoin)
-              },
-              roster: this.worldRoom.getAllPlayersMeta(),
-              tribes: this.worldRoom.getTribeSummaries(),
-              catalog: getClientCatalogPayload(),
-              worldState: dynamicState
-            });
-            break;
-          }
-          case 'LEAVE_WORLD': {
-            this.worldRoom.removePlayer(playerId);
-            this.sendJsonToPlayer(playerId, { type: 'WORLD_LEFT' });
-            break;
-          }
-          case 'INPUT_STATE': {
-            this.worldRoom.handleInputState(
-              playerId,
-              msg.moveX,
-              msg.moveY,
-              msg.angle,
-              msg.sprint
-            );
-            break;
-          }
-          case 'SWING': {
-            this.worldRoom.handleSwing(playerId, msg.angle);
-            break;
-          }
-          case 'SELECT_SLOT': {
-            this.worldRoom.handleSelectSlot(playerId, msg.slot);
-            break;
-          }
-          case 'PICKUP_OR_HARVEST': {
-            this.worldRoom.handlePickupOrHarvest(playerId);
-            break;
-          }
-          case 'DROP_ITEM': {
-            const res = this.worldRoom.handleDropHeldItem(
-              playerId,
-              Boolean(msg.dropAll),
-              msg.source || 'inventory',
-              msg.slot,
-              msg.chestId
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'MOVE_SLOT': {
-            const res = this.worldRoom.handleMoveSlot(
-              playerId,
-              msg.fromSource,
-              msg.fromSlot,
-              msg.toSource,
-              msg.toSlot,
-              msg.chestId
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'CRAFT_ITEM': {
-            const res = this.worldRoom.handleCraftItem(playerId, msg.itemId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'USE_ITEM': {
-            const res = this.worldRoom.handleUseOrPlaceItem(
-              playerId,
-              msg.targetX,
-              msg.targetY,
-              msg.orientation,
-              msg.rotationQuarter as 0 | 1 | 2 | 3 | undefined
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'UPGRADE_TOTEM': {
-            const res = this.worldRoom.handleUpgradeTotem(playerId, msg.totemId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'REMOVE_TOTEM': {
-            const res = this.worldRoom.handleRemoveTotem(playerId, msg.totemId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'SET_HUT_HOME': {
-            const res = this.worldRoom.handleSetHutHome(playerId, msg.structureId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'SAVE_BLUEPRINT_BUILD': {
-            const res = this.worldRoom.handleSaveBlueprintBuild(playerId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'LOAD_BLUEPRINT_BUILD': {
-            const res = this.worldRoom.handleLoadBlueprintBuild(
-              playerId,
-              msg.targetX,
-              msg.targetY
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'BLUEPRINT_PLACE_BUILD': {
-            const res = this.worldRoom.handleBlueprintPlaceBuild(
-              playerId,
-              msg.itemId,
-              msg.targetX,
-              msg.targetY,
-              msg.orientation,
-              msg.rotationQuarter as 0 | 1 | 2 | 3 | undefined
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'BLUEPRINT_REMOVE_ENTITY': {
-            const res = this.worldRoom.handleBlueprintRemoveEntity(
-              playerId,
-              msg.targetKind,
-              msg.targetId
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'BLUEPRINT_ROTATE_ENTITY': {
-            const res = this.worldRoom.handleBlueprintRotateEntity(
-              playerId,
-              msg.targetKind,
-              msg.targetId
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'BLUEPRINT_MOVE_ENTITY': {
-            const res = this.worldRoom.handleBlueprintMoveEntity(
-              playerId,
-              msg.targetKind,
-              msg.targetId,
-              msg.targetX,
-              msg.targetY,
-              msg.orientation,
-              msg.rotationQuarter as 0 | 1 | 2 | 3 | undefined
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'EQUIP_ITEM': {
-            const res = this.worldRoom.handleEquipHeldItem(playerId, msg.slot);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'OPEN_CHEST': {
-            const res = this.worldRoom.handleOpenChest(playerId, msg.chestId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'RESPAWN': {
-            const res = this.worldRoom.handleRespawn(playerId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'TRIBE_CREATE': {
-            const res = this.worldRoom.handleCreateTribe(
-              playerId,
-              msg.name,
-              msg.tag,
-              msg.visibility
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'TRIBE_SET_VISIBILITY': {
-            const res = this.worldRoom.handleSetTribeVisibility(playerId, msg.visibility);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'TRIBE_RESPOND_REQUEST': {
-            const res = this.worldRoom.handleRespondTribeRequest(
-              playerId,
-              msg.targetPlayerId,
-              msg.accept
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'TRIBE_JOIN': {
-            const res = this.worldRoom.handleJoinTribe(playerId, msg.tribeId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'TRIBE_LEAVE': {
-            const res = this.worldRoom.handleLeaveTribe(playerId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'TRIBE_DISBAND': {
-            const res = this.worldRoom.handleDisbandTribe(playerId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'TRIBE_KICK': {
-            const res = this.worldRoom.handleKickTribeMember(playerId, msg.targetPlayerId);
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'TRIBE_SET_BUILD_PERMISSION': {
-            const res = this.worldRoom.handleSetTribeBuildPermission(
-              playerId,
-              msg.targetPlayerId,
-              msg.allowed
-            );
-            if (!res.ok && res.error) {
-              this.sendJsonToPlayer(playerId, {
-                type: 'ACTION_NOTICE',
-                message: res.error
-              });
-            }
-            break;
-          }
-          case 'CHAT_MESSAGE': {
-            this.worldRoom.handleChatMessage(playerId, msg.text);
-            break;
-          }
-        }
+        await dispatchClientMessage(
+          {
+            worldRoom: this.worldRoom,
+            playerId,
+            username,
+            socket,
+            isConnectionActive: () =>
+              !this.isShuttingDown &&
+              socket.readyState === 1 &&
+              Boolean(this.socketsByPlayer.get(playerId)?.has(socket)),
+            getOnlinePlayerCount: () => this.getOnlinePlayerCount(),
+            sendJsonToPlayer: (pid, payload) => this.sendJsonToPlayer(pid, payload)
+          },
+          validated.data
+        );
       } catch {
         // Ignore malformed frame
       }

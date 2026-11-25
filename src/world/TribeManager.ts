@@ -135,18 +135,18 @@ export class TribeManager {
 
   public setVisibility(
     leader: ActiveWorldPlayer,
-    visibility: TribeVisibility
+    _visibility: TribeVisibility
   ): { ok: boolean; visibility?: TribeVisibility; error?: string } {
     if (!leader.tribeId) return { ok: false, error: 'Not in a Tribe.' };
     const tribe = this.tribesById.get(leader.tribeId);
     if (!tribe || tribe.leaderId !== leader.id) {
-      return { ok: false, error: 'Only the Tribe Leader can change Tribe privacy.' };
+      return { ok: false, error: 'Only the Tribe Host can manage Tribe settings.' };
     }
-    tribe.visibility = visibility === 'private' ? 'private' : 'public';
-    if (tribe.visibility === 'public') {
-      tribe.pendingRequests.clear();
-    }
-    return { ok: true, visibility: tribe.visibility };
+    return {
+      ok: false,
+      visibility: tribe.visibility,
+      error: 'Tribe privacy (Public/Private) is locked once the Tribe is created.'
+    };
   }
 
   public joinTribe(

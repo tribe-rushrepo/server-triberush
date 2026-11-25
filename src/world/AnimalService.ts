@@ -1,124 +1,51 @@
 import { CONFIG } from '../config/index.js';
 import type { ItemCombatConfig } from '../data/items/index.js';
-import {
-  ANIMAL_KIND_TO_CODE,
-  type ActiveWorldPlayer,
-  type AnimalKind,
-  type ItemId,
-  type WorldAnimalEntity
+import type {
+  ActiveWorldPlayer,
+  AnimalKind,
+  WorldAnimalEntity
 } from '../models/types.js';
-import { createSeededRng, type SeededWorld } from './SeededWorld.js';
+import type { SeededWorld } from './SeededWorld.js';
+import {
+  ANIMAL_AOI_RADIUS,
+  ANIMAL_FLEE_DURATION_MS,
+  ANIMAL_GRID_CELL,
+  ANIMAL_HEADER_BYTES,
+  ANIMAL_MAX_DUCKS,
+  ANIMAL_RECORD_STRIDE,
+  ANIMAL_RESPAWN_MS,
+  ANIMAL_SPECIES,
+  ANIMAL_WAKE_RADIUS,
+  BINARY_PACKET_ANIMALS,
+  COW_LEATHER_DROP_CHANCE,
+  DUCK_SPAWN_RATE,
+  PIG_SPAWN_RATE,
+  encodeBinaryAnimalSnapshotBuffer,
+  type AnimalCombatCallbacks,
+  type AnimalSpeciesSpec
+} from './animals/animalConfig.js';
+import { spawnInitialWildlifeEntities } from './animals/animalSpawner.js';
 
-/**
- * Compact 16-Byte Binary Wildlife Packet Layout (Little-Endian, 10Hz AOI):
- * - Header (4 bytes):
- *   [0]: uint8 packetType = 2 (BINARY_PACKET_ANIMALS)
- *   [1]: uint8 count (max 120)
- *   [2..3]: uint16 serverTick & 0xffff
- * - Per-Animal Record (16 bytes * count):
- *   [0..1]: uint16 id
- *   [2]: uint8 kindCode (0=pig, 1=cow, 2=chicken, 3=duck, 4=sheep)
- *   [3..6]: float32 x
- *   [7..10]: float32 y
- *   [11..12]: int16 angleQuantized
- *   [13]: uint8 hpPct (0..100)
- *   [14]: uint8 flags (bit 0: isFleeing, bit 1: isMoving)
- *   [15]: uint8 pad (0)
- */
-export const BINARY_PACKET_ANIMALS = 2;
-export const ANIMAL_HEADER_BYTES = 4;
-export const ANIMAL_RECORD_STRIDE = 16;
-
-export const ANIMAL_FLEE_DURATION_MS = 4000;
-export const ANIMAL_RESPAWN_MS = 75_000;
-export const ANIMAL_AOI_RADIUS = 1650;
-export const ANIMAL_WAKE_RADIUS = 2200;
-export const ANIMAL_MAX_DUCKS = 6;
-export const PIG_SPAWN_RATE = 0.50;
-export const DUCK_SPAWN_RATE = 0.50;
-export const COW_LEATHER_DROP_CHANCE = 0.5;
-
-const ANIMAL_GRID_CELL = 512;
-
-export interface AnimalSpeciesSpec {
-  kind: AnimalKind;
-  maxHp: number;
-  radius: number;
-  roamSpeed: number;
-  fleeSpeed: number;
-  meatItem: ItemId;
-  meatMin: number;
-  meatMax: number;
-  leatherChance: number;
-}
-
-export const ANIMAL_SPECIES: Record<AnimalKind, AnimalSpeciesSpec> = {
-  pig: {
-    kind: 'pig',
-    maxHp: 65,
-    radius: 22,
-    roamSpeed: 72,
-    fleeSpeed: 165,
-    meatItem: 'raw_pork',
-    meatMin: 2,
-    meatMax: 3,
-    leatherChance: 0
-  },
-  cow: {
-    kind: 'cow',
-    maxHp: 95,
-    radius: 27,
-    roamSpeed: 64,
-    fleeSpeed: 160,
-    meatItem: 'raw_beef',
-    meatMin: 3,
-    meatMax: 4,
-    leatherChance: COW_LEATHER_DROP_CHANCE
-  },
-  chicken: {
-    kind: 'chicken',
-    maxHp: 35,
-    radius: 16,
-    roamSpeed: 82,
-    fleeSpeed: 182,
-    meatItem: 'raw_chicken',
-    meatMin: 1,
-    meatMax: 2,
-    leatherChance: 0
-  },
-  duck: {
-    kind: 'duck',
-    maxHp: 40,
-    radius: 17,
-    roamSpeed: 78,
-    fleeSpeed: 178,
-    meatItem: 'raw_duck',
-    meatMin: 1,
-    meatMax: 2,
-    leatherChance: 0
-  },
-  sheep: {
-    kind: 'sheep',
-    maxHp: 70,
-    radius: 23,
-    roamSpeed: 68,
-    fleeSpeed: 168,
-    meatItem: 'raw_mutton',
-    meatMin: 2,
-    meatMax: 3,
-    leatherChance: 0
-  }
+export {
+  ANIMAL_AOI_RADIUS,
+  ANIMAL_FLEE_DURATION_MS,
+  ANIMAL_HEADER_BYTES,
+  ANIMAL_MAX_DUCKS,
+  ANIMAL_RECORD_STRIDE,
+  ANIMAL_RESPAWN_MS,
+  ANIMAL_SPECIES,
+  ANIMAL_WAKE_RADIUS,
+  BINARY_PACKET_ANIMALS,
+  COW_LEATHER_DROP_CHANCE,
+  DUCK_SPAWN_RATE,
+  PIG_SPAWN_RATE,
+  type AnimalCombatCallbacks,
+  type AnimalSpeciesSpec
 };
-
-export interface AnimalCombatCallbacks {
-  onSpawnDrop: (itemId: ItemId, count: number, originX: number, originY: number) => void;
-  onBroadcastProximityEvent: (x: number, y: number, payload: Record<string, unknown>) => void;
-  onAnimalKilled?: (killer: ActiveWorldPlayer, kind: AnimalKind) => void;
-}
 
 /**
  * Server-Authoritative Wildlife Spawning, Dormancy-Aware AI, 4-Second Hit-Flee,
- * O(1) Spatial Grid, Loot Drops (5 Raw Meats + Cow 50% Leather), and 16-Byte Binary Encoding.
+ * O(1) Spatial Grid, Loot Drops, and 16-Byte Binary Encoding.
  */
 export class AnimalService {
   public readonly animals: WorldAnimalEntity[] = [];
@@ -235,178 +162,12 @@ export class AnimalService {
   }
 
   private spawnInitialWildlife(): void {
-    // Independent PRNG derived from world seed so terrain/trees/rocks remain 100% deterministic
-    const rng = createSeededRng((this.world.seed ^ 0x517cc1b7) >>> 0);
-    const pad = 260;
-
-    // 1. MUDLAND PIGS: 50% spawn rate per Muddy Bog Patch, roaming in herds of 2-3 pigs
-    for (let i = 0; i < this.world.mudPatches.length; i++) {
-      const mud = this.world.mudPatches[i];
-      if (rng() >= PIG_SPAWN_RATE) continue;
-
-      const herdSize = rng() < 0.5 ? 2 : 3;
-      for (let h = 0; h < herdSize; h++) {
-        let sx = mud.x;
-        let sy = mud.y;
-        let placed = false;
-        for (let tries = 0; tries < 10; tries++) {
-          const a = rng() * Math.PI * 2;
-          const d = 18 + rng() * (mud.radius + 70);
-          const cx = Math.max(pad, Math.min(this.world.size - pad, mud.x + Math.cos(a) * d));
-          const cy = Math.max(pad, Math.min(this.world.size - pad, mud.y + Math.sin(a) * d));
-          if (!this.world.overlapsAnySolid(cx, cy, ANIMAL_SPECIES.pig.radius + 10)) {
-            sx = cx;
-            sy = cy;
-            placed = true;
-            break;
-          }
-        }
-        if (placed) {
-          this.createAnimal('pig', sx, sy, mud.x, mud.y, mud.radius + 260, rng);
-        }
-      }
-    }
-
-    // 2. MALLARD DUCKS: 50% spawn rate per Pond & Lake, max 5-6 ducks per water body
-    const waterBodies: Array<{
-      kind: 'pond' | 'lake';
-      id: number;
-      x: number;
-      y: number;
-      radius: number;
-    }> = [
-      ...this.world.ponds.map((p) => ({
-        kind: 'pond' as const,
-        id: p.id,
-        x: p.x,
-        y: p.y,
-        radius: p.radius
-      })),
-      ...this.world.lakes.map((l) => ({
-        kind: 'lake' as const,
-        id: l.id,
-        x: l.x,
-        y: l.y,
-        radius: l.outerRadius
-      }))
-    ];
-
-    let totalDucks = 0;
-    for (let i = 0; i < waterBodies.length; i++) {
-      const wb = waterBodies[i];
-      if (rng() >= DUCK_SPAWN_RATE) continue;
-
-      const waterMaxCap = rng() < 0.5 ? 5 : ANIMAL_MAX_DUCKS;
-      const flockSize =
-        wb.kind === 'lake'
-          ? Math.min(waterMaxCap, 4 + Math.floor(rng() * 3)) // 4-6 ducks on massive lakes
-          : Math.min(waterMaxCap, 2 + Math.floor(rng() * 3)); // 2-4 ducks on forest ponds
-
-      for (let dIdx = 0; dIdx < flockSize; dIdx++) {
-        let sx = wb.x;
-        let sy = wb.y;
-        for (let tries = 0; tries < 12; tries++) {
-          const a = rng() * Math.PI * 2;
-          const d = rng() * wb.radius * 0.62;
-          const cx = wb.x + Math.cos(a) * d;
-          const cy = wb.y + Math.sin(a) * d;
-          if (this.world.isPointInsideWaterBody(cx, cy, wb.kind, wb.id, 0.80)) {
-            sx = cx;
-            sy = cy;
-            break;
-          }
-        }
-        this.createAnimal('duck', sx, sy, wb.x, wb.y, wb.radius * 0.85, rng, {
-          waterKind: wb.kind,
-          waterId: wb.id
-        });
-        totalDucks += 1;
-      }
-    }
-
-    // Fallback safety: if an unlucky seed rolled zero ducks, populate the first water body with 3 ducks
-    if (totalDucks === 0 && waterBodies.length > 0) {
-      const wb = waterBodies[0];
-      for (let dIdx = 0; dIdx < 3; dIdx++) {
-        this.createAnimal('duck', wb.x, wb.y, wb.x, wb.y, wb.radius * 0.85, rng, {
-          waterKind: wb.kind,
-          waterId: wb.id
-        });
-      }
-    }
-
-    // 3. COW (40%), CHICKEN (45%), SHEEP (40%): Roaming meadows anywhere across the 25600x25600 realm
-    const sectorsPerAxis = 12; // 144 meadow grazing sectors across the world
-    const sectorSpan = (this.world.size - pad * 2) / sectorsPerAxis;
-
-    const trySpawnMeadowAnimal = (
-      kind: 'cow' | 'chicken' | 'sheep',
-      minX: number,
-      minY: number,
-      spanX: number,
-      spanY: number
-    ) => {
-      const spec = ANIMAL_SPECIES[kind];
-      for (let tries = 0; tries < 12; tries++) {
-        const cx = minX + rng() * spanX;
-        const cy = minY + rng() * spanY;
-        if (this.world.overlapsWaterOrMud(cx, cy, spec.radius + 26)) continue;
-        if (this.world.overlapsAnySolid(cx, cy, spec.radius + 14)) continue;
-        this.createAnimal(kind, cx, cy, cx, cy, 980, rng);
-        return true;
-      }
-      return false;
-    };
-
-    for (let gy = 0; gy < sectorsPerAxis; gy++) {
-      for (let gx = 0; gx < sectorsPerAxis; gx++) {
-        const minX = pad + gx * sectorSpan;
-        const minY = pad + gy * sectorSpan;
-        if (rng() < 0.40) {
-          trySpawnMeadowAnimal('cow', minX, minY, sectorSpan, sectorSpan);
-        }
-        if (rng() < 0.45) {
-          trySpawnMeadowAnimal('chicken', minX, minY, sectorSpan, sectorSpan);
-        }
-        if (rng() < 0.40) {
-          trySpawnMeadowAnimal('sheep', minX, minY, sectorSpan, sectorSpan);
-        }
-      }
-    }
-
-    // Seed a handful of nearby meadows around Spawn Center (~580..1200u out) so players see wildlife quickly
-    const center = this.world.size / 2;
-    const starterKinds: Array<'cow' | 'chicken' | 'sheep'> = [
-      'cow',
-      'cow',
-      'chicken',
-      'chicken',
-      'sheep',
-      'sheep'
-    ];
-    for (let i = 0; i < starterKinds.length; i++) {
-      const kind = starterKinds[i];
-      const spec = ANIMAL_SPECIES[kind];
-      for (let tries = 0; tries < 14; tries++) {
-        const a = rng() * Math.PI * 2;
-        const d = 560 + rng() * 680;
-        const cx = center + Math.cos(a) * d;
-        const cy = center + Math.sin(a) * d;
-        if (this.world.overlapsWaterOrMud(cx, cy, spec.radius + 26)) continue;
-        if (this.world.overlapsAnySolid(cx, cy, spec.radius + 14)) continue;
-        this.createAnimal(kind, cx, cy, cx, cy, 900, rng);
-        break;
-      }
-    }
-
+    spawnInitialWildlifeEntities(this.world, (kind, x, y, hx, hy, hr, rng, waterMeta) =>
+      this.createAnimal(kind, x, y, hx, hy, hr, rng, waterMeta)
+    );
     this.rebuildSpatialGrid();
   }
 
-  /**
-   * Server-Authoritative Melee Hunting:
-   * Checks forward strike cone against O(1) nearby animals, applies damage & knockback,
-   * triggers exact 4-second flee away from the attacker, and spawns Raw Meat (+ 50% Cow Leather) on kill.
-   */
   public resolveMeleeAnimalHits(
     attacker: ActiveWorldPlayer,
     weaponId: string,
@@ -442,17 +203,15 @@ export class AnimalService {
       const perpDist = Math.abs(dx * -dirY + dy * dirX);
       const inSpearCorridor =
         isSpear && proj > 0 && proj <= maxReach && perpDist <= animal.radius + 20;
-      if (dot < 0.30 && !inSpearCorridor) continue;
+      if (dot < 0.3 && !inSpearCorridor) continue;
 
       animal.lastDamagedAt = now;
       animal.hp = Math.max(0, animal.hp - stats.combatDmg);
 
-      // Apply knockback impulse away from attacker
       const kbSpeed = (stats.knockback || 210) * 0.85;
       animal.kbVx = nx * kbSpeed;
       animal.kbVy = ny * kbSpeed;
 
-      // Trigger exact 4.0-second flee state running away from attacker
       animal.fleeUntil = now + ANIMAL_FLEE_DURATION_MS;
       animal.fleeDirX = nx;
       animal.fleeDirY = ny;
@@ -492,7 +251,6 @@ export class AnimalService {
           Math.floor(Math.random() * (spec.meatMax - spec.meatMin + 1));
         callbacks.onSpawnDrop(spec.meatItem, meatCount, animal.x, animal.y);
 
-        // Cows have a 50% chance per kill to drop Leather (1-2 Leather)
         if (spec.leatherChance > 0) {
           const roll =
             typeof leatherRollOverride === 'number' ? leatherRollOverride : Math.random();
@@ -502,7 +260,6 @@ export class AnimalService {
           }
         }
 
-        // Chickens have a 45% chance per kill to drop 1-4 Feathers (for Base Blueprints)
         if (animal.kind === 'chicken') {
           const roll =
             typeof featherRollOverride === 'number' ? featherRollOverride : Math.random();
@@ -522,10 +279,6 @@ export class AnimalService {
     return hits;
   }
 
-  /**
-   * Advances Wildlife AI at 20Hz with Dormancy Sleep Culling:
-   * Animals farther than 2,200u from all active players skip AI steering & obstacle checks completely.
-   */
   public step(
     dt: number,
     now: number,
@@ -537,7 +290,6 @@ export class AnimalService {
     for (let i = 0; i < this.animals.length; i++) {
       const a = this.animals[i];
 
-      // Natural ecosystem respawn after 75s
       if (a.isDead) {
         if (a.respawnAt !== null && now >= a.respawnAt) {
           this.respawnAnimal(a, now);
@@ -545,7 +297,6 @@ export class AnimalService {
         continue;
       }
 
-      // Dormancy check: only simulate steering & collision if a player is within 2,200u (or actively fleeing/knockback)
       let awake = now < a.fleeUntil || Math.abs(a.kbVx) > 2 || Math.abs(a.kbVy) > 2;
       if (!awake) {
         for (let pIdx = 0; pIdx < activePlayers.length; pIdx++) {
@@ -564,7 +315,6 @@ export class AnimalService {
         continue;
       }
 
-      // Decay knockback impulse
       a.kbVx *= kbDecay;
       a.kbVy *= kbDecay;
       if (Math.hypot(a.kbVx, a.kbVy) < 4) {
@@ -576,13 +326,11 @@ export class AnimalService {
       let moveVy = 0;
 
       if (now < a.fleeUntil) {
-        // Fleeing away from attacker for exact 4 seconds at slower-than-player speed (160-182u/s)
         moveVx = a.fleeDirX * a.fleeSpeed;
         moveVy = a.fleeDirY * a.fleeSpeed;
         a.angle = Math.atan2(a.fleeDirY, a.fleeDirX);
         a.isMoving = true;
       } else {
-        // If flee just ended, transition cleanly to a brief calm pause before wandering again
         if (a.fleeUntil > 0 && now >= a.fleeUntil) {
           a.fleeUntil = 0;
           a.isMoving = false;
@@ -618,7 +366,6 @@ export class AnimalService {
         const candY = a.y + totalVy * dt;
 
         if (a.kind === 'duck' && a.homeWaterKind && typeof a.homeWaterId === 'number') {
-          // Ducks swim smoothly without water slowdown and stay inside their pond/lake contour
           if (
             this.world.isPointInsideWaterBody(
               candX,
@@ -631,7 +378,6 @@ export class AnimalService {
             a.x = candX;
             a.y = candY;
           } else {
-            // Deflect neatly along shore / back toward water center
             const toCenterAngle = Math.atan2(a.homeY - a.y, a.homeX - a.x);
             const deflected = toCenterAngle + (Math.random() - 0.5) * 1.1;
             a.fleeDirX = Math.cos(deflected);
@@ -644,7 +390,6 @@ export class AnimalService {
           const resolved = this.world.resolvePlayerPosition(candX, candY, a.radius);
           const blocked = Math.hypot(resolved.x - candX, resolved.y - candY) > 1.5;
 
-          // Keep non-aquatic land animals out of deep lakes/ponds (Pigs LOVE mud bogs!)
           let hitsWater = false;
           for (let li = 0; li < this.world.lakes.length; li++) {
             const lk = this.world.lakes[li];
@@ -676,7 +421,6 @@ export class AnimalService {
 
           if (blocked || hitsWater) {
             if (now < a.fleeUntil) {
-              // Steer around tree trunks, boulders, or shorelines while fleeing
               const curAngle = Math.atan2(a.fleeDirY, a.fleeDirX);
               const turn = (a.id % 2 === 0 ? 1 : -1) * (0.75 + Math.random() * 0.45);
               const nextAngle = curAngle + turn;
@@ -705,7 +449,7 @@ export class AnimalService {
         const dist = Math.random() * a.homeRadius * 0.72;
         const tx = a.homeX + Math.cos(ang) * dist;
         const ty = a.homeY + Math.sin(ang) * dist;
-        if (this.world.isPointInsideWaterBody(tx, ty, a.homeWaterKind, a.homeWaterId, 0.80)) {
+        if (this.world.isPointInsideWaterBody(tx, ty, a.homeWaterKind, a.homeWaterId, 0.8)) {
           a.wanderTargetX = tx;
           a.wanderTargetY = ty;
           return;
@@ -716,7 +460,6 @@ export class AnimalService {
       return;
     }
 
-    // Pigs stay loosely anchored near their mud bog; Cows/Chickens/Sheep roam freely across meadows
     const distFromHome = Math.hypot(a.x - a.homeX, a.y - a.homeY);
     if (a.kind === 'pig' && distFromHome > a.homeRadius) {
       const backAngle = Math.atan2(a.homeY - a.y, a.homeX - a.x) + (Math.random() - 0.5) * 0.6;
@@ -766,9 +509,6 @@ export class AnimalService {
     a.wanderTargetY = a.y;
   }
 
-  /**
-   * Encodes all alive animals within AOI of a viewer into a compact 16-byte-per-animal binary packet.
-   */
   public encodeBinaryAnimalSnapshot(
     viewerX: number,
     viewerY: number,
@@ -776,42 +516,6 @@ export class AnimalService {
     now: number = Date.now()
   ): Buffer {
     const nearby = this.queryNearby(viewerX, viewerY, ANIMAL_AOI_RADIUS);
-    const count = Math.min(120, nearby.length);
-    const buf = Buffer.allocUnsafe(ANIMAL_HEADER_BYTES + count * ANIMAL_RECORD_STRIDE);
-
-    buf.writeUInt8(BINARY_PACKET_ANIMALS, 0);
-    buf.writeUInt8(count, 1);
-    buf.writeUInt16LE(serverTick & 0xffff, 2);
-
-    for (let i = 0; i < count; i++) {
-      const a = nearby[i];
-      const offset = ANIMAL_HEADER_BYTES + i * ANIMAL_RECORD_STRIDE;
-
-      let normAngle = a.angle % (Math.PI * 2);
-      if (normAngle > Math.PI) normAngle -= Math.PI * 2;
-      if (normAngle < -Math.PI) normAngle += Math.PI * 2;
-      const angleQuantized = Math.max(
-        -32767,
-        Math.min(32767, Math.round((normAngle / Math.PI) * 32767))
-      );
-
-      const hpPct = a.isDead
-        ? 0
-        : Math.max(1, Math.min(100, Math.round((a.hp / a.maxHp) * 100)));
-      const isFleeing = now < a.fleeUntil ? 1 : 0;
-      const isMovingBit = a.isMoving ? 1 : 0;
-      const flags = isFleeing | (isMovingBit << 1);
-
-      buf.writeUInt16LE(a.id & 0xffff, offset);
-      buf.writeUInt8(ANIMAL_KIND_TO_CODE[a.kind], offset + 2);
-      buf.writeFloatLE(a.x, offset + 3);
-      buf.writeFloatLE(a.y, offset + 7);
-      buf.writeInt16LE(angleQuantized, offset + 11);
-      buf.writeUInt8(hpPct, offset + 13);
-      buf.writeUInt8(flags, offset + 14);
-      buf.writeUInt8(0, offset + 15);
-    }
-
-    return buf;
+    return encodeBinaryAnimalSnapshotBuffer(nearby, serverTick, now);
   }
 }
