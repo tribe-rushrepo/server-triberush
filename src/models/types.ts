@@ -379,6 +379,7 @@ export interface ActiveWorldPlayer {
   kbVy: number; // Knockback velocity Y
   moveX: number;
   moveY: number;
+  pendingInputSeq?: number;
   lastProcessedInputSeq?: number;
   isSprinting: boolean;
   isExhausted: boolean;

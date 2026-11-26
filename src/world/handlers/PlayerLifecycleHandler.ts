@@ -300,6 +300,9 @@ export function stepPlayersAndWorldCore(
       p.vy = 0;
       p.kbVx = 0;
       p.kbVy = 0;
+      if (p.pendingInputSeq !== undefined) {
+        p.lastProcessedInputSeq = p.pendingInputSeq;
+      }
       ctx.spatialGrid.insert(p);
       continue;
     }
@@ -328,6 +331,9 @@ export function stepPlayersAndWorldCore(
       p.y = resolved.y;
     }
 
+    if (p.pendingInputSeq !== undefined) {
+      p.lastProcessedInputSeq = p.pendingInputSeq;
+    }
     ctx.spatialGrid.insert(p);
   }
 

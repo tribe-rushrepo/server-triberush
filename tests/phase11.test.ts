@@ -289,4 +289,26 @@ describe('Phase 11: Guaranteed Position Sync, Tree-vs-Rock Swing Priority & Rede
     assert.strictEqual(persisted[0].ownerId, 'p11-ckpt');
     assert.strictEqual(p.inventoryDirty, false);
   });
+
+  it('should stage pendingInputSeq on arrival and commit lastProcessedInputSeq only after physics step runs', () => {
+    const room = new WorldRoom(20261122);
+    const p = room.joinPlayer(makeProfile('p11-seq', 'Runner')).player!;
+    const startX = p.x;
+
+    // Packet arrives between ticks -> pendingInputSeq updates, but acked lastProcessedInputSeq stays 0
+    room.handleInputState('p11-seq', 1, 0, 0, true, 512);
+    assert.strictEqual(p.pendingInputSeq, 512);
+    assert.strictEqual(p.lastProcessedInputSeq ?? 0, 0);
+
+    const preTickSnap = encodePlayerBinarySnapshot(10, p, [p], Date.now());
+    assert.strictEqual(preTickSnap.readUInt16LE(8 + 18), 0, 'Pre-tick snapshot must not prematurely ack unstepped seq');
+
+    // Once simulation tick runs, player moves AND ackSeq commits to 512
+    room.stepSimulation(0.05);
+    assert.ok(p.x > startX, 'Player should advance on simulation tick');
+    assert.strictEqual(p.lastProcessedInputSeq, 512);
+
+    const postTickSnap = encodePlayerBinarySnapshot(11, p, [p], Date.now());
+    assert.strictEqual(postTickSnap.readUInt16LE(8 + 18), 512, 'Post-tick snapshot must echo committed ackSeq');
+  });
 });

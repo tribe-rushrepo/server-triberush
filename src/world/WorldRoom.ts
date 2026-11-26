@@ -457,7 +457,7 @@ export class WorldRoom {
     player.moveY = ny;
     if (typeof sprint === 'boolean') player.isSprinting = sprint;
     if (typeof seq === 'number' && Number.isInteger(seq) && seq >= 0) {
-      player.lastProcessedInputSeq = seq & 0xffff;
+      player.pendingInputSeq = seq & 0xffff;
     }
     if (Number.isFinite(angle)) {
       let a = angle % (Math.PI * 2);
