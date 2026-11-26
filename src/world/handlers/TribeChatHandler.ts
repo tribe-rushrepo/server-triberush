@@ -199,7 +199,7 @@ export function handleLeaveTribeCore(
 
   ctx.stripSpareTribeTotemItems(player);
   if (res.disbandedTribeId) {
-    ctx.removeTotemForTribe(res.disbandedTribeId);
+    ctx.purgeTribeBuilds(res.disbandedTribeId);
   }
 
   ctx.syncPlayerInventory(player);
@@ -211,6 +211,7 @@ export function handleLeaveTribeCore(
     tribeTag: null
   });
   ctx.broadcastTribeSync();
+  ctx.markWorldStateDirty();
   return { ok: true };
 }
 
@@ -229,7 +230,10 @@ export function handleDisbandTribeCore(
     return { ok: false, error: res.error || 'Could not disband Tribe.' };
   }
 
-  const hadTotem = ctx.removeTotemForTribe(res.disbandedTribeId);
+  const hadTotem = Boolean(
+    ctx.totemService.findTotemForTribe(res.disbandedTribeId, ctx.placedTotems.values())
+  );
+  ctx.purgeTribeBuilds(res.disbandedTribeId);
   for (const member of res.affectedPlayers || []) {
     ctx.stripSpareTribeTotemItems(member);
     ctx.syncPlayerInventory(member);
@@ -251,6 +255,7 @@ export function handleDisbandTribeCore(
   }
 
   ctx.broadcastTribeSync();
+  ctx.markWorldStateDirty();
   return { ok: true };
 }
 

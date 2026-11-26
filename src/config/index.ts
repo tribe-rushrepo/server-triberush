@@ -135,7 +135,8 @@ export const CONFIG = {
   DAYTIME_END_TICK: 12000,
   SUNSET_END_TICK: 13800,
   NIGHT_END_TICK: 22200,
-  EMPTY_RESET_GRACE_MS: 30000,
+  OFFLINE_BASE_GRACE_MS: parseIntSafe(process.env.OFFLINE_BASE_GRACE_MS, 180000),
+  EMPTY_RESET_GRACE_MS: parseIntSafe(process.env.EMPTY_RESET_GRACE_MS, 180000),
 
   // Inventory, Hotbar, Chest & 32 Max Stack Limit
   HOTBAR_SLOTS: 8,

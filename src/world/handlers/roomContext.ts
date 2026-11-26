@@ -111,6 +111,9 @@ export interface WorldRoomContext {
   removeStructureEntity(s: WorldPlacedStructure): void;
   removeTotemFromWorld(totem: WorldPlacedTotem): void;
   removeTotemForTribe(tribeId: string): boolean;
+  purgeTribeBuilds(tribeId: string): boolean;
+  purgeSoloOwnerBuilds(ownerId: string): boolean;
+  markWorldStateDirty(): void;
   stripSpareTribeTotemItems(player: ActiveWorldPlayer): void;
   canTribeManageEntity(
     player: ActiveWorldPlayer,

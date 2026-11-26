@@ -7,13 +7,15 @@ import {
 } from '../../models/types.js';
 import {
   encodeCompactInventory,
-  type CompactInventorySave
+  type CompactInventorySave,
+  type SavedPlayerWorldState
 } from '../../services/PlayerSaveService.js';
 import {
   broadcastWatchtowerRadars,
+  buildSavedPlayerWorldState,
   stepResourceRegrowthAndDrops
 } from './SnapshotHandler.js';
-import { checkPlayerShelterCore } from './TotemHutHandler.js';
+import { checkPlayerShelterCore, hasUnpackedSoloBuildsCore } from './TotemHutHandler.js';
 import type { WorldRoomContext } from './roomContext.js';
 import type { SessionResumeCache } from './sessionResumeCache.js';
 
@@ -22,7 +24,14 @@ export interface LifecycleHooks {
   getEmptySince: () => number | null;
   setEmptySince: (ts: number | null) => void;
   resetWorldToDayOne: () => void;
-  persistPlayerInventory: (ownerId: string, compact: CompactInventorySave | null) => void;
+  persistPlayerInventory: (
+    ownerId: string,
+    compact: CompactInventorySave | null,
+    playerState?: SavedPlayerWorldState | null
+  ) => void;
+  markSoloOwnerDisconnected: (ownerId: string, now: number) => void;
+  clearSoloOwnerDisconnected: (ownerId: string) => void;
+  hasGraceProtectedSoloBuilds: (now: number) => boolean;
   sessionResumeCache: SessionResumeCache;
 }
 
@@ -37,11 +46,13 @@ export function joinPlayerCore(
     hasBackpack: boolean;
     unlockedSlots: number;
     inventory: Array<InventorySlotItem | null>;
-  } | null
+  } | null,
+  restoredPlayerState?: SavedPlayerWorldState | null
 ): { ok: boolean; player?: ActiveWorldPlayer; error?: string } {
   const existing = ctx.playersById.get(profile.id);
   if (existing) {
     hooks.setEmptySince(null);
+    hooks.clearSoloOwnerDisconnected(profile.id);
     return { ok: true, player: existing };
   }
   if (ctx.playersById.size >= CONFIG.MAX_PLAYERS) {
@@ -50,18 +61,27 @@ export function joinPlayerCore(
       error: `${CONFIG.REGION_NAME} region is full (${CONFIG.MAX_PLAYERS}/${CONFIG.MAX_PLAYERS}). Please select another region.`
     };
   }
+
+  const now = Date.now();
   const emptySince = hooks.getEmptySince();
   if (
     ctx.playersById.size === 0 &&
     emptySince !== null &&
-    Date.now() - emptySince >= CONFIG.EMPTY_RESET_GRACE_MS
+    now - emptySince >= CONFIG.EMPTY_RESET_GRACE_MS &&
+    !ctx.tribeManager.hasGraceProtectedOfflineTribes(now, CONFIG.OFFLINE_BASE_GRACE_MS) &&
+    !hooks.hasGraceProtectedSoloBuilds(now)
   ) {
     hooks.resetWorldToDayOne();
   }
   hooks.setEmptySince(null);
+  hooks.clearSoloOwnerDisconnected(profile.id);
 
-  const now = Date.now();
   const resumed = hooks.sessionResumeCache.consume(profile.id, now);
+  const persisted =
+    !resumed && restoredPlayerState && restoredPlayerState.worldSeed === ctx.world.seed
+      ? restoredPlayerState
+      : null;
+  const stateSource = resumed || persisted;
 
   const shortId = hooks.allocateShortId();
   const colorIndex =
@@ -72,8 +92,8 @@ export function joinPlayerCore(
       : (shortId - 1) % MARBLE_PALETTE_ORDER.length;
   const color = MARBLE_PALETTE_ORDER[colorIndex];
 
-  const spawn = resumed
-    ? ctx.world.resolvePlayerPosition(resumed.x, resumed.y, CONFIG.PLAYER_RADIUS)
+  const spawn = stateSource
+    ? ctx.world.resolvePlayerPosition(stateSource.x, stateSource.y, CONFIG.PLAYER_RADIUS)
     : ctx.world.getRandomSafeSpawnPosition(Array.from(ctx.playersById.values()), null);
 
   const title =
@@ -88,6 +108,13 @@ export function joinPlayerCore(
             : profile.elo >= 1800
               ? 'Expert'
               : null;
+
+  const candidateHutId = stateSource ? stateSource.homeHutId : null;
+  const restoredHomeHutId =
+    candidateHutId !== null &&
+    (resumed !== null || ctx.placedStructures.get(candidateHutId)?.kind === 'hut')
+      ? candidateHutId
+      : null;
 
   const player: ActiveWorldPlayer = {
     id: profile.id,
@@ -110,7 +137,7 @@ export function joinPlayerCore(
     isExhausted: false,
     lastSprintAt: 0,
     angle: 0,
-    activeSlot: resumed ? Math.max(0, Math.min(7, resumed.activeSlot)) : 0,
+    activeSlot: stateSource ? Math.max(0, Math.min(7, stateSource.activeSlot)) : 0,
     unlockedSlots: restoredInventory
       ? restoredInventory.unlockedSlots
       : CONFIG.INVENTORY_UNLOCKED_SLOTS,
@@ -121,22 +148,28 @@ export function joinPlayerCore(
           return slot ? { itemId: slot.itemId, count: slot.count } : null;
         })
       : Array(CONFIG.INVENTORY_TOTAL_SLOTS).fill(null),
-    hp: resumed ? Math.max(1, Math.min(CONFIG.PLAYER_MAX_HP, resumed.hp)) : CONFIG.PLAYER_MAX_HP,
+    hp: stateSource
+      ? Math.max(1, Math.min(CONFIG.PLAYER_MAX_HP, stateSource.hp))
+      : CONFIG.PLAYER_MAX_HP,
     maxHp: CONFIG.PLAYER_MAX_HP,
-    stamina: resumed
-      ? Math.max(0, Math.min(CONFIG.PLAYER_MAX_STAMINA, resumed.stamina))
+    stamina: stateSource
+      ? Math.max(0, Math.min(CONFIG.PLAYER_MAX_STAMINA, stateSource.stamina))
       : CONFIG.PLAYER_MAX_STAMINA,
     maxStamina: CONFIG.PLAYER_MAX_STAMINA,
-    hunger: resumed
-      ? Math.max(0, Math.min(CONFIG.PLAYER_MAX_HUNGER, resumed.hunger))
+    hunger: stateSource
+      ? Math.max(0, Math.min(CONFIG.PLAYER_MAX_HUNGER, stateSource.hunger))
       : CONFIG.PLAYER_MAX_HUNGER,
     maxHunger: CONFIG.PLAYER_MAX_HUNGER,
     lastStarveTickAt: now,
     lastHearthHealAt: now,
     lastDamagedAt: 0,
-    spawnProtectedUntil: resumed ? resumed.spawnProtectedUntil : now + CONFIG.SPAWN_PROTECTION_MS,
+    spawnProtectedUntil: resumed
+      ? resumed.spawnProtectedUntil
+      : persisted
+        ? now + 4000
+        : now + CONFIG.SPAWN_PROTECTION_MS,
     combatUntil: 0,
-    homeHutId: resumed ? resumed.homeHutId : null,
+    homeHutId: restoredHomeHutId,
     score: 0,
     animalKills: 0,
     pvpKills: 0,
@@ -158,11 +191,11 @@ export function joinPlayerCore(
   ctx.playersByShortId.set(player.shortId, player);
 
   let tribeRestored = false;
-  if (resumed?.tribeId) {
+  if (stateSource?.tribeId) {
     tribeRestored = ctx.tribeManager.rejoinTribeById(
       player,
-      resumed.tribeId,
-      resumed.hadBuildPermission
+      stateSource.tribeId,
+      Boolean(stateSource.hadBuildPermission)
     );
   }
 
@@ -191,14 +224,17 @@ export function joinPlayerCore(
 export function removePlayerCore(
   ctx: WorldRoomContext,
   hooks: LifecycleHooks,
-  playerId: string
+  playerId: string,
+  options?: { explicitLeave?: boolean }
 ): void {
   const existing = ctx.playersById.get(playerId);
   if (!existing) return;
 
   const now = Date.now();
+  const explicitLeave = Boolean(options?.explicitLeave);
   existing.inventoryDirty = false;
   existing.urgentInventorySaveAt = 0;
+
   const wasInCombat = !existing.isDead && now < existing.combatUntil;
   const prevTribeId = existing.tribeId;
   const wasTribeLeader = prevTribeId
@@ -206,44 +242,69 @@ export function removePlayerCore(
     : false;
   const hadBuildPermission = prevTribeId ? ctx.tribeManager.hasBuildPermission(existing) : false;
 
+  ctx.playersById.delete(playerId);
+  ctx.playersByShortId.delete(existing.shortId);
+  const clearedPending = ctx.tribeManager.clearPendingRequestsForPlayer(existing.id);
+
+  const applyTribeAndSoloLeavePolicy = () => {
+    if (explicitLeave) {
+      if (existing.tribeId) {
+        const leaveRes = ctx.tribeManager.leaveTribe(existing, ctx.playersById);
+        if (leaveRes.disbandedTribeId) {
+          ctx.purgeTribeBuilds(leaveRes.disbandedTribeId);
+        }
+        ctx.broadcastTribeSync();
+      }
+      ctx.purgeSoloOwnerBuilds(existing.id);
+      hooks.clearSoloOwnerDisconnected(existing.id);
+    } else {
+      if (prevTribeId) {
+        ctx.tribeManager.handleMemberDisconnected(existing.id, prevTribeId, ctx.playersById, now);
+        ctx.broadcastTribeSync();
+      } else if (hasUnpackedSoloBuildsCore(ctx, existing.id)) {
+        hooks.markSoloOwnerDisconnected(existing.id, now);
+      }
+    }
+  };
+
   if (wasInCombat) {
     ctx.combatService.spillAllInventoryLoot(existing, {
       onSpawnDrop: (itemId, count, ox, oy) => ctx.spawnGroundDrop(itemId, count, ox, oy)
     });
     ctx.clearPlayerInventoryPersistence(existing.id);
     hooks.sessionResumeCache.delete(existing.id);
+    applyTribeAndSoloLeavePolicy();
   } else if (existing.isDead) {
     ctx.clearPlayerInventoryPersistence(existing.id);
     hooks.sessionResumeCache.delete(existing.id);
+    applyTribeAndSoloLeavePolicy();
   } else {
+    applyTribeAndSoloLeavePolicy();
+    if (existing.homeHutId && !ctx.placedStructures.has(existing.homeHutId)) {
+      existing.homeHutId = null;
+    }
     const compact = encodeCompactInventory(
       existing.inventory,
       existing.unlockedSlots,
       existing.hasBackpack
     );
-    hooks.persistPlayerInventory(existing.id, compact);
-    hooks.sessionResumeCache.save(
-      existing,
-      prevTribeId,
-      wasTribeLeader,
-      hadBuildPermission,
-      now
-    );
+    const savedTribeId = explicitLeave ? null : prevTribeId;
+    const savedBuildPerm = explicitLeave ? false : hadBuildPermission;
+    const savedLeader = explicitLeave ? false : wasTribeLeader;
+    const playerState: SavedPlayerWorldState = {
+      ...buildSavedPlayerWorldState(ctx, existing, now),
+      tribeId: savedTribeId,
+      hadBuildPermission: savedBuildPerm
+    };
+    hooks.persistPlayerInventory(existing.id, compact, playerState);
+    hooks.sessionResumeCache.save(existing, savedTribeId, savedLeader, savedBuildPerm, now);
   }
 
-  const clearedPending = ctx.tribeManager.clearPendingRequestsForPlayer(existing.id);
-  if (existing.tribeId) {
-    const leaveRes = ctx.tribeManager.leaveTribe(existing, ctx.playersById);
-    if (leaveRes.disbandedTribeId) {
-      ctx.removeTotemForTribe(leaveRes.disbandedTribeId);
-    }
-    ctx.broadcastTribeSync();
-  } else if (clearedPending) {
+  if (clearedPending && !prevTribeId) {
     ctx.broadcastTribeSync();
   }
+  ctx.markWorldStateDirty();
 
-  ctx.playersById.delete(playerId);
-  ctx.playersByShortId.delete(existing.shortId);
   if (ctx.playersById.size === 0) hooks.setEmptySince(now);
 
   ctx.emitRosterEvent({
@@ -337,7 +398,6 @@ export function stepPlayersAndWorldCore(
     ctx.spatialGrid.insert(p);
   }
 
-  // Step awake wildlife AI smoothly at 20Hz (cell-dirty spatial grid keeps idle cost near zero)
   ctx.animalService.step(dt, now, activePlayersScratch);
 
   if (serverTick % 20 === 0 && hasPlayerEventCb) {

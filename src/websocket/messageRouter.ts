@@ -95,7 +95,12 @@ export async function dispatchClientMessage(
         ? decodeCompactInventory(saved.inventory)
         : null;
 
-      const res = worldRoom.joinPlayer(profile, msg.colorIndex, restoredInventory);
+      const res = worldRoom.joinPlayer(
+        profile,
+        msg.colorIndex,
+        restoredInventory,
+        saved?.playerState ?? null
+      );
       if (!res.ok || !res.player) {
         ctx.sendJsonToPlayer(playerId, {
           type: 'ERROR',
@@ -104,8 +109,8 @@ export async function dispatchClientMessage(
         return;
       }
 
-      if (!alreadyInWorld && saved?.inventory) {
-        void playerSaveService.clearPlayerInventory(playerId);
+      if (!alreadyInWorld && (saved?.inventory || saved?.playerState)) {
+        void playerSaveService.clearPlayerInventory(playerId, true);
         res.player.inventoryDirty = true;
       }
       ctx.markJoinedWorld();
@@ -161,7 +166,7 @@ export async function dispatchClientMessage(
       return;
     }
     case 'LEAVE_WORLD': {
-      worldRoom.removePlayer(playerId);
+      worldRoom.removePlayer(playerId, { explicitLeave: true });
       ctx.sendJsonToPlayer(playerId, { type: 'WORLD_LEFT' });
       return;
     }

@@ -4,6 +4,7 @@ import type { WebSocket } from 'ws';
 import { CONFIG } from '../config/index.js';
 import { tribeRushAuthService } from '../services/AuthService.js';
 import { playerSaveService } from '../services/PlayerSaveService.js';
+import { worldPersistenceService } from '../services/WorldPersistenceService.js';
 import { WorldRoom } from '../world/WorldRoom.js';
 import { decodeBinarySnapshotToJson } from '../world/handlers/SnapshotHandler.js';
 import { dispatchClientMessage } from './messageRouter.js';
@@ -52,12 +53,16 @@ export class WebSocketManager {
     ) => {
       void playerSaveService.saveBlueprintState(ownerId, slot, lastDeployAt, storedBuilds);
     };
-    this.worldRoom.onPersistPlayerInventory = (ownerId, compact) => {
-      void playerSaveService.savePlayerInventory(ownerId, compact);
+    this.worldRoom.onPersistPlayerInventory = (ownerId, compact, playerState) => {
+      void playerSaveService.savePlayerInventory(ownerId, compact, playerState);
     };
     this.worldRoom.onClearPlayerInventory = (ownerId) => {
-      void playerSaveService.clearPlayerInventory(ownerId);
+      void playerSaveService.clearPlayerInventory(ownerId, true);
     };
+    this.worldRoom.onMarkWorldDirty = () => {
+      worldPersistenceService.scheduleSave(this.worldRoom, CONFIG.REGION_ID);
+    };
+    worldPersistenceService.startPeriodicSync(this.worldRoom, CONFIG.REGION_ID);
     this.worldRoom.setCallbacks({
       onBinarySnapshot: (playerId, frame) => {
         this.sendBinaryToPlayer(playerId, frame);
@@ -106,6 +111,7 @@ export class WebSocketManager {
   public shutdown(): void {
     this.isShuttingDown = true;
     clearInterval(this.heartbeatInterval);
+    worldPersistenceService.stopTimers();
     this.worldRoom.stopSimulationLoop();
     this.worldRoom.blueprintService.flushPendingDiskWriteSync();
     for (const set of this.socketsByPlayer.values()) {
@@ -124,6 +130,7 @@ export class WebSocketManager {
   public async shutdownAsync(): Promise<void> {
     this.isShuttingDown = true;
     clearInterval(this.heartbeatInterval);
+    worldPersistenceService.stopTimers();
     this.worldRoom.stopSimulationLoop();
 
     // Pause client auto-reconnects while the retiring instance flushes saves to Supabase
@@ -134,10 +141,13 @@ export class WebSocketManager {
 
     const snapshots = this.worldRoom.getAllSafePlayerInventorySnapshots(Date.now(), true);
     for (const snap of snapshots) {
-      void playerSaveService.savePlayerInventory(snap.ownerId, snap.compact);
+      void playerSaveService.savePlayerInventory(snap.ownerId, snap.compact, snap.playerState);
     }
+    void worldPersistenceService.saveWorldRoomNow(this.worldRoom, CONFIG.REGION_ID, true);
+
     await Promise.allSettled([
       playerSaveService.flushAllPendingWrites(4500),
+      worldPersistenceService.flushPendingWrites(4500),
       this.worldRoom.blueprintService.flushPendingDiskWrite()
     ]);
 

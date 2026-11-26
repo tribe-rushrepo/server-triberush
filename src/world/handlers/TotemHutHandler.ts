@@ -77,8 +77,179 @@ export function removeTotemFromWorldCore(ctx: WorldRoomContext, totem: WorldPlac
   ctx.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
   ctx.emitRosterEvent({
     type: 'TOTEM_REMOVED',
-    totemId: totem.id
+    totemId: totem.id,
+    id: totem.id
   });
+}
+
+/**
+ * Purges all unpacked standing builds belonging to a disbanded or grace-expired Tribe:
+ * Totems, Walls, Structures (Huts, Watchtowers, Campfires), Placed Chests, and Torches.
+ */
+export function purgeUnpackedBuildsForTribeCore(ctx: WorldRoomContext, tribeId: string): boolean {
+  let removedAny = false;
+  for (const totem of Array.from(ctx.placedTotems.values())) {
+    if (totem.tribeId === tribeId) {
+      removeTotemFromWorldCore(ctx, totem);
+      removedAny = true;
+    }
+  }
+  for (const wall of Array.from(ctx.placedWalls.values())) {
+    if (wall.tribeId === tribeId) {
+      const halfW = wall.orientation === 'h' ? wall.length / 2 : wall.thickness / 2;
+      const halfH = wall.orientation === 'h' ? wall.thickness / 2 : wall.length / 2;
+      ctx.placedWalls.delete(wall.id);
+      ctx.world.removeBoxCollider('wall', wall.id, wall.x, wall.y, halfW, halfH);
+      ctx.emitRosterEvent({
+        type: 'WALL_HIT',
+        id: wall.id,
+        hp: 0,
+        maxHp: wall.maxHp,
+        destroyed: true
+      });
+      removedAny = true;
+    }
+  }
+  for (const s of Array.from(ctx.placedStructures.values())) {
+    if (s.tribeId === tribeId) {
+      removeStructureEntityCore(ctx, s);
+      ctx.emitRosterEvent({
+        type: 'STRUCTURE_HIT',
+        id: s.id,
+        hp: 0,
+        maxHp: s.maxHp,
+        destroyed: true
+      });
+      removedAny = true;
+    }
+  }
+  for (const chest of Array.from(ctx.placedChests.values())) {
+    if (chest.ownerTribeId === tribeId) {
+      ctx.placedChests.delete(chest.id);
+      ctx.world.removeSolidCollider('chest', chest.id, chest.x, chest.y, chest.radius);
+      ctx.emitRosterEvent({ type: 'CHEST_REMOVED', id: chest.id });
+      removedAny = true;
+    }
+  }
+  for (const torch of Array.from(ctx.placedTorches.values())) {
+    if (torch.ownerTribeId === tribeId) {
+      ctx.placedTorches.delete(torch.id);
+      ctx.emitRosterEvent({ type: 'TORCH_REMOVED', id: torch.id });
+      removedAny = true;
+    }
+  }
+  return removedAny;
+}
+
+/**
+ * Purges any unpacked solo (non-Tribe) builds owned by `ownerId` upon explicit leave
+ * or 3-minute offline grace expiry.
+ */
+export function purgeUnpackedSoloBuildsForOwnerCore(
+  ctx: WorldRoomContext,
+  ownerId: string
+): boolean {
+  let removedAny = false;
+  for (const wall of Array.from(ctx.placedWalls.values())) {
+    if (!wall.tribeId && wall.ownerId === ownerId) {
+      const halfW = wall.orientation === 'h' ? wall.length / 2 : wall.thickness / 2;
+      const halfH = wall.orientation === 'h' ? wall.thickness / 2 : wall.length / 2;
+      ctx.placedWalls.delete(wall.id);
+      ctx.world.removeBoxCollider('wall', wall.id, wall.x, wall.y, halfW, halfH);
+      ctx.emitRosterEvent({
+        type: 'WALL_HIT',
+        id: wall.id,
+        hp: 0,
+        maxHp: wall.maxHp,
+        destroyed: true
+      });
+      removedAny = true;
+    }
+  }
+  for (const s of Array.from(ctx.placedStructures.values())) {
+    if (!s.tribeId && s.ownerId === ownerId) {
+      removeStructureEntityCore(ctx, s);
+      ctx.emitRosterEvent({
+        type: 'STRUCTURE_HIT',
+        id: s.id,
+        hp: 0,
+        maxHp: s.maxHp,
+        destroyed: true
+      });
+      removedAny = true;
+    }
+  }
+  for (const chest of Array.from(ctx.placedChests.values())) {
+    if (!chest.ownerTribeId && chest.ownerId === ownerId) {
+      ctx.placedChests.delete(chest.id);
+      ctx.world.removeSolidCollider('chest', chest.id, chest.x, chest.y, chest.radius);
+      ctx.emitRosterEvent({ type: 'CHEST_REMOVED', id: chest.id });
+      removedAny = true;
+    }
+  }
+  for (const torch of Array.from(ctx.placedTorches.values())) {
+    if (!torch.ownerTribeId && torch.ownerId === ownerId) {
+      ctx.placedTorches.delete(torch.id);
+      ctx.emitRosterEvent({ type: 'TORCH_REMOVED', id: torch.id });
+      removedAny = true;
+    }
+  }
+  return removedAny;
+}
+
+export function hasUnpackedSoloBuildsCore(ctx: WorldRoomContext, ownerId: string): boolean {
+  for (const w of ctx.placedWalls.values()) {
+    if (!w.tribeId && w.ownerId === ownerId) return true;
+  }
+  for (const s of ctx.placedStructures.values()) {
+    if (!s.tribeId && s.ownerId === ownerId) return true;
+  }
+  for (const c of ctx.placedChests.values()) {
+    if (!c.ownerTribeId && c.ownerId === ownerId) return true;
+  }
+  for (const t of ctx.placedTorches.values()) {
+    if (!t.ownerTribeId && t.ownerId === ownerId) return true;
+  }
+  return false;
+}
+
+export function sweepExpiredOfflineBasesCore(
+  ctx: WorldRoomContext,
+  offlineSoloOwners: Map<string, number>,
+  graceMs: number,
+  now: number
+): boolean {
+  let changed = false;
+  const expiredTribeIds = ctx.tribeManager.collectExpiredOfflineTribes(
+    ctx.playersById,
+    graceMs,
+    now
+  );
+  if (expiredTribeIds.length > 0) {
+    changed = true;
+    for (let i = 0; i < expiredTribeIds.length; i++) {
+      purgeUnpackedBuildsForTribeCore(ctx, expiredTribeIds[i]);
+    }
+    ctx.broadcastTribeSync();
+  }
+
+  for (const [ownerId, offlineSince] of Array.from(offlineSoloOwners.entries())) {
+    if (ctx.playersById.has(ownerId)) {
+      offlineSoloOwners.delete(ownerId);
+      continue;
+    }
+    if (now - offlineSince >= graceMs) {
+      offlineSoloOwners.delete(ownerId);
+      if (purgeUnpackedSoloBuildsForOwnerCore(ctx, ownerId)) {
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    ctx.markWorldStateDirty();
+  }
+  return changed;
 }
 
 export function stripSpareTribeTotemItemsCore(player: ActiveWorldPlayer): void {

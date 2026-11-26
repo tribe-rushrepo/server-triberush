@@ -5,6 +5,8 @@ import websocket from '@fastify/websocket';
 import { CONFIG } from './config/index.js';
 import { getClientCatalogPayload } from './data/items/index.js';
 import { tribeRushAuthService } from './services/AuthService.js';
+import { playerSaveService } from './services/PlayerSaveService.js';
+import { worldPersistenceService } from './services/WorldPersistenceService.js';
 import { webSocketManager } from './websocket/WebSocketManager.js';
 import { SsoExchangeSchema } from './websocket/schemas.js';
 
@@ -64,7 +66,10 @@ async function main() {
       activeLobbies: 1,
       maxPlayers: CONFIG.MAX_PLAYERS,
       worldSeed: webSocketManager.worldRoom.world.seed,
-      worldSize: CONFIG.WORLD_SIZE
+      worldSize: CONFIG.WORLD_SIZE,
+      persistenceMode: playerSaveService.getPersistenceMode(),
+      tribesActive: webSocketManager.worldRoom.tribeManager.getTribeCount(),
+      totemsPlaced: webSocketManager.worldRoom.placedTotems.size
     };
   };
 
@@ -155,6 +160,11 @@ async function main() {
     const guestName = typeof req.query?.guestName === 'string' ? req.query.guestName : undefined;
     webSocketManager.handleConnection(socket as any, token, guestName);
   });
+
+  await worldPersistenceService.hydrateWorldRoom(
+    webSocketManager.worldRoom,
+    CONFIG.REGION_ID
+  );
 
   await fastify.listen({ port: CONFIG.PORT, host: CONFIG.HOST });
   console.log(

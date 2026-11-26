@@ -1,27 +1,11 @@
-import { CONFIG, rollRandomWorldSeed } from '../config/index.js';
+import { CONFIG } from '../config/index.js';
 import type {
-  ActiveWorldPlayer,
-  BlueprintTargetKind,
-  DayCycleSnapshot,
-  DayPhaseName,
-  InventorySlotItem,
-  ItemId,
-  LeaderboardEntry,
-  PlayerProfileData,
-  RotationQuarter,
-  TribeSummary,
-  WallOrientation,
-  WorldBushNode,
-  WorldGroundDrop,
-  WorldPlacedChest,
-  WorldPlacedStructure,
-  WorldPlacedTorch,
-  WorldPlacedTotem,
-  WorldPlacedWall,
-  WorldRockNode,
-  WorldTreeNode
+  ActiveWorldPlayer, BlueprintTargetKind, DayCycleSnapshot, DayPhaseName, InventorySlotItem,
+  ItemId, LeaderboardEntry, PlayerProfileData, RotationQuarter, TribeSummary, WallOrientation,
+  WorldBushNode, WorldGroundDrop, WorldPlacedChest, WorldPlacedStructure, WorldPlacedTorch,
+  WorldPlacedTotem, WorldPlacedWall, WorldRockNode, WorldTreeNode
 } from '../models/types.js';
-import type { CompactInventorySave } from '../services/PlayerSaveService.js';
+import type { CompactInventorySave, SavedPlayerWorldState } from '../services/PlayerSaveService.js';
 import { AnimalService } from './AnimalService.js';
 import { BlueprintService } from './BlueprintService.js';
 import { CombatService } from './CombatService.js';
@@ -30,81 +14,53 @@ import { SpatialGrid } from './SpatialGrid.js';
 import { SurvivalService } from './SurvivalService.js';
 import { TotemService } from './TotemService.js';
 import { TribeManager } from './TribeManager.js';
+import { handleLoadBlueprintBuildCore, handleSaveBlueprintBuildCore } from './handlers/BlueprintBaseHandler.js';
 import {
-  handleLoadBlueprintBuildCore,
-  handleSaveBlueprintBuildCore
-} from './handlers/BlueprintBaseHandler.js';
-import {
-  handleBlueprintMoveEntityCore,
-  handleBlueprintPlaceBuildCore,
-  handleBlueprintRemoveEntityCore,
-  handleBlueprintRotateEntityCore
+  handleBlueprintMoveEntityCore, handleBlueprintPlaceBuildCore,
+  handleBlueprintRemoveEntityCore, handleBlueprintRotateEntityCore
 } from './handlers/BlueprintEditHandler.js';
 import { handleUseOrPlaceItemCore } from './handlers/BuildingHandler.js';
 import { handleRespawnCore, handleSwingCore } from './handlers/CombatSwingHandler.js';
 import {
-  addItemToSlotsCore,
-  countPlayerItemCore,
-  deductPlayerItemCore,
-  handleCraftItemCore,
-  handleDropHeldItemCore,
-  handleEquipHeldItemCore,
-  handleMoveSlotCore,
-  handleOpenChestCore,
-  handlePickupOrHarvestCore,
-  spawnGroundDropCore
+  addItemToSlotsCore, countPlayerItemCore, deductPlayerItemCore, handleCraftItemCore,
+  handleDropHeldItemCore, handleEquipHeldItemCore, handleMoveSlotCore, handleOpenChestCore,
+  handlePickupOrHarvestCore, spawnGroundDropCore
 } from './handlers/InventoryHandler.js';
 import {
-  joinPlayerCore,
-  removePlayerCore,
-  stepPlayersAndWorldCore,
-  type LifecycleHooks
+  joinPlayerCore, removePlayerCore, stepPlayersAndWorldCore, type LifecycleHooks
 } from './handlers/PlayerLifecycleHandler.js';
 import {
-  buildAllPlayersMeta,
-  buildDynamicWorldStateSnapshot,
-  buildLeaderboardEntries,
-  checkpointDirtyPlayerInventories,
-  collectSafePlayerInventorySnapshots,
-  encodePlayerBinarySnapshot,
-  sendPlayerInventorySync,
-  sendPlayerVitalsSync
+  buildAllPlayersMeta, buildDynamicWorldStateSnapshot, buildLeaderboardEntries,
+  checkpointDirtyPlayerInventories, collectSafePlayerInventorySnapshots,
+  encodePlayerBinarySnapshot, sendPlayerInventorySync, sendPlayerVitalsSync
 } from './handlers/SnapshotHandler.js';
 import {
-  handleRemoveTotemCore,
-  handleSetHutHomeCore,
-  handleUpgradeTotemCore,
-  registerStructureCollidersCore,
-  removeStructureEntityCore,
-  removeTotemFromWorldCore,
-  stripSpareTribeTotemItemsCore
+  handleRemoveTotemCore, handleSetHutHomeCore, handleUpgradeTotemCore,
+  purgeUnpackedBuildsForTribeCore, purgeUnpackedSoloBuildsForOwnerCore,
+  registerStructureCollidersCore, removeStructureEntityCore, removeTotemFromWorldCore,
+  stripSpareTribeTotemItemsCore, sweepExpiredOfflineBasesCore
 } from './handlers/TotemHutHandler.js';
 import {
-  handleChatMessageCore,
-  handleCreateTribeCore,
-  handleDisbandTribeCore,
-  handleJoinTribeCore,
-  handleKickTribeMemberCore,
-  handleLeaveTribeCore,
-  handleRespondTribeRequestCore,
-  handleSetTribeBuildPermissionCore,
-  handleSetTribeVisibilityCore
+  handleChatMessageCore, handleCreateTribeCore, handleDisbandTribeCore, handleJoinTribeCore,
+  handleKickTribeMemberCore, handleLeaveTribeCore, handleRespondTribeRequestCore,
+  handleSetTribeBuildPermissionCore, handleSetTribeVisibilityCore
 } from './handlers/TribeChatHandler.js';
 import {
-  BINARY_PACKET_SNAPSHOT,
-  SNAPSHOT_HEADER_BYTES,
-  SNAPSHOT_PLAYER_STRIDE,
-  SNAPSHOT_TRAILER_BYTES,
-  type WorldRoomContext
+  BINARY_PACKET_SNAPSHOT, SNAPSHOT_HEADER_BYTES, SNAPSHOT_PLAYER_STRIDE,
+  SNAPSHOT_TRAILER_BYTES, type WorldRoomContext
 } from './handlers/roomContext.js';
 import { SessionResumeCache } from './handlers/sessionResumeCache.js';
 
-export {
-  BINARY_PACKET_SNAPSHOT,
-  SNAPSHOT_HEADER_BYTES,
-  SNAPSHOT_PLAYER_STRIDE,
-  SNAPSHOT_TRAILER_BYTES
-};
+export { BINARY_PACKET_SNAPSHOT, SNAPSHOT_HEADER_BYTES, SNAPSHOT_PLAYER_STRIDE, SNAPSHOT_TRAILER_BYTES };
+
+export interface WorldPersistenceCounters {
+  dropIdSeq: number;
+  chestIdSeq: number;
+  torchIdSeq: number;
+  wallIdSeq: number;
+  totemIdSeq: number;
+  structureIdSeq: number;
+}
 
 export class WorldRoom {
   public readonly world: SeededWorld;
@@ -129,6 +85,7 @@ export class WorldRoom {
   private readonly pendingTreeRespawns: Set<WorldTreeNode> = new Set();
   private readonly pendingRockRespawns: Set<WorldRockNode> = new Set();
   private readonly pendingBushRespawns: Set<WorldBushNode> = new Set();
+  private readonly offlineSoloOwners: Map<string, number> = new Map();
 
   private nextShortId = 1;
   private dropIdSeq = 1;
@@ -153,16 +110,14 @@ export class WorldRoom {
 
   private onBroadcastBinarySnapshot: ((playerId: string, frame: Buffer) => void) | null = null;
   private onBroadcastRosterEvent: ((payload: Record<string, unknown>) => void) | null = null;
-  private onSendPlayerEvent: ((playerId: string, payload: Record<string, unknown>) => void) | null =
-    null;
-  private onBroadcastProximityEvent:
-    | ((recipientIds: string[], payload: Record<string, unknown>) => void)
-    | null = null;
+  private onSendPlayerEvent: ((playerId: string, payload: Record<string, unknown>) => void) | null = null;
+  private onBroadcastProximityEvent: ((recipientIds: string[], payload: Record<string, unknown>) => void) | null = null;
 
   public onPersistPlayerInventory:
-    | ((ownerId: string, compact: CompactInventorySave | null) => void)
+    | ((ownerId: string, compact: CompactInventorySave | null, playerState?: SavedPlayerWorldState | null) => void)
     | null = null;
   public onClearPlayerInventory: ((ownerId: string) => void) | null = null;
+  public onMarkWorldDirty: (() => void) | null = null;
 
   private readonly ctx: WorldRoomContext;
   private readonly lifecycleHooks: LifecycleHooks;
@@ -208,9 +163,8 @@ export class WorldRoom {
       emitPlayerEvent: (pid, payload) => this.onSendPlayerEvent?.(pid, payload),
       emitPlayersEvent: (pids, payload) => {
         if (pids.length === 0) return;
-        if (this.onBroadcastProximityEvent) {
-          this.onBroadcastProximityEvent(pids, payload);
-        } else if (this.onSendPlayerEvent) {
+        if (this.onBroadcastProximityEvent) this.onBroadcastProximityEvent(pids, payload);
+        else if (this.onSendPlayerEvent) {
           for (let i = 0; i < pids.length; i++) this.onSendPlayerEvent(pids[i], payload);
         }
       },
@@ -225,8 +179,7 @@ export class WorldRoom {
       addItemToSlots: (slots, max, itemId, count) => addItemToSlotsCore(slots, max, itemId, count),
       countPlayerItem: (p, itemId) => countPlayerItemCore(p, itemId),
       deductPlayerItem: (p, itemId, count) => deductPlayerItemCore(p, itemId, count),
-      spawnGroundDrop: (itemId, count, ox, oy, tx, ty) =>
-        spawnGroundDropCore(this.ctx, itemId, count, ox, oy, tx, ty),
+      spawnGroundDrop: (itemId, count, ox, oy, tx, ty) => spawnGroundDropCore(this.ctx, itemId, count, ox, oy, tx, ty),
       registerStructureColliders: (s) => registerStructureCollidersCore(this.ctx, s),
       removeStructureEntity: (s) => removeStructureEntityCore(this.ctx, s),
       removeTotemFromWorld: (totem) => removeTotemFromWorldCore(this.ctx, totem),
@@ -236,6 +189,9 @@ export class WorldRoom {
         removeTotemFromWorldCore(this.ctx, totem);
         return true;
       },
+      purgeTribeBuilds: (tribeId) => purgeUnpackedBuildsForTribeCore(this.ctx, tribeId),
+      purgeSoloOwnerBuilds: (ownerId) => purgeUnpackedSoloBuildsForOwnerCore(this.ctx, ownerId),
+      markWorldStateDirty: () => this.onMarkWorldDirty?.(),
       stripSpareTribeTotemItems: (p) => stripSpareTribeTotemItemsCore(p),
       canTribeManageEntity: (player, ownerId, tribeId, hostOnly = false) => {
         if (tribeId) {
@@ -253,18 +209,12 @@ export class WorldRoom {
             clearTimeout(this.tribeSyncTimer);
             this.tribeSyncTimer = null;
           }
-          this.onBroadcastRosterEvent?.({
-            type: 'TRIBE_LIST_SYNC',
-            tribes: this.getTribeSummaries()
-          });
+          this.onBroadcastRosterEvent?.({ type: 'TRIBE_LIST_SYNC', tribes: this.getTribeSummaries() });
         } else if (!this.tribeSyncTimer) {
           this.tribeSyncTimer = setTimeout(() => {
             this.tribeSyncTimer = null;
             this.lastTribeSyncBroadcastAt = Date.now();
-            this.onBroadcastRosterEvent?.({
-              type: 'TRIBE_LIST_SYNC',
-              tribes: this.getTribeSummaries()
-            });
+            this.onBroadcastRosterEvent?.({ type: 'TRIBE_LIST_SYNC', tribes: this.getTribeSummaries() });
           }, 100);
           this.tribeSyncTimer.unref?.();
         }
@@ -274,14 +224,75 @@ export class WorldRoom {
     this.lifecycleHooks = {
       allocateShortId: () => this.allocateShortId(),
       getEmptySince: () => this.emptySince,
-      setEmptySince: (ts) => {
-        this.emptySince = ts;
-      },
+      setEmptySince: (ts) => { this.emptySince = ts; },
       resetWorldToDayOne: () => this.resetWorldToDayOne(),
-      persistPlayerInventory: (ownerId, compact) =>
-        this.onPersistPlayerInventory?.(ownerId, compact),
+      persistPlayerInventory: (ownerId, compact, playerState) =>
+        this.onPersistPlayerInventory?.(ownerId, compact, playerState),
+      markSoloOwnerDisconnected: (ownerId, now) => {
+        if (!this.offlineSoloOwners.has(ownerId)) this.offlineSoloOwners.set(ownerId, now);
+      },
+      clearSoloOwnerDisconnected: (ownerId) => { this.offlineSoloOwners.delete(ownerId); },
+      hasGraceProtectedSoloBuilds: (now) => {
+        for (const ts of this.offlineSoloOwners.values()) {
+          if (now - ts < CONFIG.OFFLINE_BASE_GRACE_MS) return true;
+        }
+        return false;
+      },
       sessionResumeCache: this.sessionResumeCache
     };
+  }
+
+  private dirtyIfOk<T extends { ok: boolean }>(res: T): T {
+    if (res.ok) this.onMarkWorldDirty?.();
+    return res;
+  }
+
+  public registerHydratedStructureColliders(s: WorldPlacedStructure): void {
+    registerStructureCollidersCore(this.ctx, s);
+  }
+
+  public getPersistenceMeta() {
+    return {
+      dayNumber: this.dayNumber,
+      tickAccumulator: this.tickAccumulator,
+      emptySince: this.emptySince,
+      offlineSoloOwners: this.offlineSoloOwners,
+      counters: {
+        dropIdSeq: this.dropIdSeq,
+        chestIdSeq: this.chestIdSeq,
+        torchIdSeq: this.torchIdSeq,
+        wallIdSeq: this.wallIdSeq,
+        totemIdSeq: this.totemIdSeq,
+        structureIdSeq: this.structureIdSeq
+      }
+    };
+  }
+
+  public setPersistenceMeta(meta: {
+    dayNumber: number;
+    tickAccumulator: number;
+    emptySince: number | null;
+    offlineSoloOwners: Map<string, number>;
+    counters: WorldPersistenceCounters;
+  }): void {
+    this.dayNumber = meta.dayNumber;
+    this.tickAccumulator = meta.tickAccumulator;
+    this.emptySince = meta.emptySince;
+    this.offlineSoloOwners.clear();
+    for (const [k, v] of meta.offlineSoloOwners.entries()) this.offlineSoloOwners.set(k, v);
+    this.dropIdSeq = meta.counters.dropIdSeq;
+    this.chestIdSeq = meta.counters.chestIdSeq;
+    this.torchIdSeq = meta.counters.torchIdSeq;
+    this.wallIdSeq = meta.counters.wallIdSeq;
+    this.totemIdSeq = meta.counters.totemIdSeq;
+    this.structureIdSeq = meta.counters.structureIdSeq;
+  }
+
+  public refreshOfflineGraceForShutdown(now: number = Date.now()): void {
+    this.tribeManager.refreshOfflineGraceTimestamps(now, this.playersById);
+    for (const ownerId of Array.from(this.offlineSoloOwners.keys())) {
+      this.offlineSoloOwners.set(ownerId, now);
+    }
   }
 
   public setCallbacks(callbacks: {
@@ -300,58 +311,34 @@ export class WorldRoom {
     const r = CONFIG.EVENT_AOI_RADIUS;
     const nearbyFromGrid = this.spatialGrid.queryNearby(x, y, r);
     const recipientSet = new Set<string>();
-    for (let i = 0; i < nearbyFromGrid.length; i++) {
-      recipientSet.add(nearbyFromGrid[i].id);
-    }
+    for (let i = 0; i < nearbyFromGrid.length; i++) recipientSet.add(nearbyFromGrid[i].id);
     if (recipientSet.size === 0) {
       for (const p of this.playersById.values()) {
         if (Math.hypot(p.x - x, p.y - y) <= r) recipientSet.add(p.id);
       }
     }
     const recipients = Array.from(recipientSet);
-    if (this.onBroadcastProximityEvent) {
-      this.onBroadcastProximityEvent(recipients, payload);
-    } else if (this.onSendPlayerEvent) {
-      for (let i = 0; i < recipients.length; i++) {
-        this.onSendPlayerEvent(recipients[i], payload);
-      }
-    } else {
-      this.onBroadcastRosterEvent?.(payload);
-    }
+    if (this.onBroadcastProximityEvent) this.onBroadcastProximityEvent(recipients, payload);
+    else if (this.onSendPlayerEvent) {
+      for (let i = 0; i < recipients.length; i++) this.onSendPlayerEvent(recipients[i], payload);
+    } else this.onBroadcastRosterEvent?.(payload);
   }
 
   public startSimulationLoop(): void {
     if (this.tickTimer) return;
     this.lastTickTime = Date.now();
-    this.tickTimer = setInterval(
-      () => this.stepSimulation(),
-      Math.round(1000 / CONFIG.TICK_RATE_HZ)
-    );
+    this.tickTimer = setInterval(() => this.stepSimulation(), Math.round(1000 / CONFIG.TICK_RATE_HZ));
     this.tickTimer.unref?.();
   }
 
   public stopSimulationLoop(): void {
-    if (this.tickTimer) {
-      clearInterval(this.tickTimer);
-      this.tickTimer = null;
-    }
-    if (this.tribeSyncTimer) {
-      clearTimeout(this.tribeSyncTimer);
-      this.tribeSyncTimer = null;
-    }
+    if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
+    if (this.tribeSyncTimer) { clearTimeout(this.tribeSyncTimer); this.tribeSyncTimer = null; }
   }
 
-  public getPlayerCount(): number {
-    return this.playersById.size;
-  }
-
-  public getPlayer(playerId: string): ActiveWorldPlayer | undefined {
-    return this.playersById.get(playerId);
-  }
-
-  public getTribeSummaries(): TribeSummary[] {
-    return this.tribeManager.getAllTribeSummaries(this.playersById);
-  }
+  public getPlayerCount(): number { return this.playersById.size; }
+  public getPlayer(playerId: string): ActiveWorldPlayer | undefined { return this.playersById.get(playerId); }
+  public getTribeSummaries(): TribeSummary[] { return this.tribeManager.getAllTribeSummaries(this.playersById); }
 
   public getDayCycleSnapshot(): DayCycleSnapshot {
     const tickInDay = Math.floor(this.tickAccumulator) % CONFIG.DAY_CYCLE_TICKS;
@@ -359,12 +346,7 @@ export class WorldRoom {
     if (tickInDay >= CONFIG.NIGHT_END_TICK) phase = 'SUNRISE';
     else if (tickInDay >= CONFIG.SUNSET_END_TICK) phase = 'NIGHTTIME';
     else if (tickInDay >= CONFIG.DAYTIME_END_TICK) phase = 'SUNSET';
-    return {
-      dayNumber: this.dayNumber,
-      tickInDay,
-      phase,
-      moonPhaseIndex: (this.dayNumber - 1) % 8
-    };
+    return { dayNumber: this.dayNumber, tickInDay, phase, moonPhaseIndex: (this.dayNumber - 1) % 8 };
   }
 
   public resetWorldToDayOne(explicitSeed?: number): void {
@@ -379,29 +361,19 @@ export class WorldRoom {
     this.pendingTreeRespawns.clear();
     this.pendingRockRespawns.clear();
     this.pendingBushRespawns.clear();
+    this.offlineSoloOwners.clear();
     this.tribeManager.clear();
     this.sessionResumeCache.clear();
-    const nextSeed = typeof explicitSeed === 'number' ? explicitSeed : rollRandomWorldSeed();
+    const nextSeed = typeof explicitSeed === 'number' ? explicitSeed : this.world.seed;
     this.world.regenerateWithSeed(nextSeed);
     this.animalService.regenerate();
+    this.onMarkWorldDirty?.();
   }
 
-  public getLeaderboardEntries(): LeaderboardEntry[] {
-    return buildLeaderboardEntries(this.ctx);
-  }
-
-  public getDynamicWorldStateSnapshot() {
-    return buildDynamicWorldStateSnapshot(this.ctx);
-  }
-
-  public getAllPlayersMeta() {
-    return buildAllPlayersMeta(this.ctx);
-  }
-
-  public getAllSafePlayerInventorySnapshots(
-    now: number = Date.now(),
-    includeCombatPlayers: boolean = false
-  ) {
+  public getLeaderboardEntries(): LeaderboardEntry[] { return buildLeaderboardEntries(this.ctx); }
+  public getDynamicWorldStateSnapshot() { return buildDynamicWorldStateSnapshot(this.ctx); }
+  public getAllPlayersMeta() { return buildAllPlayersMeta(this.ctx); }
+  public getAllSafePlayerInventorySnapshots(now: number = Date.now(), includeCombatPlayers: boolean = false) {
     return collectSafePlayerInventorySnapshots(this.ctx, now, includeCombatPlayers);
   }
 
@@ -417,42 +389,23 @@ export class WorldRoom {
   public joinPlayer(
     profile: PlayerProfileData,
     preferredColorIndex?: number,
-    restoredInventory?: {
-      hasBackpack: boolean;
-      unlockedSlots: number;
-      inventory: Array<InventorySlotItem | null>;
-    } | null
+    restoredInventory?: { hasBackpack: boolean; unlockedSlots: number; inventory: Array<InventorySlotItem | null> } | null,
+    restoredPlayerState?: SavedPlayerWorldState | null
   ) {
-    return joinPlayerCore(
-      this.ctx,
-      this.lifecycleHooks,
-      profile,
-      preferredColorIndex,
-      restoredInventory
-    );
+    return joinPlayerCore(this.ctx, this.lifecycleHooks, profile, preferredColorIndex, restoredInventory, restoredPlayerState);
   }
 
-  public removePlayer(playerId: string): void {
-    removePlayerCore(this.ctx, this.lifecycleHooks, playerId);
+  public removePlayer(playerId: string, options?: { explicitLeave?: boolean }): void {
+    removePlayerCore(this.ctx, this.lifecycleHooks, playerId, options);
   }
 
-  public handleInputState(
-    playerId: string,
-    moveX: number,
-    moveY: number,
-    angle: number,
-    sprint?: boolean,
-    seq?: number
-  ): void {
+  public handleInputState(playerId: string, moveX: number, moveY: number, angle: number, sprint?: boolean, seq?: number): void {
     const player = this.playersById.get(playerId);
     if (!player || player.isDead) return;
     let nx = Number.isFinite(moveX) ? Math.max(-1, Math.min(1, moveX)) : 0;
     let ny = Number.isFinite(moveY) ? Math.max(-1, Math.min(1, moveY)) : 0;
     const mag = Math.hypot(nx, ny);
-    if (mag > 1) {
-      nx /= mag;
-      ny /= mag;
-    }
+    if (mag > 1) { nx /= mag; ny /= mag; }
     player.moveX = nx;
     player.moveY = ny;
     if (typeof sprint === 'boolean') player.isSprinting = sprint;
@@ -475,123 +428,91 @@ export class WorldRoom {
     return { ok: true, slot };
   }
 
-  public addItemToSlots(
-    slots: Array<InventorySlotItem | null>,
-    maxSlotIndex: number,
-    itemId: ItemId,
-    count: number
-  ): number {
+  public addItemToSlots(slots: Array<InventorySlotItem | null>, maxSlotIndex: number, itemId: ItemId, count: number): number {
     return addItemToSlotsCore(slots, maxSlotIndex, itemId, count);
   }
 
-  public spawnGroundDrop(
-    itemId: ItemId,
-    count: number,
-    originX: number,
-    originY: number,
-    targetX?: number,
-    targetY?: number
-  ): WorldGroundDrop {
+  public spawnGroundDrop(itemId: ItemId, count: number, originX: number, originY: number, targetX?: number, targetY?: number): WorldGroundDrop {
     return spawnGroundDropCore(this.ctx, itemId, count, originX, originY, targetX, targetY);
   }
 
   public handleSwing(playerId: string, angle?: number) { return handleSwingCore(this.ctx, playerId, angle); }
   public handlePickupOrHarvest(playerId: string) { return handlePickupOrHarvestCore(this.ctx, playerId); }
-  public handleDropHeldItem(
-    playerId: string,
-    dropAll = false,
-    source: 'inventory' | 'chest' = 'inventory',
-    explicitSlot?: number,
-    chestId?: number,
-    explicitCount?: number
-  ) {
-    return handleDropHeldItemCore(this.ctx, playerId, dropAll, source, explicitSlot, chestId, explicitCount);
+  public handleDropHeldItem(playerId: string, dropAll = false, source: 'inventory' | 'chest' = 'inventory', explicitSlot?: number, chestId?: number, explicitCount?: number) {
+    const res = handleDropHeldItemCore(this.ctx, playerId, dropAll, source, explicitSlot, chestId, explicitCount);
+    if (res.ok && source === 'chest') this.onMarkWorldDirty?.();
+    return res;
   }
-  public handleMoveSlot(
-    playerId: string,
-    fromSource: 'inventory' | 'chest',
-    fromSlot: number,
-    toSource: 'inventory' | 'chest',
-    toSlot: number,
-    chestId?: number
-  ) {
-    return handleMoveSlotCore(this.ctx, playerId, fromSource, fromSlot, toSource, toSlot, chestId);
+  public handleMoveSlot(playerId: string, fromSource: 'inventory' | 'chest', fromSlot: number, toSource: 'inventory' | 'chest', toSlot: number, chestId?: number) {
+    const res = handleMoveSlotCore(this.ctx, playerId, fromSource, fromSlot, toSource, toSlot, chestId);
+    if (res.ok && (fromSource === 'chest' || toSource === 'chest')) this.onMarkWorldDirty?.();
+    return res;
   }
   public handleCraftItem(playerId: string, recipeItemId: ItemId) { return handleCraftItemCore(this.ctx, playerId, recipeItemId); }
   public handleEquipHeldItem(playerId: string, explicitSlot?: number) { return handleEquipHeldItemCore(this.ctx, playerId, explicitSlot); }
-  public handleUseOrPlaceItem(
-    playerId: string,
-    targetX?: number,
-    targetY?: number,
-    orientation?: WallOrientation,
-    rotationQuarter?: RotationQuarter
-  ) {
-    return handleUseOrPlaceItemCore(this.ctx, playerId, targetX, targetY, orientation, rotationQuarter);
+  public handleUseOrPlaceItem(playerId: string, targetX?: number, targetY?: number, orientation?: WallOrientation, rotationQuarter?: RotationQuarter) {
+    const res = handleUseOrPlaceItemCore(this.ctx, playerId, targetX, targetY, orientation, rotationQuarter);
+    if (res.ok && res.action !== 'healed') this.onMarkWorldDirty?.();
+    return res;
   }
-  public handleUpgradeTotem(playerId: string, totemId: number) { return handleUpgradeTotemCore(this.ctx, playerId, totemId); }
-  public handleRemoveTotem(playerId: string, totemId: number) { return handleRemoveTotemCore(this.ctx, playerId, totemId); }
+  public handleUpgradeTotem(playerId: string, totemId: number) { return this.dirtyIfOk(handleUpgradeTotemCore(this.ctx, playerId, totemId)); }
+  public handleRemoveTotem(playerId: string, totemId: number) { return this.dirtyIfOk(handleRemoveTotemCore(this.ctx, playerId, totemId)); }
   public handleSetHutHome(playerId: string, structureId: number) { return handleSetHutHomeCore(this.ctx, playerId, structureId); }
-  public handleSaveBlueprintBuild(playerId: string) { return handleSaveBlueprintBuildCore(this.ctx, playerId); }
-  public handleLoadBlueprintBuild(playerId: string, targetX: number, targetY: number) { return handleLoadBlueprintBuildCore(this.ctx, playerId, targetX, targetY); }
-  public handleBlueprintPlaceBuild(
-    playerId: string,
-    itemId: ItemId,
-    targetX: number,
-    targetY: number,
-    orientation?: WallOrientation,
-    rotationQuarter?: RotationQuarter
-  ) {
-    return handleBlueprintPlaceBuildCore(this.ctx, playerId, itemId, targetX, targetY, orientation, rotationQuarter);
+  public handleSaveBlueprintBuild(playerId: string) { return this.dirtyIfOk(handleSaveBlueprintBuildCore(this.ctx, playerId)); }
+  public handleLoadBlueprintBuild(playerId: string, targetX: number, targetY: number) { return this.dirtyIfOk(handleLoadBlueprintBuildCore(this.ctx, playerId, targetX, targetY)); }
+  public handleBlueprintPlaceBuild(playerId: string, itemId: ItemId, targetX: number, targetY: number, orientation?: WallOrientation, rotationQuarter?: RotationQuarter) {
+    return this.dirtyIfOk(handleBlueprintPlaceBuildCore(this.ctx, playerId, itemId, targetX, targetY, orientation, rotationQuarter));
   }
   public handleBlueprintRemoveEntity(playerId: string, targetKind: BlueprintTargetKind, targetId: number) {
-    return handleBlueprintRemoveEntityCore(this.ctx, playerId, targetKind, targetId);
+    return this.dirtyIfOk(handleBlueprintRemoveEntityCore(this.ctx, playerId, targetKind, targetId));
   }
   public handleBlueprintRotateEntity(playerId: string, targetKind: 'wall' | 'structure', targetId: number) {
-    return handleBlueprintRotateEntityCore(this.ctx, playerId, targetKind, targetId);
+    return this.dirtyIfOk(handleBlueprintRotateEntityCore(this.ctx, playerId, targetKind, targetId));
   }
-  public handleBlueprintMoveEntity(
-    playerId: string,
-    targetKind: BlueprintTargetKind,
-    targetId: number,
-    targetX: number,
-    targetY: number,
-    orientation?: WallOrientation,
-    rotationQuarter?: RotationQuarter
-  ) {
-    return handleBlueprintMoveEntityCore(this.ctx, playerId, targetKind, targetId, targetX, targetY, orientation, rotationQuarter);
+  public handleBlueprintMoveEntity(playerId: string, targetKind: BlueprintTargetKind, targetId: number, targetX: number, targetY: number, orientation?: WallOrientation, rotationQuarter?: RotationQuarter) {
+    return this.dirtyIfOk(handleBlueprintMoveEntityCore(this.ctx, playerId, targetKind, targetId, targetX, targetY, orientation, rotationQuarter));
   }
   public handleOpenChest(playerId: string, chestId: number) { return handleOpenChestCore(this.ctx, playerId, chestId); }
   public handleRespawn(playerId: string) { return handleRespawnCore(this.ctx, playerId); }
   public handleCreateTribe(playerId: string, name: string, tag: string, visibility: 'public' | 'private' = 'public') {
-    return handleCreateTribeCore(this.ctx, playerId, name, tag, visibility);
+    return this.dirtyIfOk(handleCreateTribeCore(this.ctx, playerId, name, tag, visibility));
   }
   public handleSetTribeVisibility(leaderId: string, visibility: 'public' | 'private') { return handleSetTribeVisibilityCore(this.ctx, leaderId, visibility); }
   public handleSetTribeBuildPermission(leaderId: string, targetPlayerId: string, allowed: boolean) {
-    return handleSetTribeBuildPermissionCore(this.ctx, leaderId, targetPlayerId, allowed);
+    return this.dirtyIfOk(handleSetTribeBuildPermissionCore(this.ctx, leaderId, targetPlayerId, allowed));
   }
-  public handleJoinTribe(playerId: string, tribeId: string) { return handleJoinTribeCore(this.ctx, playerId, tribeId); }
+  public handleJoinTribe(playerId: string, tribeId: string) { return this.dirtyIfOk(handleJoinTribeCore(this.ctx, playerId, tribeId)); }
   public handleRespondTribeRequest(leaderId: string, targetPlayerId: string, accept: boolean) {
-    return handleRespondTribeRequestCore(this.ctx, leaderId, targetPlayerId, accept);
+    return this.dirtyIfOk(handleRespondTribeRequestCore(this.ctx, leaderId, targetPlayerId, accept));
   }
   public handleLeaveTribe(playerId: string) { return handleLeaveTribeCore(this.ctx, playerId); }
   public handleDisbandTribe(playerId: string) { return handleDisbandTribeCore(this.ctx, playerId); }
-  public handleKickTribeMember(leaderId: string, targetPlayerId: string) { return handleKickTribeMemberCore(this.ctx, leaderId, targetPlayerId); }
+  public handleKickTribeMember(leaderId: string, targetPlayerId: string) { return this.dirtyIfOk(handleKickTribeMemberCore(this.ctx, leaderId, targetPlayerId)); }
   public handleChatMessage(playerId: string, rawText: string) { return handleChatMessageCore(this.ctx, playerId, rawText); }
+
+  public sweepOfflineBases(now: number = Date.now()): boolean {
+    return sweepExpiredOfflineBasesCore(this.ctx, this.offlineSoloOwners, CONFIG.OFFLINE_BASE_GRACE_MS, now);
+  }
 
   public stepSimulation(fixedDtSeconds?: number): void {
     const now = Date.now();
-    const dt =
-      typeof fixedDtSeconds === 'number'
-        ? fixedDtSeconds
-        : Math.min(0.1, Math.max(0.005, (now - this.lastTickTime) / 1000));
+    const dt = typeof fixedDtSeconds === 'number'
+      ? fixedDtSeconds
+      : Math.min(0.1, Math.max(0.005, (now - this.lastTickTime) / 1000));
     this.lastTickTime = now;
     this.serverTick = (this.serverTick + 1) >>> 0;
+
+    if (this.serverTick % 100 === 0) this.sweepOfflineBases(now);
 
     if (this.playersById.size === 0) {
       if (
         this.emptySince !== null &&
         now - this.emptySince >= CONFIG.EMPTY_RESET_GRACE_MS &&
-        (this.dayNumber > 1 || this.tickAccumulator > 0)
+        !this.tribeManager.hasGraceProtectedOfflineTribes(now, CONFIG.OFFLINE_BASE_GRACE_MS) &&
+        this.offlineSoloOwners.size === 0 &&
+        (this.dayNumber > 1 || this.tickAccumulator > 0 || this.placedTotems.size > 0 ||
+          this.placedWalls.size > 0 || this.placedStructures.size > 0 || this.placedChests.size > 0 ||
+          this.placedTorches.size > 0 || this.groundDrops.size > 0 || this.tribeManager.getTribeCount() > 0)
       ) {
         this.resetWorldToDayOne();
       }
@@ -606,11 +527,7 @@ export class WorldRoom {
       this.dayNumber += 1;
     }
     const currCycle = this.getDayCycleSnapshot();
-    if (
-      currCycle.phase !== prevPhase ||
-      currCycle.dayNumber !== prevDay ||
-      now - this.lastDaySyncBroadcastAt >= 10000
-    ) {
+    if (currCycle.phase !== prevPhase || currCycle.dayNumber !== prevDay || now - this.lastDaySyncBroadcastAt >= 10000) {
       this.lastDaySyncBroadcastAt = now;
       this.onBroadcastRosterEvent?.({ type: 'DAY_CYCLE_SYNC', dayCycle: currCycle });
     }
@@ -623,10 +540,7 @@ export class WorldRoom {
 
     if (now - this.lastLeaderboardSyncAt >= CONFIG.LEADERBOARD_SYNC_INTERVAL_MS) {
       this.lastLeaderboardSyncAt = now;
-      this.onBroadcastRosterEvent?.({
-        type: 'LEADERBOARD_SYNC',
-        entries: this.getLeaderboardEntries()
-      });
+      this.onBroadcastRosterEvent?.({ type: 'LEADERBOARD_SYNC', entries: this.getLeaderboardEntries() });
     }
 
     if (!this.onBroadcastBinarySnapshot) return;
@@ -634,21 +548,12 @@ export class WorldRoom {
     for (const viewer of this.playersById.values()) {
       const nearby = this.spatialGrid.queryNearby(viewer.x, viewer.y, CONFIG.AOI_RADIUS);
       this.onBroadcastBinarySnapshot(viewer.id, this.encodeBinarySnapshot(viewer, nearby, now));
-      const animalFrame = this.animalService.encodeBinaryAnimalSnapshot(
-        viewer.x,
-        viewer.y,
-        this.serverTick,
-        now
-      );
+      const animalFrame = this.animalService.encodeBinaryAnimalSnapshot(viewer.x, viewer.y, this.serverTick, now);
       this.onBroadcastBinarySnapshot(viewer.id, animalFrame);
     }
   }
 
-  public encodeBinarySnapshot(
-    viewer: ActiveWorldPlayer,
-    nearby: ReadonlyArray<ActiveWorldPlayer>,
-    now: number = Date.now()
-  ): Buffer {
+  public encodeBinarySnapshot(viewer: ActiveWorldPlayer, nearby: ReadonlyArray<ActiveWorldPlayer>, now: number = Date.now()): Buffer {
     return encodePlayerBinarySnapshot(this.serverTick, viewer, nearby, now);
   }
 }

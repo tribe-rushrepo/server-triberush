@@ -9,6 +9,8 @@ import type {
 } from '../models/types.js';
 import { sanitizeStoredBuilds } from '../world/BlueprintService.js';
 
+export type PersistenceMode = 'supabase_service_role' | 'supabase_anon_warning' | 'ram_only';
+
 /**
  * Ultra-compact sparse inventory format (~90-300 bytes per player in JSONB!):
  * Empty slots are omitted completely so the database never bloats.
@@ -16,6 +18,20 @@ import { sanitizeStoredBuilds } from '../world/BlueprintService.js';
 export interface CompactInventorySave {
   bp: boolean; // Has Leather Backpack equipped (unlocks 32 slots)
   s: Array<[number, ItemId, number]>; // [slotIndex, itemId, count]
+}
+
+export interface SavedPlayerWorldState {
+  x: number;
+  y: number;
+  hp: number;
+  stamina: number;
+  hunger: number;
+  activeSlot: number;
+  homeHutId: number | null;
+  tribeId: string | null;
+  hadBuildPermission: boolean;
+  worldSeed: number;
+  savedAt: number;
 }
 
 interface BlueprintSaveEnvelope {
@@ -29,6 +45,7 @@ export interface LoadedPlayerSave {
   blueprint: SavedBaseBlueprintSlot | null;
   storedBuilds: BlueprintStoredBuilds;
   lastBlueprintDeployAt: number;
+  playerState: SavedPlayerWorldState | null;
 }
 
 function encodeBlueprintColumn(
@@ -59,7 +76,6 @@ function decodeBlueprintColumn(raw: unknown): {
       storedBuilds: sanitizeStoredBuilds(obj.storedBuilds)
     };
   }
-  // Legacy v1 SavedBaseBlueprintSlot object stored directly in blueprint_save
   if (typeof obj.totemLevel === 'number') {
     return {
       blueprint: obj as unknown as SavedBaseBlueprintSlot,
@@ -69,12 +85,53 @@ function decodeBlueprintColumn(raw: unknown): {
   return { blueprint: null, storedBuilds: {} };
 }
 
+export function sanitizePlayerWorldState(raw: unknown): SavedPlayerWorldState | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const x = Number(obj.x);
+  const y = Number(obj.y);
+  const worldSeed = Number(obj.worldSeed);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(worldSeed) || worldSeed <= 0) {
+    return null;
+  }
+  const margin = 48;
+  const clampedX = Math.max(margin, Math.min(CONFIG.WORLD_SIZE - margin, x));
+  const clampedY = Math.max(margin, Math.min(CONFIG.WORLD_SIZE - margin, y));
+  const hpRaw = Number(obj.hp);
+  const staminaRaw = Number(obj.stamina);
+  const hungerRaw = Number(obj.hunger);
+  const slotRaw = Number(obj.activeSlot);
+  const hutRaw = obj.homeHutId;
+  const tribeRaw = typeof obj.tribeId === 'string' ? obj.tribeId.trim().slice(0, 48) : '';
+
+  return {
+    x: Math.round(clampedX * 10) / 10,
+    y: Math.round(clampedY * 10) / 10,
+    hp: Number.isFinite(hpRaw)
+      ? Math.max(1, Math.min(CONFIG.PLAYER_MAX_HP, hpRaw))
+      : CONFIG.PLAYER_MAX_HP,
+    stamina: Number.isFinite(staminaRaw)
+      ? Math.max(0, Math.min(CONFIG.PLAYER_MAX_STAMINA, staminaRaw))
+      : CONFIG.PLAYER_MAX_STAMINA,
+    hunger: Number.isFinite(hungerRaw)
+      ? Math.max(0, Math.min(CONFIG.PLAYER_MAX_HUNGER, hungerRaw))
+      : CONFIG.PLAYER_MAX_HUNGER,
+    activeSlot:
+      Number.isInteger(slotRaw) && slotRaw >= 0 && slotRaw < CONFIG.HOTBAR_SLOTS ? slotRaw : 0,
+    homeHutId:
+      typeof hutRaw === 'number' && Number.isInteger(hutRaw) && hutRaw > 0 ? hutRaw : null,
+    tribeId: tribeRaw || null,
+    hadBuildPermission: Boolean(obj.hadBuildPermission),
+    worldSeed: Math.floor(worldSeed),
+    savedAt: Number.isFinite(Number(obj.savedAt)) ? Number(obj.savedAt) : Date.now()
+  };
+}
+
 const MAX_SAVED_SLOTS = CONFIG.INVENTORY_TOTAL_SLOTS;
 
 export function isPersistableAccount(ownerId: string): boolean {
   const id = (ownerId || '').trim();
   if (!id || id.length > 128) return false;
-  // Never bloat Supabase with disposable guest or local dev UUID sessions!
   if (id.startsWith('guest-') || id.startsWith('dev-')) return false;
   return true;
 }
@@ -90,7 +147,6 @@ export function encodeCompactInventory(
   for (let i = 0; i < cap; i++) {
     const slot = inventory[i];
     if (!slot || slot.count <= 0) continue;
-    // Never carry unplaced free Tribe Totems across disconnects
     if (slot.itemId === 'tribe_totem') continue;
     const def = getItemDef(slot.itemId);
     if (!def) continue;
@@ -150,20 +206,24 @@ export function decodeCompactInventory(
   return { hasBackpack, unlockedSlots, inventory };
 }
 
+function isMissingPlayerStateColError(err: { code?: string; message?: string } | null): boolean {
+  if (!err) return false;
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    (err.code === '42703' || err.code === 'PGRST204' || msg.includes('player_state')) &&
+    msg.includes('player_state')
+  );
+}
+
 /**
  * Zero-Bloat Server-Authoritative Persistence Service (`public.triberush_player_saves`).
- *
- * - Strictly 1 compact row per authenticated account (guests never written).
- * - Zero writes during 20Hz simulation ticks: writes ONLY on safe disconnect,
- *   death/combat-log clear (anti-dupe!), and Blueprint Save/Load.
- * - Automatically deletes empty rows when a player has no items, no saved base,
- *   and no active 20-minute deploy cooldown.
- * - Seamlessly falls back to in-memory storage when running locally without Supabase keys.
  */
 export class PlayerSaveService {
   private readonly supabase: SupabaseClient | null;
+  private readonly persistenceMode: PersistenceMode;
   private readonly memorySaves = new Map<string, LoadedPlayerSave>();
   private readonly writeQueues = new Map<string, Promise<void>>();
+  private supportsPlayerStateCol = true;
 
   constructor(enableSupabase = true) {
     const hasServiceRole = Boolean(CONFIG.SUPABASE_SERVICE_ROLE_KEY);
@@ -172,6 +232,7 @@ export class PlayerSaveService {
       this.supabase = createClient(CONFIG.SUPABASE_URL, key, {
         auth: { persistSession: false, autoRefreshToken: false }
       });
+      this.persistenceMode = hasServiceRole ? 'supabase_service_role' : 'supabase_anon_warning';
       if (hasServiceRole) {
         console.log('[TRIBERUSH-SAVE] Supabase persistence active (key=service_role).');
       } else {
@@ -181,6 +242,7 @@ export class PlayerSaveService {
       }
     } else {
       this.supabase = null;
+      this.persistenceMode = 'ram_only';
       if (enableSupabase) {
         console.warn(
           '[TRIBERUSH-SAVE] Supabase NOT configured; player saves are RAM-only and will reset on redeploy.'
@@ -193,10 +255,14 @@ export class PlayerSaveService {
     return this.supabase !== null;
   }
 
-  /**
-   * Serializes per-player mutations in strict FIFO order so rapid join/leave
-   * events can never finish out of order and overwrite a fresher save.
-   */
+  public getPersistenceMode(): PersistenceMode {
+    return this.persistenceMode;
+  }
+
+  public getSupabaseClient(): SupabaseClient | null {
+    return this.supabase;
+  }
+
   private enqueueWrite(ownerId: string, task: () => Promise<void>): Promise<void> {
     const prev = this.writeQueues.get(ownerId) || Promise.resolve();
     const next = prev
@@ -224,7 +290,13 @@ export class PlayerSaveService {
   private getOrCreateMem(ownerId: string): LoadedPlayerSave {
     let entry = this.memorySaves.get(ownerId);
     if (!entry) {
-      entry = { inventory: null, blueprint: null, storedBuilds: {}, lastBlueprintDeployAt: 0 };
+      entry = {
+        inventory: null,
+        blueprint: null,
+        storedBuilds: {},
+        lastBlueprintDeployAt: 0,
+        playerState: null
+      };
       this.memorySaves.set(ownerId, entry);
     }
     return entry;
@@ -235,7 +307,13 @@ export class PlayerSaveService {
       entry.lastBlueprintDeployAt > 0 &&
       entry.lastBlueprintDeployAt + CONFIG.BLUEPRINT_DEPLOY_COOLDOWN_MS > now;
     const hasStoredBuilds = Object.keys(entry.storedBuilds || {}).length > 0;
-    return !entry.inventory && !entry.blueprint && !hasStoredBuilds && !cooldownActive;
+    return (
+      !entry.inventory &&
+      !entry.blueprint &&
+      !hasStoredBuilds &&
+      !cooldownActive &&
+      !entry.playerState
+    );
   }
 
   private async persistRow(ownerId: string, entry: LoadedPlayerSave): Promise<void> {
@@ -263,17 +341,35 @@ export class PlayerSaveService {
     this.memorySaves.set(ownerId, entry);
     if (!this.supabase) return;
 
+    const baseRow: Record<string, unknown> = {
+      owner_id: ownerId,
+      inventory_save: entry.inventory,
+      blueprint_save: encodeBlueprintColumn(entry.blueprint, entry.storedBuilds),
+      last_blueprint_deploy_at: entry.lastBlueprintDeployAt,
+      updated_at: new Date(now).toISOString()
+    };
+    if (this.supportsPlayerStateCol) {
+      baseRow.player_state = entry.playerState;
+    }
+
     try {
-      const { error } = await this.supabase.from('triberush_player_saves').upsert(
-        {
-          owner_id: ownerId,
-          inventory_save: entry.inventory,
-          blueprint_save: encodeBlueprintColumn(entry.blueprint, entry.storedBuilds),
-          last_blueprint_deploy_at: entry.lastBlueprintDeployAt,
-          updated_at: new Date(now).toISOString()
-        },
-        { onConflict: 'owner_id' }
-      );
+      const { error } = await this.supabase
+        .from('triberush_player_saves')
+        .upsert(baseRow, { onConflict: 'owner_id' });
+      if (error && this.supportsPlayerStateCol && isMissingPlayerStateColError(error)) {
+        this.supportsPlayerStateCol = false;
+        console.warn(
+          '[TRIBERUSH-SAVE] Column player_state missing in triberush_player_saves — run supabase/01_triberush_profiles.sql to persist coordinates.'
+        );
+        delete baseRow.player_state;
+        const retry = await this.supabase
+          .from('triberush_player_saves')
+          .upsert(baseRow, { onConflict: 'owner_id' });
+        if (retry.error) {
+          console.error('[TRIBERUSH-SAVE] upsert failed:', ownerId, retry.error.code, retry.error.message);
+        }
+        return;
+      }
       if (error) {
         console.error('[TRIBERUSH-SAVE] upsert failed:', ownerId, error.code, error.message);
       }
@@ -285,7 +381,6 @@ export class PlayerSaveService {
   public async loadPlayerSave(ownerId: string): Promise<LoadedPlayerSave | null> {
     if (!isPersistableAccount(ownerId)) return null;
 
-    // Wait for any in-flight save/clear for this account before reading (prevents fast-relog race)
     const inflight = this.writeQueues.get(ownerId);
     if (inflight) {
       await inflight;
@@ -293,21 +388,47 @@ export class PlayerSaveService {
 
     if (this.supabase) {
       try {
-        const { data, error } = await this.supabase
-          .from('triberush_player_saves')
-          .select('inventory_save, blueprint_save, last_blueprint_deploy_at')
-          .eq('owner_id', ownerId)
-          .maybeSingle();
+        const initialQuery = this.supportsPlayerStateCol
+          ? await this.supabase
+              .from('triberush_player_saves')
+              .select('inventory_save, blueprint_save, last_blueprint_deploy_at, player_state')
+              .eq('owner_id', ownerId)
+              .maybeSingle()
+          : await this.supabase
+              .from('triberush_player_saves')
+              .select('inventory_save, blueprint_save, last_blueprint_deploy_at')
+              .eq('owner_id', ownerId)
+              .maybeSingle();
+
+        let data: Record<string, unknown> | null =
+          (initialQuery.data as unknown as Record<string, unknown> | null) ?? null;
+        let error = initialQuery.error;
+
+        if (error && this.supportsPlayerStateCol && isMissingPlayerStateColError(error)) {
+          this.supportsPlayerStateCol = false;
+          console.warn(
+            '[TRIBERUSH-SAVE] Column player_state missing on load — run supabase/01_triberush_profiles.sql.'
+          );
+          const retry = await this.supabase
+            .from('triberush_player_saves')
+            .select('inventory_save, blueprint_save, last_blueprint_deploy_at')
+            .eq('owner_id', ownerId)
+            .maybeSingle();
+          data = (retry.data as unknown as Record<string, unknown> | null) ?? null;
+          error = retry.error;
+        }
 
         if (error) {
           console.error('[TRIBERUSH-SAVE] load failed:', ownerId, error.code, error.message);
         } else if (data) {
-          const decodedBp = decodeBlueprintColumn(data.blueprint_save);
+          const row = data;
+          const decodedBp = decodeBlueprintColumn(row.blueprint_save);
           const loaded: LoadedPlayerSave = {
-            inventory: (data.inventory_save as CompactInventorySave | null) ?? null,
+            inventory: (row.inventory_save as CompactInventorySave | null) ?? null,
             blueprint: decodedBp.blueprint,
             storedBuilds: decodedBp.storedBuilds,
-            lastBlueprintDeployAt: Number(data.last_blueprint_deploy_at || 0)
+            lastBlueprintDeployAt: Number(row.last_blueprint_deploy_at || 0),
+            playerState: sanitizePlayerWorldState(row.player_state)
           };
           this.memorySaves.set(ownerId, loaded);
           return loaded;
@@ -322,40 +443,50 @@ export class PlayerSaveService {
 
   public async savePlayerInventory(
     ownerId: string,
-    compact: CompactInventorySave | null
+    compact: CompactInventorySave | null,
+    playerState?: SavedPlayerWorldState | null
   ): Promise<void> {
     if (!isPersistableAccount(ownerId)) return;
     await this.enqueueWrite(ownerId, async () => {
       const entry = this.getOrCreateMem(ownerId);
       entry.inventory = compact;
+      if (playerState !== undefined) {
+        entry.playerState = playerState;
+      }
       await this.persistRow(ownerId, entry);
     });
   }
 
   /**
-   * Anti-Dupe Guard: clears stored inventory immediately upon join (consumed into live session),
-   * on death, or on combat-log disconnect so players can NEVER drop items & relog to clone loot.
+   * Anti-Dupe Guard: clears stored inventory (and optionally player_state) upon join consumption,
+   * death, or combat-log disconnect so players can NEVER drop items & relog to clone loot.
    */
-  public async clearPlayerInventory(ownerId: string): Promise<void> {
+  public async clearPlayerInventory(ownerId: string, clearPlayerState = true): Promise<void> {
     if (!isPersistableAccount(ownerId)) return;
     await this.enqueueWrite(ownerId, async () => {
       const entry = this.memorySaves.get(ownerId);
       if (entry) {
         entry.inventory = null;
+        if (clearPlayerState) {
+          entry.playerState = null;
+        }
         await this.persistRow(ownerId, entry);
         return;
       }
       if (!this.supabase) return;
       try {
-        // Update ONLY inventory_save when row isn't cached locally so blueprint_save is never clobbered
+        const patch: Record<string, unknown> = {
+          inventory_save: null,
+          updated_at: new Date().toISOString()
+        };
+        if (clearPlayerState && this.supportsPlayerStateCol) {
+          patch.player_state = null;
+        }
         const { error } = await this.supabase
           .from('triberush_player_saves')
-          .update({
-            inventory_save: null,
-            updated_at: new Date().toISOString()
-          })
+          .update(patch)
           .eq('owner_id', ownerId);
-        if (error) {
+        if (error && !isMissingPlayerStateColError(error)) {
           console.error('[TRIBERUSH-SAVE] clear failed:', ownerId, error.code, error.message);
         }
       } catch (err) {

@@ -13,6 +13,21 @@ export interface RelocatedTotemState {
   huntCounts: Record<AnimalKind, number>;
 }
 
+export interface PersistedTribeRecord {
+  id: string;
+  name: string;
+  tag: string;
+  visibility: TribeVisibility;
+  leaderId: string;
+  leaderName: string;
+  memberIds: string[];
+  builderIds: string[];
+  pendingRequests: TribeJoinRequest[];
+  createdAt: number;
+  relocatedTotemState: RelocatedTotemState | null;
+  allMembersOfflineSince: number | null;
+}
+
 interface InternalTribe {
   id: string;
   name: string;
@@ -25,12 +40,13 @@ interface InternalTribe {
   pendingRequests: Map<string, TribeJoinRequest>;
   createdAt: number;
   relocatedTotemState: RelocatedTotemState | null;
+  allMembersOfflineSince: number | null;
 }
 
 /**
  * Server-Authoritative Tribe Manager (Maximum 30 Players per Tribe):
  * Handles Tribe creation, [TAG] validation, 30-member cap enforcement, leadership handoff,
- * zero friendly fire checks, and shared Tribe Chest access control.
+ * zero friendly fire checks, shared Tribe Chest access control, and 3-minute offline grace persistence.
  */
 export class TribeManager {
   private readonly tribesById: Map<string, InternalTribe> = new Map();
@@ -42,9 +58,10 @@ export class TribeManager {
     this.tribesByTag.clear();
   }
 
-  public getAllTribeSummaries(
-    playersById: ReadonlyMap<string, ActiveWorldPlayer>
-  ): TribeSummary[] {
+  public getTribeCount(): number { return this.tribesById.size; }
+  public hasTribe(tribeId: string): boolean { return this.tribesById.has(tribeId); }
+
+  public getAllTribeSummaries(playersById: ReadonlyMap<string, ActiveWorldPlayer>): TribeSummary[] {
     const list: TribeSummary[] = [];
     for (const t of this.tribesById.values()) {
       const memberIds = Array.from(t.memberIds);
@@ -54,20 +71,11 @@ export class TribeManager {
         if (p) memberShortIds.push(p.shortId);
       }
       list.push({
-        id: t.id,
-        name: t.name,
-        tag: t.tag,
-        visibility: t.visibility,
-        leaderId: t.leaderId,
-        leaderName: t.leaderName,
-        memberCount: t.memberIds.size,
-        maxMembers: CONFIG.MAX_TRIBE_MEMBERS,
-        memberIds,
-        memberShortIds,
-        builderIds: Array.from(t.builderIds),
-        pendingRequests: Array.from(t.pendingRequests.values()).sort(
-          (a, b) => a.requestedAt - b.requestedAt
-        )
+        id: t.id, name: t.name, tag: t.tag, visibility: t.visibility,
+        leaderId: t.leaderId, leaderName: t.leaderName,
+        memberCount: t.memberIds.size, maxMembers: CONFIG.MAX_TRIBE_MEMBERS,
+        memberIds, memberShortIds, builderIds: Array.from(t.builderIds),
+        pendingRequests: Array.from(t.pendingRequests.values()).sort((a, b) => a.requestedAt - b.requestedAt)
       });
     }
     return list;
@@ -122,7 +130,8 @@ export class TribeManager {
       builderIds: new Set([leader.id]),
       pendingRequests: new Map(),
       createdAt: Date.now(),
-      relocatedTotemState: null
+      relocatedTotemState: null,
+      allMembersOfflineSince: null
     };
 
     this.clearPendingRequestsForPlayer(leader.id);
@@ -167,14 +176,14 @@ export class TribeManager {
     if (!tribe) {
       return { ok: false, error: 'Tribe no longer exists.' };
     }
-    if (tribe.memberIds.size >= CONFIG.MAX_TRIBE_MEMBERS) {
+    if (!tribe.memberIds.has(player.id) && tribe.memberIds.size >= CONFIG.MAX_TRIBE_MEMBERS) {
       return {
         ok: false,
         error: `Tribe [${tribe.tag}] is full (${CONFIG.MAX_TRIBE_MEMBERS}/${CONFIG.MAX_TRIBE_MEMBERS}).`
       };
     }
 
-    if (tribe.visibility === 'private') {
+    if (tribe.visibility === 'private' && !tribe.memberIds.has(player.id)) {
       if (tribe.pendingRequests.has(player.id)) {
         return { ok: false, error: `Join request already sent to [${tribe.tag}].` };
       }
@@ -194,14 +203,15 @@ export class TribeManager {
 
     this.clearPendingRequestsForPlayer(player.id);
     tribe.memberIds.add(player.id);
+    tribe.allMembersOfflineSince = null;
     player.tribeId = tribe.id;
     player.tribeTag = tribe.tag;
     return { ok: true, pending: false, tribeTag: tribe.tag, tribeName: tribe.name };
   }
 
   /**
-   * Restores Tribe membership cleanly when a player reconnects within the short
-   * session-resume window (works for both Public and Private Tribes if still open).
+   * Restores Tribe membership cleanly when a player reconnects within the
+   * session-resume / redeploy grace window (works for both Public and Private Tribes).
    */
   public rejoinTribeById(
     player: ActiveWorldPlayer,
@@ -210,15 +220,211 @@ export class TribeManager {
   ): boolean {
     if (player.tribeId) return false;
     const tribe = this.tribesById.get(tribeId);
-    if (!tribe || tribe.memberIds.size >= CONFIG.MAX_TRIBE_MEMBERS) return false;
+    if (!tribe) return false;
+    if (!tribe.memberIds.has(player.id) && tribe.memberIds.size >= CONFIG.MAX_TRIBE_MEMBERS) {
+      return false;
+    }
     this.clearPendingRequestsForPlayer(player.id);
     tribe.memberIds.add(player.id);
-    if (restoreBuildPermission) {
+    if (restoreBuildPermission || tribe.leaderId === player.id) {
       tribe.builderIds.add(player.id);
     }
+    if (tribe.leaderId === player.id) {
+      tribe.leaderName = player.username;
+    }
+    tribe.allMembersOfflineSince = null;
     player.tribeId = tribe.id;
     player.tribeTag = tribe.tag;
     return true;
+  }
+
+  /**
+   * Keeps a disconnecting player in their Tribe during the 3-minute reconnect/redeploy
+   * grace window, stamping `allMembersOfflineSince` only when 0 Tribe members remain online.
+   */
+  public handleMemberDisconnected(
+    playerId: string,
+    tribeId: string | null,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>,
+    now: number = Date.now()
+  ): void {
+    if (!tribeId) return;
+    const tribe = this.tribesById.get(tribeId);
+    if (!tribe) return;
+    let anyOtherOnline = false;
+    for (const memberId of tribe.memberIds) {
+      if (memberId !== playerId && playersById.has(memberId)) {
+        anyOtherOnline = true;
+        break;
+      }
+    }
+    if (anyOtherOnline) {
+      tribe.allMembersOfflineSince = null;
+    } else if (tribe.allMembersOfflineSince === null) {
+      tribe.allMembersOfflineSince = now;
+    }
+  }
+
+  /**
+   * Disbands and returns IDs of Tribes whose members have ALL been offline for >= graceMs.
+   */
+  public collectExpiredOfflineTribes(
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>,
+    graceMs: number,
+    now: number = Date.now()
+  ): string[] {
+    const expiredIds: string[] = [];
+    for (const tribe of this.tribesById.values()) {
+      let anyOnline = false;
+      for (const memberId of tribe.memberIds) {
+        if (playersById.has(memberId)) {
+          anyOnline = true;
+          break;
+        }
+      }
+      if (anyOnline) {
+        tribe.allMembersOfflineSince = null;
+        continue;
+      }
+      if (tribe.allMembersOfflineSince === null) {
+        tribe.allMembersOfflineSince = now;
+        continue;
+      }
+      if (now - tribe.allMembersOfflineSince >= graceMs) {
+        expiredIds.push(tribe.id);
+      }
+    }
+    for (let i = 0; i < expiredIds.length; i++) {
+      const t = this.tribesById.get(expiredIds[i]);
+      if (t) {
+        this.tribesById.delete(t.id);
+        this.tribesByTag.delete(t.tag);
+      }
+    }
+    return expiredIds;
+  }
+
+  public hasGraceProtectedOfflineTribes(now: number, graceMs: number): boolean {
+    for (const tribe of this.tribesById.values()) {
+      if (tribe.allMembersOfflineSince === null) return true;
+      if (now - tribe.allMembersOfflineSince < graceMs) return true;
+    }
+    return false;
+  }
+
+  public refreshOfflineGraceTimestamps(
+    now: number,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>
+  ): void {
+    for (const tribe of this.tribesById.values()) {
+      let anyOnline = false;
+      for (const memberId of tribe.memberIds) {
+        if (playersById.has(memberId)) {
+          anyOnline = true;
+          break;
+        }
+      }
+      tribe.allMembersOfflineSince = anyOnline ? null : now;
+    }
+  }
+
+  public exportPersistedState(): { nextTribeNum: number; tribes: PersistedTribeRecord[] } {
+    const tribes: PersistedTribeRecord[] = [];
+    for (const t of this.tribesById.values()) {
+      tribes.push({
+        id: t.id,
+        name: t.name,
+        tag: t.tag,
+        visibility: t.visibility,
+        leaderId: t.leaderId,
+        leaderName: t.leaderName,
+        memberIds: Array.from(t.memberIds),
+        builderIds: Array.from(t.builderIds),
+        pendingRequests: Array.from(t.pendingRequests.values()),
+        createdAt: t.createdAt,
+        relocatedTotemState: t.relocatedTotemState
+          ? { level: t.relocatedTotemState.level, huntCounts: { ...t.relocatedTotemState.huntCounts } }
+          : null,
+        allMembersOfflineSince: t.allMembersOfflineSince
+      });
+    }
+    return { nextTribeNum: this.nextTribeNum, tribes };
+  }
+
+  public importPersistedState(
+    raw: { nextTribeNum?: number; tribes?: unknown[] } | null | undefined,
+    bootNow: number = Date.now()
+  ): void {
+    this.clear();
+    let maxNum = typeof raw?.nextTribeNum === 'number' && raw.nextTribeNum >= 1
+      ? Math.floor(raw.nextTribeNum)
+      : 1;
+    if (Array.isArray(raw?.tribes)) {
+      for (const item of raw.tribes) {
+        if (!item || typeof item !== 'object') continue;
+        const obj = item as Partial<PersistedTribeRecord>;
+        const id = typeof obj.id === 'string' ? obj.id.trim() : '';
+        const name = typeof obj.name === 'string' ? obj.name.trim().slice(0, 20) : '';
+        const tag = typeof obj.tag === 'string' ? obj.tag.trim().toUpperCase().slice(0, 5) : '';
+        const leaderId = typeof obj.leaderId === 'string' ? obj.leaderId.trim() : '';
+        if (!id || !name || !tag || !leaderId || this.tribesById.has(id) || this.tribesByTag.has(tag)) {
+          continue;
+        }
+        const match = /^tribe-(\d+)$/.exec(id);
+        if (match) {
+          const parsedNum = Number(match[1]);
+          if (Number.isInteger(parsedNum) && parsedNum >= maxNum) maxNum = parsedNum + 1;
+        }
+        const memberIds = new Set<string>(
+          Array.isArray(obj.memberIds)
+            ? obj.memberIds.filter((m): m is string => typeof m === 'string' && m.length > 0)
+            : [leaderId]
+        );
+        memberIds.add(leaderId);
+        const builderIds = new Set<string>(
+          Array.isArray(obj.builderIds)
+            ? obj.builderIds.filter((b): b is string => typeof b === 'string' && memberIds.has(b))
+            : [leaderId]
+        );
+        builderIds.add(leaderId);
+        const pendingRequests = new Map<string, TribeJoinRequest>();
+        if (Array.isArray(obj.pendingRequests)) {
+          for (const req of obj.pendingRequests) {
+            if (req && typeof req.playerId === 'string' && typeof req.username === 'string') {
+              pendingRequests.set(req.playerId, {
+                playerId: req.playerId,
+                username: req.username,
+                requestedAt: Number(req.requestedAt) || bootNow
+              });
+            }
+          }
+        }
+        const tribe: InternalTribe = {
+          id,
+          name,
+          tag,
+          visibility: obj.visibility === 'private' ? 'private' : 'public',
+          leaderId,
+          leaderName: typeof obj.leaderName === 'string' && obj.leaderName ? obj.leaderName : 'Leader',
+          memberIds,
+          builderIds,
+          pendingRequests,
+          createdAt: Number(obj.createdAt) || bootNow,
+          relocatedTotemState:
+            obj.relocatedTotemState && typeof obj.relocatedTotemState.level === 'number'
+              ? {
+                  level: obj.relocatedTotemState.level,
+                  huntCounts: { ...(obj.relocatedTotemState.huntCounts || {}) } as Record<AnimalKind, number>
+                }
+              : null,
+          // Refresh grace timer on boot so players reconnecting after a Render deploy get full 3 min
+          allMembersOfflineSince: bootNow
+        };
+        this.tribesById.set(id, tribe);
+        this.tribesByTag.set(tag, tribe);
+      }
+    }
+    this.nextTribeNum = Math.max(1, maxNum);
   }
 
   public respondToJoinRequest(
@@ -274,6 +480,7 @@ export class TribeManager {
 
     this.clearPendingRequestsForPlayer(target.id);
     tribe.memberIds.add(target.id);
+    tribe.allMembersOfflineSince = null;
     target.tribeId = tribe.id;
     target.tribeTag = tribe.tag;
     return {
@@ -448,20 +655,11 @@ export class TribeManager {
     };
   }
 
-  /**
-   * Returns true if two players belong to the same Tribe (disables friendly fire).
-   */
   public areAllies(a: ActiveWorldPlayer, b: ActiveWorldPlayer): boolean {
     if (a.id === b.id) return true;
     return Boolean(a.tribeId && b.tribeId && a.tribeId === b.tribeId);
   }
 
-  /**
-   * Shared Tribe Chest Access Control:
-   * - Owner always has access.
-   * - If the chest belongs to a Tribe (or the owner currently belongs to a Tribe),
-   *   all members of that Tribe can open and share it, while outsiders are blocked!
-   */
   public canAccessChest(
     player: ActiveWorldPlayer,
     chest: WorldPlacedChest,

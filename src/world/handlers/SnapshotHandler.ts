@@ -9,7 +9,8 @@ import type {
 } from '../../models/types.js';
 import {
   encodeCompactInventory,
-  type CompactInventorySave
+  type CompactInventorySave,
+  type SavedPlayerWorldState
 } from '../../services/PlayerSaveService.js';
 import {
   BINARY_PACKET_SNAPSHOT,
@@ -208,18 +209,47 @@ export function buildAllPlayersMeta(ctx: WorldRoomContext): Array<{
   return list;
 }
 
+export function buildSavedPlayerWorldState(
+  ctx: WorldRoomContext,
+  p: ActiveWorldPlayer,
+  now: number
+): SavedPlayerWorldState {
+  return {
+    x: Math.round(p.x * 10) / 10,
+    y: Math.round(p.y * 10) / 10,
+    hp: Math.max(1, Math.min(p.maxHp, p.hp)),
+    stamina: Math.max(0, Math.min(p.maxStamina, p.stamina)),
+    hunger: Math.max(0, Math.min(p.maxHunger, p.hunger)),
+    activeSlot: p.activeSlot,
+    homeHutId: p.homeHutId && ctx.placedStructures.has(p.homeHutId) ? p.homeHutId : null,
+    tribeId: p.tribeId,
+    hadBuildPermission: p.tribeId ? ctx.tribeManager.hasBuildPermission(p) : false,
+    worldSeed: ctx.world.seed,
+    savedAt: now
+  };
+}
+
 export function collectSafePlayerInventorySnapshots(
   ctx: WorldRoomContext,
   now: number,
   includeCombatPlayers: boolean = false
-): Array<{ ownerId: string; compact: CompactInventorySave | null }> {
-  const snapshots: Array<{ ownerId: string; compact: CompactInventorySave | null }> = [];
+): Array<{
+  ownerId: string;
+  compact: CompactInventorySave | null;
+  playerState: SavedPlayerWorldState;
+}> {
+  const snapshots: Array<{
+    ownerId: string;
+    compact: CompactInventorySave | null;
+    playerState: SavedPlayerWorldState;
+  }> = [];
   for (const p of ctx.playersById.values()) {
     if (p.isDead) continue;
     if (!includeCombatPlayers && now < p.combatUntil) continue;
     snapshots.push({
       ownerId: p.id,
-      compact: encodeCompactInventory(p.inventory, p.unlockedSlots, p.hasBackpack)
+      compact: encodeCompactInventory(p.inventory, p.unlockedSlots, p.hasBackpack),
+      playerState: buildSavedPlayerWorldState(ctx, p, now)
     });
   }
   return snapshots;
@@ -229,7 +259,13 @@ const INVENTORY_CHECKPOINT_INTERVAL_MS = 45_000;
 
 export function checkpointDirtyPlayerInventories(
   ctx: WorldRoomContext,
-  persistFn: ((ownerId: string, compact: CompactInventorySave | null) => void) | null,
+  persistFn:
+    | ((
+        ownerId: string,
+        compact: CompactInventorySave | null,
+        playerState?: SavedPlayerWorldState | null
+      ) => void)
+    | null,
   now: number
 ): void {
   if (!persistFn) return;
@@ -244,7 +280,11 @@ export function checkpointDirtyPlayerInventories(
     p.inventoryDirty = false;
     p.urgentInventorySaveAt = 0;
     p.lastInventorySavedAt = now;
-    persistFn(p.id, encodeCompactInventory(p.inventory, p.unlockedSlots, p.hasBackpack));
+    persistFn(
+      p.id,
+      encodeCompactInventory(p.inventory, p.unlockedSlots, p.hasBackpack),
+      buildSavedPlayerWorldState(ctx, p, now)
+    );
   }
 }
 
