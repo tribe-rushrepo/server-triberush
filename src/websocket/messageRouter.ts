@@ -17,6 +17,7 @@ export interface MessageRouterContext {
   isConnectionActive: () => boolean;
   getOnlinePlayerCount: () => number;
   sendJsonToPlayer: (playerId: string, payload: Record<string, unknown>) => void;
+  setUseJsonSnapshots?: (enabled: boolean) => void;
 }
 
 function sendNoticeIfError(
@@ -43,11 +44,24 @@ export async function dispatchClientMessage(
 
   switch (msg.type) {
     case 'PING': {
+      const p = worldRoom.getPlayer(playerId);
       ctx.sendJsonToPlayer(playerId, {
         type: 'PONG',
         serverNow: Date.now(),
-        onlinePlayers: ctx.getOnlinePlayerCount()
+        onlinePlayers: ctx.getOnlinePlayerCount(),
+        ...(p && !p.isDead
+          ? {
+              selfX: Math.round(p.x * 10) / 10,
+              selfY: Math.round(p.y * 10) / 10,
+              selfShortId: p.shortId,
+              ackSeq: (p.lastProcessedInputSeq ?? 0) & 0xffff
+            }
+          : {})
       });
+      return;
+    }
+    case 'USE_JSON_SNAPSHOTS': {
+      ctx.setUseJsonSnapshots?.(msg.enabled !== false);
       return;
     }
     case 'JOIN_WORLD': {
@@ -92,6 +106,7 @@ export async function dispatchClientMessage(
 
       if (!alreadyInWorld && saved?.inventory) {
         void playerSaveService.clearPlayerInventory(playerId);
+        res.player.inventoryDirty = true;
       }
       ctx.markJoinedWorld();
       const dynamicState = worldRoom.getDynamicWorldStateSnapshot();

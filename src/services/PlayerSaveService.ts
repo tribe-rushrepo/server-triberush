@@ -166,13 +166,26 @@ export class PlayerSaveService {
   private readonly writeQueues = new Map<string, Promise<void>>();
 
   constructor(enableSupabase = true) {
+    const hasServiceRole = Boolean(CONFIG.SUPABASE_SERVICE_ROLE_KEY);
     const key = CONFIG.SUPABASE_SERVICE_ROLE_KEY || CONFIG.SUPABASE_ANON_KEY;
     if (enableSupabase && CONFIG.SUPABASE_URL && key) {
       this.supabase = createClient(CONFIG.SUPABASE_URL, key, {
         auth: { persistSession: false, autoRefreshToken: false }
       });
+      if (hasServiceRole) {
+        console.log('[TRIBERUSH-SAVE] Supabase persistence active (key=service_role).');
+      } else {
+        console.warn(
+          '[TRIBERUSH-SAVE] Supabase persistence using ANON key (SUPABASE_SERVICE_ROLE_KEY missing); RLS may reject server writes.'
+        );
+      }
     } else {
       this.supabase = null;
+      if (enableSupabase) {
+        console.warn(
+          '[TRIBERUSH-SAVE] Supabase NOT configured; player saves are RAM-only and will reset on redeploy.'
+        );
+      }
     }
   }
 
@@ -233,12 +246,15 @@ export class PlayerSaveService {
       this.memorySaves.delete(ownerId);
       if (this.supabase) {
         try {
-          await this.supabase
+          const { error } = await this.supabase
             .from('triberush_player_saves')
             .delete()
             .eq('owner_id', ownerId);
-        } catch {
-          // Non-fatal
+          if (error) {
+            console.error('[TRIBERUSH-SAVE] delete failed:', ownerId, error.code, error.message);
+          }
+        } catch (err) {
+          console.error('[TRIBERUSH-SAVE] delete threw:', ownerId, err);
         }
       }
       return;
@@ -248,7 +264,7 @@ export class PlayerSaveService {
     if (!this.supabase) return;
 
     try {
-      await this.supabase.from('triberush_player_saves').upsert(
+      const { error } = await this.supabase.from('triberush_player_saves').upsert(
         {
           owner_id: ownerId,
           inventory_save: entry.inventory,
@@ -258,8 +274,11 @@ export class PlayerSaveService {
         },
         { onConflict: 'owner_id' }
       );
-    } catch {
-      // Non-fatal: memory cache remains authoritative for this process
+      if (error) {
+        console.error('[TRIBERUSH-SAVE] upsert failed:', ownerId, error.code, error.message);
+      }
+    } catch (err) {
+      console.error('[TRIBERUSH-SAVE] upsert threw:', ownerId, err);
     }
   }
 
@@ -274,13 +293,15 @@ export class PlayerSaveService {
 
     if (this.supabase) {
       try {
-        const { data } = await this.supabase
+        const { data, error } = await this.supabase
           .from('triberush_player_saves')
           .select('inventory_save, blueprint_save, last_blueprint_deploy_at')
           .eq('owner_id', ownerId)
           .maybeSingle();
 
-        if (data) {
+        if (error) {
+          console.error('[TRIBERUSH-SAVE] load failed:', ownerId, error.code, error.message);
+        } else if (data) {
           const decodedBp = decodeBlueprintColumn(data.blueprint_save);
           const loaded: LoadedPlayerSave = {
             inventory: (data.inventory_save as CompactInventorySave | null) ?? null,
@@ -291,8 +312,8 @@ export class PlayerSaveService {
           this.memorySaves.set(ownerId, loaded);
           return loaded;
         }
-      } catch {
-        // Fallback to memory cache if Supabase is temporarily unreachable
+      } catch (err) {
+        console.error('[TRIBERUSH-SAVE] load threw:', ownerId, err);
       }
     }
 
@@ -327,15 +348,18 @@ export class PlayerSaveService {
       if (!this.supabase) return;
       try {
         // Update ONLY inventory_save when row isn't cached locally so blueprint_save is never clobbered
-        await this.supabase
+        const { error } = await this.supabase
           .from('triberush_player_saves')
           .update({
             inventory_save: null,
             updated_at: new Date().toISOString()
           })
           .eq('owner_id', ownerId);
-      } catch {
-        // Non-fatal
+        if (error) {
+          console.error('[TRIBERUSH-SAVE] clear failed:', ownerId, error.code, error.message);
+        }
+      } catch (err) {
+        console.error('[TRIBERUSH-SAVE] clear threw:', ownerId, err);
       }
     });
   }

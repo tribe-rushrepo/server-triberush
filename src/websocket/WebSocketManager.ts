@@ -5,19 +5,26 @@ import { CONFIG } from '../config/index.js';
 import { tribeRushAuthService } from '../services/AuthService.js';
 import { playerSaveService } from '../services/PlayerSaveService.js';
 import { WorldRoom } from '../world/WorldRoom.js';
+import { decodeBinarySnapshotToJson } from '../world/handlers/SnapshotHandler.js';
 import { dispatchClientMessage } from './messageRouter.js';
 import { packetRateGuard } from './packetRateGuard.js';
 import { ClientMessageSchema } from './schemas.js';
 
-const MAX_BINARY_BUFFERED_BYTES = 64 * 1024;
+const MAX_BINARY_BUFFERED_BYTES = 128 * 1024;
+const ANIMAL_BINARY_PRIORITY_CUTOFF_BYTES = 64 * 1024;
 const MAX_JSON_BUFFERED_BYTES = 256 * 1024;
 const STALE_SOCKET_BUFFERED_BYTES = 512 * 1024;
+const HEARTBEAT_INTERVAL_MS = 25_000;
+const MAX_MISSED_HEARTBEATS = 3;
 const SOFT_MAX_WS_PACKETS_PER_SEC = 100; // Silently drop overflow above this (never kicks real players)
 const HARD_DDOS_PACKETS_PER_SEC = 220; // Sustained >220 pkt/s counts 1 strike per second (kicks at 10s)
 const MAX_BAD_PACKET_STRIKES = 15;
 
 type TrackedWebSocket = WebSocket & {
   __isAlive?: boolean;
+  __missedHeartbeats?: number;
+  __useJsonSnapshots?: boolean;
+  __lastBinaryErrLogAt?: number;
   __clientIp?: string;
   __hasJoinedWorld?: boolean;
   __msgWindowStart?: number;
@@ -67,18 +74,21 @@ export class WebSocketManager {
     });
     this.worldRoom.startSimulationLoop();
 
-    // 15s keepalive ping + zombie connection reaper (terminates sockets that miss 2 heartbeats)
+    // 25s keepalive ping + 3-strike zombie reaper (75s silence tolerance for Alt-Tab / background throttling)
     this.heartbeatInterval = setInterval(() => {
       for (const set of this.socketsByPlayer.values()) {
         for (const ws of set) {
           if (ws.readyState === 1) {
             if (ws.__isAlive === false) {
-              try {
-                ws.terminate?.();
-              } catch {
-                // Ignore terminate errors
+              ws.__missedHeartbeats = (ws.__missedHeartbeats || 0) + 1;
+              if (ws.__missedHeartbeats >= MAX_MISSED_HEARTBEATS) {
+                try {
+                  ws.terminate?.();
+                } catch {
+                  // Ignore terminate errors
+                }
+                continue;
               }
-              continue;
             }
             ws.__isAlive = false;
             try {
@@ -89,7 +99,7 @@ export class WebSocketManager {
           }
         }
       }
-    }, 15_000);
+    }, HEARTBEAT_INTERVAL_MS);
     this.heartbeatInterval.unref?.();
   }
 
@@ -116,19 +126,25 @@ export class WebSocketManager {
     clearInterval(this.heartbeatInterval);
     this.worldRoom.stopSimulationLoop();
 
-    const snapshots = this.worldRoom.getAllSafePlayerInventorySnapshots();
+    // Pause client auto-reconnects while the retiring instance flushes saves to Supabase
+    this.broadcastJson({
+      type: 'SERVER_RESTARTING',
+      reconnectDelayMs: 2800
+    });
+
+    const snapshots = this.worldRoom.getAllSafePlayerInventorySnapshots(Date.now(), true);
     for (const snap of snapshots) {
       void playerSaveService.savePlayerInventory(snap.ownerId, snap.compact);
     }
     await Promise.allSettled([
-      playerSaveService.flushAllPendingWrites(4000),
+      playerSaveService.flushAllPendingWrites(4500),
       this.worldRoom.blueprintService.flushPendingDiskWrite()
     ]);
 
     for (const set of this.socketsByPlayer.values()) {
       for (const ws of set) {
         try {
-          ws.close(1001, 'Server restarting');
+          ws.close(1012, 'Server restarting');
         } catch {
           // Ignore close errors
         }
@@ -200,15 +216,42 @@ export class WebSocketManager {
   public sendBinaryToPlayer(playerId: string, frame: Buffer): void {
     const set = this.socketsByPlayer.get(playerId);
     if (!set || set.size === 0) return;
+    const pType = frame.length > 0 ? frame.readUInt8(0) : 0;
+    let cachedJsonRaw: string | null = null;
     for (const ws of set) {
-      if (ws.readyState === 1) {
-        if (typeof ws.bufferedAmount === 'number' && ws.bufferedAmount > MAX_BINARY_BUFFERED_BYTES) {
+      if (ws.readyState !== 1) continue;
+      if (ws.__useJsonSnapshots) {
+        if (
+          pType === 2 &&
+          typeof ws.bufferedAmount === 'number' &&
+          ws.bufferedAmount > ANIMAL_BINARY_PRIORITY_CUTOFF_BYTES
+        ) {
           continue;
         }
-        try {
-          ws.send(frame, { binary: true });
-        } catch {
-          // Ignore send failure
+        if (cachedJsonRaw === null) {
+          const fallbackPayload = decodeBinarySnapshotToJson(frame);
+          cachedJsonRaw = fallbackPayload ? JSON.stringify(fallbackPayload) : '';
+        }
+        if (cachedJsonRaw) this.safeSendJsonFrame(ws, cachedJsonRaw);
+        continue;
+      }
+      if (typeof ws.bufferedAmount === 'number') {
+        const limit =
+          pType === 2 ? ANIMAL_BINARY_PRIORITY_CUTOFF_BYTES : MAX_BINARY_BUFFERED_BYTES;
+        if (ws.bufferedAmount > limit) {
+          continue;
+        }
+      }
+      try {
+        ws.send(frame, { binary: true });
+      } catch (err) {
+        const now = Date.now();
+        if (!ws.__lastBinaryErrLogAt || now - ws.__lastBinaryErrLogAt >= 15_000) {
+          ws.__lastBinaryErrLogAt = now;
+          console.warn(
+            `[TRIBERUSH-WS] Binary frame send failed (pType=${pType}, player=${playerId}):`,
+            err instanceof Error ? err.message : String(err)
+          );
         }
       }
     }
@@ -265,6 +308,8 @@ export class WebSocketManager {
     this.connectionCountByIp.set(rawIp, currentIpCount + 1);
 
     socket.__isAlive = true;
+    socket.__missedHeartbeats = 0;
+    socket.__useJsonSnapshots = false;
     socket.__clientIp = rawIp;
     socket.__hasJoinedWorld = false;
     socket.__msgWindowStart = Date.now();
@@ -275,6 +320,7 @@ export class WebSocketManager {
 
     socket.on('pong', () => {
       socket.__isAlive = true;
+      socket.__missedHeartbeats = 0;
     });
 
     try {
@@ -324,6 +370,7 @@ export class WebSocketManager {
     socket.on('message', async (raw) => {
       try {
         socket.__isAlive = true;
+        socket.__missedHeartbeats = 0;
 
         const nowMs = Date.now();
         if (!socket.__msgWindowStart || nowMs - socket.__msgWindowStart >= 1000) {
@@ -391,7 +438,10 @@ export class WebSocketManager {
               socket.readyState === 1 &&
               Boolean(this.socketsByPlayer.get(playerId)?.has(socket)),
             getOnlinePlayerCount: () => this.getOnlinePlayerCount(),
-            sendJsonToPlayer: (pid, payload) => this.sendJsonToPlayer(pid, payload)
+            sendJsonToPlayer: (pid, payload) => this.sendJsonToPlayer(pid, payload),
+            setUseJsonSnapshots: (enabled) => {
+              socket.__useJsonSnapshots = enabled;
+            }
           },
           validated.data
         );

@@ -64,6 +64,7 @@ import {
   buildAllPlayersMeta,
   buildDynamicWorldStateSnapshot,
   buildLeaderboardEntries,
+  checkpointDirtyPlayerInventories,
   collectSafePlayerInventorySnapshots,
   encodePlayerBinarySnapshot,
   sendPlayerInventorySync,
@@ -391,8 +392,11 @@ export class WorldRoom {
     return buildAllPlayersMeta(this.ctx);
   }
 
-  public getAllSafePlayerInventorySnapshots(now: number = Date.now()) {
-    return collectSafePlayerInventorySnapshots(this.ctx, now);
+  public getAllSafePlayerInventorySnapshots(
+    now: number = Date.now(),
+    includeCombatPlayers: boolean = false
+  ) {
+    return collectSafePlayerInventorySnapshots(this.ctx, now, includeCombatPlayers);
   }
 
   private allocateShortId(): number {
@@ -606,6 +610,10 @@ export class WorldRoom {
     }
 
     stepPlayersAndWorldCore(this.ctx, dt, now, this.serverTick, Boolean(this.onSendPlayerEvent));
+
+    if (this.serverTick % 20 === 0) {
+      checkpointDirtyPlayerInventories(this.ctx, this.onPersistPlayerInventory, now);
+    }
 
     if (now - this.lastLeaderboardSyncAt >= CONFIG.LEADERBOARD_SYNC_INTERVAL_MS) {
       this.lastLeaderboardSyncAt = now;

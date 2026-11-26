@@ -297,6 +297,7 @@ export function handleDropHeldItemCore(
       slots: chest.slots
     });
   } else {
+    player.urgentInventorySaveAt = Date.now() + 1500;
     ctx.syncPlayerInventory(player);
   }
   return { ok: true, drop };
@@ -366,6 +367,9 @@ export function handleMoveSlotCore(
     srcArr[fromSlot] = dstItem || null;
   }
 
+  if (chest) {
+    player.urgentInventorySaveAt = Date.now() + 1500;
+  }
   ctx.syncPlayerInventory(player);
   if (chest) {
     ctx.emitPlayerEvent(player.id, {

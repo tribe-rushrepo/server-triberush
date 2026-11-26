@@ -202,6 +202,11 @@ export const PingSchema = z.object({
   type: z.literal('PING')
 });
 
+export const UseJsonSnapshotsSchema = z.object({
+  type: z.literal('USE_JSON_SNAPSHOTS'),
+  enabled: z.boolean().optional()
+});
+
 export const ClientMessageSchema = z.discriminatedUnion('type', [
   JoinWorldSchema,
   LeaveWorldSchema,
@@ -234,7 +239,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   KickTribeMemberSchema,
   SetTribeBuildPermissionSchema,
   ChatMessageSchema,
-  PingSchema
+  PingSchema,
+  UseJsonSnapshotsSchema
 ]);
 
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;

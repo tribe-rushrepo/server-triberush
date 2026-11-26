@@ -414,4 +414,7 @@ export interface ActiveWorldPlayer {
   lastEatAt?: number;
   lastChatAt: number;
   joinedAt: number;
+  inventoryDirty?: boolean;
+  lastInventorySavedAt?: number;
+  urgentInventorySaveAt?: number;
 }

@@ -44,9 +44,14 @@ export function handleSwingCore(
   const dirY = Math.sin(player.angle);
   const resourceReachPad = 12;
   let blockedReason: string | undefined;
+  let hitHarvestable = false;
+  let blockedTree: { x: number; y: number } | null = null;
+  let blockedRock: { x: number; y: number } | null = null;
 
-  // 1. Check Tree Hit inside forward cone
+  // 1. Check closest valid Tree inside forward cone
   const nearbyTrees = ctx.world.queryNearbyTrees(player.x, player.y);
+  let bestTree = null as (typeof nearbyTrees)[number] | null;
+  let bestTreeDist = Infinity;
   for (let i = 0; i < nearbyTrees.length; i++) {
     const tree = nearbyTrees[i];
     if (tree.destroyedAt !== null) continue;
@@ -59,51 +64,54 @@ export function handleSwingCore(
     const isPointBlank = dist <= CONFIG.PLAYER_RADIUS + tree.trunkRadius + 18;
     if (!isPointBlank && dot < 0.15) continue;
 
-    if (stats.treeDmg <= 0) {
-      blockedReason = 'Requires Wooden Axe or Empty Hand for Trees';
-      ctx.emitPlayerEvent(player.id, {
-        type: 'ACTION_NOTICE',
-        message: 'Use Empty Hand or an Axe to chop Trees',
-        x: tree.x,
-        y: tree.y
-      });
-      break;
+    if (dist < bestTreeDist) {
+      bestTreeDist = dist;
+      bestTree = tree;
     }
-
-    tree.hp = Math.max(0, tree.hp - stats.treeDmg);
-    ctx.world.alteredTreeIds.add(tree.id);
-    const isDestroyed = tree.hp <= 0;
-    if (isDestroyed) {
-      tree.destroyedAt = now;
-      ctx.pendingTreeRespawns.add(tree);
-      ctx.world.removeSolidCollider('tree', tree.id, tree.x, tree.y, tree.trunkRadius);
-      for (let d = 0; d < tree.logDrops; d++) {
-        ctx.spawnGroundDrop('wood', 1, tree.x, tree.y);
-      }
-      if (Math.random() < CONFIG.TREE_FIBER_DROP_CHANCE) {
-        const fiberCount = 1 + Math.floor(Math.random() * 4);
-        ctx.spawnGroundDrop('fiber', fiberCount, tree.x, tree.y);
-      }
-      player.score += 10;
-    }
-
-    const hitPayload = {
-      type: 'TREE_HIT',
-      id: tree.id,
-      hp: tree.hp,
-      maxHp: tree.maxHp,
-      destroyed: isDestroyed
-    };
-    if (isDestroyed) {
-      ctx.emitRosterEvent(hitPayload);
-    } else {
-      ctx.broadcastProximityEvent(tree.x, tree.y, hitPayload);
-    }
-    break;
   }
 
-  // 2. Check Stone / Coal Rock Hit inside forward cone
+  if (bestTree) {
+    if (stats.treeDmg <= 0) {
+      blockedTree = { x: bestTree.x, y: bestTree.y };
+    } else {
+      hitHarvestable = true;
+      bestTree.hp = Math.max(0, bestTree.hp - stats.treeDmg);
+      ctx.world.alteredTreeIds.add(bestTree.id);
+      const isDestroyed = bestTree.hp <= 0;
+      if (isDestroyed) {
+        bestTree.destroyedAt = now;
+        ctx.pendingTreeRespawns.add(bestTree);
+        ctx.world.removeSolidCollider('tree', bestTree.id, bestTree.x, bestTree.y, bestTree.trunkRadius);
+        for (let d = 0; d < bestTree.logDrops; d++) {
+          ctx.spawnGroundDrop('wood', 1, bestTree.x, bestTree.y);
+        }
+        if (Math.random() < CONFIG.TREE_FIBER_DROP_CHANCE) {
+          const fiberCount = 1 + Math.floor(Math.random() * 4);
+          ctx.spawnGroundDrop('fiber', fiberCount, bestTree.x, bestTree.y);
+        }
+        player.score += 10;
+      }
+
+      const hitPayload = {
+        type: 'TREE_HIT',
+        id: bestTree.id,
+        hp: bestTree.hp,
+        maxHp: bestTree.maxHp,
+        destroyed: isDestroyed
+      };
+      if (isDestroyed) {
+        ctx.emitRosterEvent(hitPayload);
+      } else {
+        ctx.broadcastProximityEvent(bestTree.x, bestTree.y, hitPayload);
+      }
+    }
+  }
+
+  // 2. Check closest valid Stone / Coal Rock inside forward cone
   const nearbyRocks = ctx.world.queryNearbyRocks(player.x, player.y);
+  let bestRock = null as (typeof nearbyRocks)[number] | null;
+  let bestRockDist = Infinity;
+  let bestRockDot = -1;
   for (let i = 0; i < nearbyRocks.length; i++) {
     const rock = nearbyRocks[i];
     if (rock.destroyedAt !== null) continue;
@@ -116,90 +124,125 @@ export function handleSwingCore(
     const isPointBlank = dist <= CONFIG.PLAYER_RADIUS + rock.radius + 18;
     if (!isPointBlank && dot < 0.15) continue;
 
+    if (dist < bestRockDist) {
+      bestRockDist = dist;
+      bestRockDot = dot;
+      bestRock = rock;
+    }
+  }
+
+  if (bestRock) {
     if (stats.rockDmg <= 0) {
+      // Only warn about needing a Pickaxe when genuinely facing & close to the rock
+      if (bestRockDot >= 0.45 && bestRockDist <= stats.reach + bestRock.radius + 6) {
+        blockedRock = { x: bestRock.x, y: bestRock.y };
+      }
+    } else {
+      hitHarvestable = true;
+      bestRock.hp = Math.max(0, bestRock.hp - stats.rockDmg);
+      ctx.world.alteredRockIds.add(bestRock.id);
+      const isDestroyed = bestRock.hp <= 0;
+      if (isDestroyed) {
+        bestRock.destroyedAt = now;
+        ctx.pendingRockRespawns.add(bestRock);
+        ctx.world.removeSolidCollider('rock', bestRock.id, bestRock.x, bestRock.y, bestRock.radius);
+        const dropItem: ItemId = bestRock.dropItemId || (bestRock.hasCoal ? 'coal' : 'stone');
+        const dropTotal = bestRock.dropCount || 3;
+        for (let d = 0; d < dropTotal; d++) {
+          ctx.spawnGroundDrop(dropItem, 1, bestRock.x, bestRock.y);
+        }
+      }
+
+      const hitPayload = {
+        type: 'ROCK_HIT',
+        id: bestRock.id,
+        hp: bestRock.hp,
+        maxHp: bestRock.maxHp,
+        destroyed: isDestroyed
+      };
+      if (isDestroyed) {
+        ctx.emitRosterEvent(hitPayload);
+      } else {
+        ctx.broadcastProximityEvent(bestRock.x, bestRock.y, hitPayload);
+      }
+    }
+  }
+
+  // 3. Check closest valid Bush inside forward cone
+  if (stats.bushDmg > 0) {
+    const nearbyBushes = ctx.world.queryNearbyBushes(player.x, player.y);
+    let bestBush = null as (typeof nearbyBushes)[number] | null;
+    let bestBushDist = Infinity;
+    for (let i = 0; i < nearbyBushes.length; i++) {
+      const bush = nearbyBushes[i];
+      if (bush.destroyedAt !== null) continue;
+      const dx = bush.x - player.x;
+      const dy = bush.y - player.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > stats.reach + bush.radius + resourceReachPad) continue;
+
+      const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
+      const isPointBlank = dist <= CONFIG.PLAYER_RADIUS + bush.radius + 18;
+      if (!isPointBlank && dot < 0.15) continue;
+
+      if (dist < bestBushDist) {
+        bestBushDist = dist;
+        bestBush = bush;
+      }
+    }
+
+    if (bestBush) {
+      hitHarvestable = true;
+      bestBush.hp = Math.max(0, bestBush.hp - stats.bushDmg);
+      ctx.world.alteredBushIds.add(bestBush.id);
+      const isDestroyed = bestBush.hp <= 0;
+      if (isDestroyed) {
+        bestBush.destroyedAt = now;
+        ctx.pendingBushRespawns.add(bestBush);
+        for (let d = 0; d < bestBush.stickDrops; d++) {
+          ctx.spawnGroundDrop('stick', 1, bestBush.x, bestBush.y);
+        }
+        if (bestBush.hasFruit) {
+          bestBush.hasFruit = false;
+          ctx.spawnGroundDrop(BUSH_FRUIT_ITEMS[bestBush.kind], 1, bestBush.x, bestBush.y);
+        }
+      }
+
+      const hitPayload = {
+        type: 'BUSH_HIT',
+        id: bestBush.id,
+        hp: bestBush.hp,
+        maxHp: bestBush.maxHp,
+        hasFruit: bestBush.hasFruit,
+        destroyed: isDestroyed
+      };
+      if (isDestroyed) {
+        ctx.emitRosterEvent(hitPayload);
+      } else {
+        ctx.broadcastProximityEvent(bestBush.x, bestBush.y, hitPayload);
+      }
+    }
+  }
+
+  // Only emit wrong-tool notices when the swing did not legitimately hit any resource
+  if (!hitHarvestable) {
+    if (blockedRock) {
       blockedReason = 'Requires Wooden Pickaxe';
       ctx.emitPlayerEvent(player.id, {
         type: 'ACTION_NOTICE',
         message: 'Requires a Pickaxe to break Rocks',
-        x: rock.x,
-        y: rock.y
+        x: blockedRock.x,
+        y: blockedRock.y
       });
-      break;
+    } else if (blockedTree) {
+      blockedReason = 'Requires Wooden Axe or Empty Hand for Trees';
+      ctx.emitPlayerEvent(player.id, {
+        type: 'ACTION_NOTICE',
+        message: 'Use Empty Hand or an Axe to chop Trees',
+        x: blockedTree.x,
+        y: blockedTree.y
+      });
     }
-
-    rock.hp = Math.max(0, rock.hp - stats.rockDmg);
-    ctx.world.alteredRockIds.add(rock.id);
-    const isDestroyed = rock.hp <= 0;
-    if (isDestroyed) {
-      rock.destroyedAt = now;
-      ctx.pendingRockRespawns.add(rock);
-      ctx.world.removeSolidCollider('rock', rock.id, rock.x, rock.y, rock.radius);
-      const dropItem: ItemId = rock.dropItemId || (rock.hasCoal ? 'coal' : 'stone');
-      const dropTotal = rock.dropCount || 3;
-      for (let d = 0; d < dropTotal; d++) {
-        ctx.spawnGroundDrop(dropItem, 1, rock.x, rock.y);
-      }
-    }
-
-    const hitPayload = {
-      type: 'ROCK_HIT',
-      id: rock.id,
-      hp: rock.hp,
-      maxHp: rock.maxHp,
-      destroyed: isDestroyed
-    };
-    if (isDestroyed) {
-      ctx.emitRosterEvent(hitPayload);
-    } else {
-      ctx.broadcastProximityEvent(rock.x, rock.y, hitPayload);
-    }
-    break;
-  }
-
-  // 3. Check Bush Hit inside forward cone
-  const nearbyBushes = ctx.world.queryNearbyBushes(player.x, player.y);
-  for (let i = 0; i < nearbyBushes.length; i++) {
-    const bush = nearbyBushes[i];
-    if (bush.destroyedAt !== null) continue;
-    const dx = bush.x - player.x;
-    const dy = bush.y - player.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist > stats.reach + bush.radius + resourceReachPad) continue;
-
-    const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
-    const isPointBlank = dist <= CONFIG.PLAYER_RADIUS + bush.radius + 18;
-    if (!isPointBlank && dot < 0.15) continue;
-    if (stats.bushDmg <= 0) break;
-
-    bush.hp = Math.max(0, bush.hp - stats.bushDmg);
-    ctx.world.alteredBushIds.add(bush.id);
-    const isDestroyed = bush.hp <= 0;
-    if (isDestroyed) {
-      bush.destroyedAt = now;
-      ctx.pendingBushRespawns.add(bush);
-      for (let d = 0; d < bush.stickDrops; d++) {
-        ctx.spawnGroundDrop('stick', 1, bush.x, bush.y);
-      }
-      if (bush.hasFruit) {
-        bush.hasFruit = false;
-        ctx.spawnGroundDrop(BUSH_FRUIT_ITEMS[bush.kind], 1, bush.x, bush.y);
-      }
-    }
-
-    const hitPayload = {
-      type: 'BUSH_HIT',
-      id: bush.id,
-      hp: bush.hp,
-      maxHp: bush.maxHp,
-      hasFruit: bush.hasFruit,
-      destroyed: isDestroyed
-    };
-    if (isDestroyed) {
-      ctx.emitRosterEvent(hitPayload);
-    } else {
-      ctx.broadcastProximityEvent(bush.x, bush.y, hitPayload);
-    }
-    break;
   }
 
   // 4. Authoritative PvP Player Hit Detection

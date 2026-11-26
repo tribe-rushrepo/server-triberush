@@ -213,7 +213,20 @@ export class SeededWorld {
     rock: WorldRockNode,
     isBlockedByTerritory: (x: number, y: number) => boolean
   ): boolean {
-    const nextPos = this.findRandomResourceSpawn(rock.radius + 14, isBlockedByTerritory);
+    const isBlocked = (cx: number, cy: number): boolean => {
+      if (isBlockedByTerritory(cx, cy)) return true;
+      const trees = this.queryNearbyTrees(cx, cy);
+      for (let i = 0; i < trees.length; i++) {
+        const t = trees[i];
+        if (t.destroyedAt !== null) continue;
+        const minClear = t.canopyRadius + rock.radius * 0.4;
+        const dx = cx - t.x;
+        const dy = cy - t.y;
+        if (dx * dx + dy * dy < minClear * minClear) return true;
+      }
+      return false;
+    };
+    const nextPos = this.findRandomResourceSpawn(rock.radius + 14, isBlocked);
     if (!nextPos) return false;
     this.removeNodeBucket(this.rockBuckets, rock, rock.radius + 220);
     rock.x = nextPos.x;

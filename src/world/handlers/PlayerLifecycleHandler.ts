@@ -197,6 +197,8 @@ export function removePlayerCore(
   if (!existing) return;
 
   const now = Date.now();
+  existing.inventoryDirty = false;
+  existing.urgentInventorySaveAt = 0;
   const wasInCombat = !existing.isDead && now < existing.combatUntil;
   const prevTribeId = existing.tribeId;
   const wasTribeLeader = prevTribeId

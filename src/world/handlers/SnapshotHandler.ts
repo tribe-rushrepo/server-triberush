@@ -2,6 +2,7 @@ import { CONFIG } from '../../config/index.js';
 import { getItemNetId } from '../../data/items/index.js';
 import type {
   ActiveWorldPlayer,
+  AnimalKind,
   LeaderboardEntry,
   WatchtowerRadarBlip,
   WorldPlacedStructure
@@ -208,11 +209,13 @@ export function buildAllPlayersMeta(ctx: WorldRoomContext): Array<{
 
 export function collectSafePlayerInventorySnapshots(
   ctx: WorldRoomContext,
-  now: number
+  now: number,
+  includeCombatPlayers: boolean = false
 ): Array<{ ownerId: string; compact: CompactInventorySave | null }> {
   const snapshots: Array<{ ownerId: string; compact: CompactInventorySave | null }> = [];
   for (const p of ctx.playersById.values()) {
-    if (p.isDead || now < p.combatUntil) continue;
+    if (p.isDead) continue;
+    if (!includeCombatPlayers && now < p.combatUntil) continue;
     snapshots.push({
       ownerId: p.id,
       compact: encodeCompactInventory(p.inventory, p.unlockedSlots, p.hasBackpack)
@@ -221,8 +224,32 @@ export function collectSafePlayerInventorySnapshots(
   return snapshots;
 }
 
+const INVENTORY_CHECKPOINT_INTERVAL_MS = 45_000;
+
+export function checkpointDirtyPlayerInventories(
+  ctx: WorldRoomContext,
+  persistFn: ((ownerId: string, compact: CompactInventorySave | null) => void) | null,
+  now: number
+): void {
+  if (!persistFn) return;
+  for (const p of ctx.playersById.values()) {
+    if (p.isDead || now < p.combatUntil || !p.inventoryDirty) continue;
+    const urgentDue =
+      typeof p.urgentInventorySaveAt === 'number' &&
+      p.urgentInventorySaveAt > 0 &&
+      now >= p.urgentInventorySaveAt;
+    const periodicDue = now - (p.lastInventorySavedAt || p.joinedAt) >= INVENTORY_CHECKPOINT_INTERVAL_MS;
+    if (!urgentDue && !periodicDue) continue;
+    p.inventoryDirty = false;
+    p.urgentInventorySaveAt = 0;
+    p.lastInventorySavedAt = now;
+    persistFn(p.id, encodeCompactInventory(p.inventory, p.unlockedSlots, p.hasBackpack));
+  }
+}
+
 export function sendPlayerInventorySync(ctx: WorldRoomContext, player: ActiveWorldPlayer): void {
   const now = Date.now();
+  player.inventoryDirty = true;
   ctx.emitPlayerEvent(player.id, {
     type: 'INVENTORY_SYNC',
     inventory: player.inventory.slice(0, player.unlockedSlots),
@@ -254,7 +281,11 @@ export function sendPlayerVitalsSync(ctx: WorldRoomContext, player: ActiveWorldP
     hunger: Math.round(player.hunger),
     maxHunger: player.maxHunger,
     spawnProtectionRemainingMs: Math.max(0, player.spawnProtectedUntil - now),
-    combatRemainingMs: Math.max(0, player.combatUntil - now)
+    combatRemainingMs: Math.max(0, player.combatUntil - now),
+    selfX: Math.round(player.x * 10) / 10,
+    selfY: Math.round(player.y * 10) / 10,
+    selfShortId: player.shortId,
+    ackSeq: (player.lastProcessedInputSeq ?? 0) & 0xffff
   });
 }
 
@@ -419,13 +450,24 @@ export function broadcastWatchtowerRadars(ctx: WorldRoomContext): void {
   }
 }
 
+const ANIMAL_CODE_TO_KIND: readonly AnimalKind[] = ['pig', 'cow', 'chicken', 'duck', 'sheep'];
+
 export function encodePlayerBinarySnapshot(
   serverTick: number,
   viewer: ActiveWorldPlayer,
   nearby: ReadonlyArray<ActiveWorldPlayer>,
   now: number = Date.now()
 ): Buffer {
-  const count = Math.min(CONFIG.MAX_PLAYERS, nearby.length);
+  const scanLimit = Math.min(CONFIG.MAX_PLAYERS, nearby.length);
+  let hasViewer = false;
+  for (let i = 0; i < scanLimit; i++) {
+    if (nearby[i].shortId === viewer.shortId) {
+      hasViewer = true;
+      break;
+    }
+  }
+  const source: ReadonlyArray<ActiveWorldPlayer> = hasViewer ? nearby : [viewer, ...nearby];
+  const count = Math.min(CONFIG.MAX_PLAYERS, source.length);
   const buf = Buffer.allocUnsafe(SNAPSHOT_HEADER_BYTES + count * SNAPSHOT_PLAYER_STRIDE);
 
   buf.writeUInt8(BINARY_PACKET_SNAPSHOT, 0);
@@ -435,7 +477,7 @@ export function encodePlayerBinarySnapshot(
   buf.writeUInt16LE((viewer.lastProcessedInputSeq ?? 0) & 0xffff, 8);
 
   for (let i = 0; i < count; i++) {
-    const p = nearby[i];
+    const p = source[i];
     const offset = SNAPSHOT_HEADER_BYTES + i * SNAPSHOT_PLAYER_STRIDE;
 
     const angleQuantized = Math.max(
@@ -473,4 +515,63 @@ export function encodePlayerBinarySnapshot(
   }
 
   return buf;
+}
+
+export function decodeBinarySnapshotToJson(frame: Buffer): Record<string, unknown> | null {
+  if (frame.length < 4) return null;
+  const pType = frame.readUInt8(0);
+  if (pType === BINARY_PACKET_SNAPSHOT && frame.length >= SNAPSHOT_HEADER_BYTES) {
+    const count = frame.readUInt8(1);
+    const selfShortId = frame.readUInt16LE(2);
+    const serverTick = frame.readUInt32LE(4);
+    const ackSeq = frame.readUInt16LE(8);
+    const maxReadable = Math.min(
+      count,
+      Math.floor((frame.length - SNAPSHOT_HEADER_BYTES) / SNAPSHOT_PLAYER_STRIDE)
+    );
+    const players = [];
+    for (let i = 0; i < maxReadable; i++) {
+      const off = SNAPSHOT_HEADER_BYTES + i * SNAPSHOT_PLAYER_STRIDE;
+      const flags = frame.readUInt8(off + 16);
+      players.push({
+        shortId: frame.readUInt16LE(off),
+        x: Math.round(frame.readFloatLE(off + 2) * 10) / 10,
+        y: Math.round(frame.readFloatLE(off + 6) * 10) / 10,
+        angle: Math.round(((frame.readInt16LE(off + 10) / 32767) * Math.PI) * 1000) / 1000,
+        heldItemNetId: frame.readUInt16LE(off + 12),
+        activeSlot: frame.readUInt8(off + 14) & 7,
+        colorIndex: frame.readUInt8(off + 15) & 7,
+        isSwinging: (flags & 1) === 1,
+        swingHand: ((flags >> 1) & 1) as 0 | 1,
+        isSprinting: ((flags >> 2) & 1) === 1,
+        hasBackpack: ((flags >> 3) & 1) === 1,
+        isSpawnProtected: ((flags >> 4) & 1) === 1,
+        inCombat: ((flags >> 5) & 1) === 1,
+        hpPct: frame.readUInt8(off + 17)
+      });
+    }
+    return { type: 'JSON_PLAYER_SNAPSHOT', selfShortId, serverTick, ackSeq, players };
+  }
+  if (pType === 2) {
+    const count = frame.readUInt8(1);
+    const serverTick = frame.readUInt16LE(2);
+    const maxReadable = Math.min(count, Math.floor((frame.length - 4) / 16));
+    const animals = [];
+    for (let i = 0; i < maxReadable; i++) {
+      const off = 4 + i * 16;
+      const flags = frame.readUInt8(off + 14);
+      animals.push({
+        id: frame.readUInt16LE(off),
+        kind: ANIMAL_CODE_TO_KIND[frame.readUInt8(off + 2)] || 'pig',
+        x: Math.round(frame.readFloatLE(off + 3) * 10) / 10,
+        y: Math.round(frame.readFloatLE(off + 7) * 10) / 10,
+        angle: Math.round(((frame.readInt16LE(off + 11) / 32767) * Math.PI) * 1000) / 1000,
+        hpPct: frame.readUInt8(off + 13),
+        isFleeing: (flags & 1) === 1,
+        isMoving: ((flags >> 1) & 1) === 1
+      });
+    }
+    return { type: 'JSON_ANIMAL_SNAPSHOT', serverTick, animals };
+  }
+  return null;
 }
