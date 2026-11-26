@@ -108,11 +108,41 @@ describe('5. Phase 9: Exact-Count Drop Slider, Reconnect Session Resume, Batched
     assert.strictEqual(room.handleBlueprintPlaceBuild('bat-host', 'tribe_totem', 12800, 12800).ok, true);
     assert.strictEqual(room.handleBlueprintPlaceBuild('bat-host', 'wooden_wall', 12864, 12736, 'h').ok, true);
     assert.strictEqual(room.handleBlueprintPlaceBuild('bat-host', 'wooden_chest', 12896, 12896).ok, true);
-    assert.strictEqual(room.handleSaveBlueprintBuild('bat-host').ok, true);
+    assert.strictEqual(room.handleDisbandTribe('bat-host').ok, true);
+
+    room.removePlayer('bat-host', { explicitLeave: true });
+    const rejoinedHost = room.joinPlayer(makeExplorer('bat-host', 'BatchHost')).player!;
+    rejoinedHost.spawnProtectedUntil = 0;
+    rejoinedHost.x = 12800;
+    rejoinedHost.y = 12800;
+    assert.strictEqual(room.handleCreateTribe('bat-host', 'Batch Clan', 'BTCH').ok, true);
+    for (const t of room.world.trees) if (Math.abs(t.x - 12800) < 900 && Math.abs(t.y - 12800) < 900) t.destroyedAt = 1;
+    for (const rk of room.world.rocks) if (Math.abs(rk.x - 12800) < 900 && Math.abs(rk.y - 12800) < 900) rk.destroyedAt = 1;
+    for (const b of room.world.bushes) if (Math.abs(b.x - 12800) < 900 && Math.abs(b.y - 12800) < 900) b.destroyedAt = 1;
+    room.world.fallenLogs.splice(
+      0,
+      room.world.fallenLogs.length,
+      ...room.world.fallenLogs.filter((l) => Math.abs(l.x - 12800) >= 900 || Math.abs(l.y - 12800) >= 900)
+    );
+    room.world.lakes.splice(
+      0,
+      room.world.lakes.length,
+      ...room.world.lakes.filter((lk) => Math.hypot(lk.x - 12800, lk.y - 12800) >= 900 + lk.outerRadius)
+    );
+    room.world.ponds.splice(
+      0,
+      room.world.ponds.length,
+      ...room.world.ponds.filter((pd) => Math.hypot(pd.x - 12800, pd.y - 12800) >= 900 + pd.radius)
+    );
+    room.world.mudPatches.splice(
+      0,
+      room.world.mudPatches.length,
+      ...room.world.mudPatches.filter((md) => Math.hypot(md.x - 12800, md.y - 12800) >= 900 + md.radius)
+    );
 
     events.length = 0;
     const deployed = room.handleLoadBlueprintBuild('bat-host', 12800, 12800);
-    assert.strictEqual(deployed.ok, true);
+    assert.strictEqual(deployed.ok, true, deployed.error);
 
     const batched = events.filter((e) => e.type === 'BLUEPRINT_BASE_DEPLOYED');
     const individualWalls = events.filter((e) => e.type === 'WALL_PLACED');
@@ -120,18 +150,16 @@ describe('5. Phase 9: Exact-Count Drop Slider, Reconnect Session Resume, Batched
     assert.strictEqual(individualWalls.length, 0, 'Base deploy must not spam per-wall global broadcasts');
 
     // Verify dirty-tracked snapshot reports damaged trees without scanning intact world
-    const initialSnap = room.getDynamicWorldStateSnapshot();
-    assert.strictEqual(initialSnap.trees.length, 0);
-    const tree = room.world.trees[0];
-    host.x = tree.x - tree.trunkRadius - 30;
-    host.y = tree.y;
-    host.inventory[3] = { itemId: 'wooden_axe', count: 1 };
+    const intactTree = room.world.trees.find((t) => t.destroyedAt === null)!;
+    rejoinedHost.x = intactTree.x - intactTree.trunkRadius - 30;
+    rejoinedHost.y = intactTree.y;
+    rejoinedHost.inventory[3] = { itemId: 'wooden_axe', count: 1 };
     room.handleSelectSlot('bat-host', 3);
-    host.lastSwingAt = 0;
+    rejoinedHost.lastSwingAt = 0;
     room.handleSwing('bat-host', 0);
     const afterHitSnap = room.getDynamicWorldStateSnapshot();
     assert.ok(
-      afterHitSnap.trees.some((t) => t.id === tree.id && t.hp < tree.maxHp),
+      afterHitSnap.trees.some((t) => t.id === intactTree.id && t.hp < intactTree.maxHp),
       'Damaged tree must appear immediately in dirty-tracked world snapshot'
     );
   });

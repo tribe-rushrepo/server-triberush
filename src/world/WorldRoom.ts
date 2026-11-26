@@ -1,6 +1,6 @@
 import { CONFIG } from '../config/index.js';
 import type {
-  ActiveWorldPlayer, BlueprintTargetKind, DayCycleSnapshot, DayPhaseName, InventorySlotItem,
+  ActiveWorldPlayer, BlueprintTargetKind, BrokenTotemCollapseZone, DayCycleSnapshot, DayPhaseName, InventorySlotItem,
   ItemId, LeaderboardEntry, PlayerProfileData, RotationQuarter, TribeSummary, WallOrientation,
   WorldBushNode, WorldGroundDrop, WorldPlacedChest, WorldPlacedStructure, WorldPlacedTorch,
   WorldPlacedTotem, WorldPlacedWall, WorldRockNode, WorldTreeNode
@@ -40,6 +40,11 @@ import {
   registerStructureCollidersCore, removeStructureEntityCore, removeTotemFromWorldCore,
   stripSpareTribeTotemItemsCore, sweepExpiredOfflineBasesCore
 } from './handlers/TotemHutHandler.js';
+import {
+  getBlueprintSummaryForPlayerCore,
+  stepDormantTotemsAndCollapseZonesCore,
+  syncStandingBaseAutosaveCore
+} from './handlers/TotemLifecycleHandler.js';
 import {
   handleChatMessageCore, handleCreateTribeCore, handleDisbandTribeCore, handleJoinTribeCore,
   handleKickTribeMemberCore, handleLeaveTribeCore, handleRespondTribeRequestCore,
@@ -81,6 +86,7 @@ export class WorldRoom {
   public readonly placedWalls: Map<number, WorldPlacedWall> = new Map();
   public readonly placedTotems: Map<number, WorldPlacedTotem> = new Map();
   public readonly placedStructures: Map<number, WorldPlacedStructure> = new Map();
+  public readonly brokenTotemZones: Map<string, BrokenTotemCollapseZone> = new Map();
 
   private readonly pendingTreeRespawns: Set<WorldTreeNode> = new Set();
   private readonly pendingRockRespawns: Set<WorldRockNode> = new Set();
@@ -149,6 +155,7 @@ export class WorldRoom {
       placedWalls: this.placedWalls,
       placedTotems: this.placedTotems,
       placedStructures: this.placedStructures,
+      brokenTotemZones: this.brokenTotemZones,
       pendingTreeRespawns: this.pendingTreeRespawns,
       pendingRockRespawns: this.pendingRockRespawns,
       pendingBushRespawns: this.pendingBushRespawns,
@@ -218,7 +225,9 @@ export class WorldRoom {
           }, 100);
           this.tribeSyncTimer.unref?.();
         }
-      }
+      },
+      syncStandingBaseAutosave: (ownerId, now) => syncStandingBaseAutosaveCore(this.ctx, ownerId, now),
+      getBlueprintSummaryForPlayer: (p, now) => getBlueprintSummaryForPlayerCore(this.ctx, p, now)
     };
 
     this.lifecycleHooks = {
@@ -358,6 +367,7 @@ export class WorldRoom {
     this.placedWalls.clear();
     this.placedTotems.clear();
     this.placedStructures.clear();
+    this.brokenTotemZones.clear();
     this.pendingTreeRespawns.clear();
     this.pendingRockRespawns.clear();
     this.pendingBushRespawns.clear();
@@ -372,6 +382,9 @@ export class WorldRoom {
 
   public getLeaderboardEntries(): LeaderboardEntry[] { return buildLeaderboardEntries(this.ctx); }
   public getDynamicWorldStateSnapshot() { return buildDynamicWorldStateSnapshot(this.ctx); }
+  public getBlueprintSummaryForPlayer(player: ActiveWorldPlayer, now = Date.now()) {
+    return getBlueprintSummaryForPlayerCore(this.ctx, player, now);
+  }
   public getAllPlayersMeta() { return buildAllPlayersMeta(this.ctx); }
   public getAllSafePlayerInventorySnapshots(now: number = Date.now(), includeCombatPlayers: boolean = false) {
     return collectSafePlayerInventorySnapshots(this.ctx, now, includeCombatPlayers);
@@ -491,7 +504,9 @@ export class WorldRoom {
   public handleChatMessage(playerId: string, rawText: string) { return handleChatMessageCore(this.ctx, playerId, rawText); }
 
   public sweepOfflineBases(now: number = Date.now()): boolean {
-    return sweepExpiredOfflineBasesCore(this.ctx, this.offlineSoloOwners, CONFIG.OFFLINE_BASE_GRACE_MS, now);
+    const a = sweepExpiredOfflineBasesCore(this.ctx, this.offlineSoloOwners, CONFIG.OFFLINE_BASE_GRACE_MS, now);
+    const b = stepDormantTotemsAndCollapseZonesCore(this.ctx, now);
+    return a || b;
   }
 
   public stepSimulation(fixedDtSeconds?: number): void {
@@ -505,13 +520,30 @@ export class WorldRoom {
     if (this.serverTick % 100 === 0) this.sweepOfflineBases(now);
 
     if (this.playersById.size === 0) {
+      let hasActiveDormantOrCollapse = false;
+      for (const t of this.placedTotems.values()) {
+        if (!t.tribeId && t.dormantExpiresAt && now < t.dormantExpiresAt) {
+          hasActiveDormantOrCollapse = true;
+          break;
+        }
+      }
+      if (!hasActiveDormantOrCollapse) {
+        for (const z of this.brokenTotemZones.values()) {
+          if (now < z.expiresAt) {
+            hasActiveDormantOrCollapse = true;
+            break;
+          }
+        }
+      }
       if (
         this.emptySince !== null &&
         now - this.emptySince >= CONFIG.EMPTY_RESET_GRACE_MS &&
+        !hasActiveDormantOrCollapse &&
         !this.tribeManager.hasGraceProtectedOfflineTribes(now, CONFIG.OFFLINE_BASE_GRACE_MS) &&
         this.offlineSoloOwners.size === 0 &&
         (this.dayNumber > 1 || this.tickAccumulator > 0 || this.placedTotems.size > 0 ||
-          this.placedWalls.size > 0 || this.placedStructures.size > 0 || this.placedChests.size > 0 ||
+          this.brokenTotemZones.size > 0 || this.placedWalls.size > 0 ||
+          this.placedStructures.size > 0 || this.placedChests.size > 0 ||
           this.placedTorches.size > 0 || this.groundDrops.size > 0 || this.tribeManager.getTribeCount() > 0)
       ) {
         this.resetWorldToDayOne();

@@ -248,12 +248,14 @@ export type TotemHuntCounts = Partial<Record<AnimalKind, number>>;
 
 export interface WorldPlacedTotem {
   id: number;
-  tribeId: string;
+  tribeId: string | null;
   tribeTag: string;
   tribeName: string;
   ownerId: string;
   x: number;
   y: number;
+  claimX?: number;
+  claimY?: number;
   radius: number;
   level: number;
   sizeTiles: number;
@@ -262,6 +264,19 @@ export interface WorldPlacedTotem {
   huntCounts: Record<AnimalKind, number>;
   createdAt: number;
   lastDamagedAt: number;
+  dormantOwnerId?: string | null;
+  dormantExpiresAt?: number | null;
+}
+
+export interface BrokenTotemCollapseZone {
+  id: number;
+  tribeId: string;
+  tribeTag: string;
+  ownerId: string;
+  x: number;
+  y: number;
+  sizeTiles: number;
+  expiresAt: number;
 }
 
 export interface LeaderboardEntry {
@@ -310,6 +325,8 @@ export interface SavedBaseBlueprintSlot {
   ownerId: string;
   totemLevel: number;
   sizeTiles: number;
+  totemDx?: number;
+  totemDy?: number;
   huntCounts: Record<AnimalKind, number>;
   walls: SavedBlueprintWallItem[];
   structures: SavedBlueprintStructureItem[];
@@ -406,6 +423,7 @@ export interface ActiveWorldPlayer {
   pvpKills: number;
   structuresBuilt: number;
   lastBlueprintDeployAt: number;
+  hasLoadedBaseThisSession?: boolean;
   isDead: boolean;
   diedAt: number;
   killedByText: string | null;

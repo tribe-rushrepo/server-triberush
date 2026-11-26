@@ -12,6 +12,7 @@ import type {
   WorldPlacedWall
 } from '../../models/types.js';
 import { snapGridLine, snapTileCenter, type WorldRoomContext } from './roomContext.js';
+import { findActiveCollapseZoneForPlayer } from './TotemLifecycleHandler.js';
 
 export type PlaceBuildableResult = {
   ok: boolean;
@@ -130,8 +131,19 @@ export function placeBuildableEntityCore(
     if (myTribe.leaderId !== player.id) {
       return { ok: false, error: 'Only the Tribe Host can place the Tribe Totem.' };
     }
-    if (ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values())) {
+    if (
+      ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values()) ||
+      ctx.totemService.findTotemForOwner(player.id, ctx.placedTotems.values())
+    ) {
       return { ok: false, error: 'Your Tribe already has an active Tribe Totem.' };
+    }
+
+    const collapseZone = findActiveCollapseZoneForPlayer(ctx, player, now);
+    if (!collapseZone && ctx.blueprintService.getSlot(player.id)) {
+      return {
+        ok: false,
+        error: 'You already have a saved Tribe Totem. Load your saved base instead.'
+      };
     }
 
     const placeX = snapGridLine(rawX);
@@ -145,16 +157,32 @@ export function placeBuildableEntityCore(
     const totemLevel = relocatedState ? relocatedState.level : 1;
     const sizeTiles = ctx.totemService.getSizeTilesForLevel(totemLevel);
     const halfPx = (sizeTiles * CONFIG.BUILD_GRID_SIZE) / 2;
+    const claimX = collapseZone ? collapseZone.x : placeX;
+    const claimY = collapseZone ? collapseZone.y : placeY;
+
+    if (collapseZone) {
+      const zHalf = (collapseZone.sizeTiles * CONFIG.BUILD_GRID_SIZE) / 2;
+      if (
+        Math.abs(placeX - collapseZone.x) > zHalf - 16 ||
+        Math.abs(placeY - collapseZone.y) > zHalf - 16
+      ) {
+        restoreRelocatedIfFailed();
+        return {
+          ok: false,
+          error: `Place your replacement Totem inside your original ${collapseZone.sizeTiles}x${collapseZone.sizeTiles} territory before the 3:00 timer expires!`
+        };
+      }
+    }
 
     if (Math.hypot(placeX - player.x, placeY - player.y) > placeCfg.maxDistance + 48) {
       restoreRelocatedIfFailed();
       return { ok: false, error: 'Place Tribe Totem closer to your marble.' };
     }
     if (
-      placeX - halfPx < 128 ||
-      placeX + halfPx > ctx.world.size - 128 ||
-      placeY - halfPx < 128 ||
-      placeY + halfPx > ctx.world.size - 128
+      claimX - halfPx < 128 ||
+      claimX + halfPx > ctx.world.size - 128 ||
+      claimY - halfPx < 128 ||
+      claimY + halfPx > ctx.world.size - 128
     ) {
       restoreRelocatedIfFailed();
       return {
@@ -172,10 +200,11 @@ export function placeBuildableEntityCore(
     }
     if (
       ctx.totemService.doesClaimOverlapOtherTotem(
-        placeX,
-        placeY,
+        claimX,
+        claimY,
         sizeTiles,
-        ctx.placedTotems.values()
+        ctx.placedTotems.values(),
+        myTribe.id
       )
     ) {
       restoreRelocatedIfFailed();
@@ -192,6 +221,8 @@ export function placeBuildableEntityCore(
       ownerId: player.id,
       x: placeX,
       y: placeY,
+      claimX,
+      claimY,
       radius: CONFIG.TOTEM_RADIUS,
       level: totemLevel,
       sizeTiles,
@@ -214,7 +245,17 @@ export function placeBuildableEntityCore(
     player.structuresBuilt += 1;
     player.score += 50;
 
-    ctx.syncPlayerInventory(player);
+    if (collapseZone) {
+      for (const [k, z] of Array.from(ctx.brokenTotemZones.entries())) {
+        if (z.id === collapseZone.id) ctx.brokenTotemZones.delete(k);
+      }
+      ctx.emitRosterEvent({
+        type: 'TOTEM_COLLAPSE_SYNC',
+        zones: Array.from(ctx.brokenTotemZones.values())
+      });
+    }
+
+    ctx.syncStandingBaseAutosave(player.id, now);
     ctx.emitRosterEvent({
       type: 'TOTEM_PLACED',
       totem: ctx.totemService.serializeTotem(totem)
@@ -295,7 +336,8 @@ export function placeBuildableEntityCore(
     player.structuresBuilt += 1;
     player.score += 15;
 
-    ctx.syncPlayerInventory(player);
+    ctx.syncStandingBaseAutosave(tribeTotem.ownerId, now);
+    if (tribeTotem.ownerId !== player.id) ctx.syncPlayerInventory(player);
     ctx.emitRosterEvent({
       type: 'CHEST_PLACED',
       chest: {
@@ -350,7 +392,8 @@ export function placeBuildableEntityCore(
     player.structuresBuilt += 1;
     player.score += 10;
 
-    ctx.syncPlayerInventory(player);
+    ctx.syncStandingBaseAutosave(tribeTotem.ownerId, now);
+    if (tribeTotem.ownerId !== player.id) ctx.syncPlayerInventory(player);
     ctx.emitRosterEvent({ type: 'TORCH_PLACED', torch });
     return { ok: true, action: 'torch_placed', torch };
   }
@@ -438,7 +481,8 @@ export function placeBuildableEntityCore(
     player.structuresBuilt += 1;
     player.score += 15;
 
-    ctx.syncPlayerInventory(player);
+    ctx.syncStandingBaseAutosave(tribeTotem.ownerId, now);
+    if (tribeTotem.ownerId !== player.id) ctx.syncPlayerInventory(player);
     ctx.emitRosterEvent({ type: 'WALL_PLACED', wall });
     return { ok: true, action: 'wall_placed', wall };
   }
@@ -543,7 +587,8 @@ export function placeBuildableEntityCore(
     player.structuresBuilt += 1;
     player.score += sKind === 'hut' ? 60 : sKind === 'watchtower' ? 45 : 30;
 
-    ctx.syncPlayerInventory(player);
+    ctx.syncStandingBaseAutosave(tribeTotem.ownerId, now);
+    if (tribeTotem.ownerId !== player.id) ctx.syncPlayerInventory(player);
     ctx.emitRosterEvent({ type: 'STRUCTURE_PLACED', structure });
     return { ok: true, action: 'structure_placed', structure };
   }

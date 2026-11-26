@@ -39,18 +39,22 @@ export class TotemService {
     return null;
   }
 
-  public getTotemBounds(totem: Pick<WorldPlacedTotem, 'x' | 'y' | 'sizeTiles'>): TotemBounds {
+  public getTotemBounds(
+    totem: Pick<WorldPlacedTotem, 'x' | 'y' | 'claimX' | 'claimY' | 'sizeTiles'>
+  ): TotemBounds {
+    const cx = typeof totem.claimX === 'number' ? totem.claimX : totem.x;
+    const cy = typeof totem.claimY === 'number' ? totem.claimY : totem.y;
     const halfPx = (totem.sizeTiles * CONFIG.BUILD_GRID_SIZE) / 2;
     return {
-      minX: totem.x - halfPx,
-      maxX: totem.x + halfPx,
-      minY: totem.y - halfPx,
-      maxY: totem.y + halfPx
+      minX: cx - halfPx,
+      maxX: cx + halfPx,
+      minY: cy - halfPx,
+      maxY: cy + halfPx
     };
   }
 
   public isPointInsideTotem(
-    totem: Pick<WorldPlacedTotem, 'x' | 'y' | 'sizeTiles'>,
+    totem: Pick<WorldPlacedTotem, 'x' | 'y' | 'claimX' | 'claimY' | 'sizeTiles'>,
     x: number,
     y: number,
     inset = 0
@@ -65,7 +69,7 @@ export class TotemService {
   }
 
   public isRectInsideTotem(
-    totem: Pick<WorldPlacedTotem, 'x' | 'y' | 'sizeTiles'>,
+    totem: Pick<WorldPlacedTotem, 'x' | 'y' | 'claimX' | 'claimY' | 'sizeTiles'>,
     cx: number,
     cy: number,
     halfW: number,
@@ -150,6 +154,17 @@ export class TotemService {
     totem.huntCounts = this.createEmptyHuntCounts();
   }
 
+  public findTotemForOwner(
+    ownerId: string | null | undefined,
+    totems: Iterable<WorldPlacedTotem>
+  ): WorldPlacedTotem | null {
+    if (!ownerId) return null;
+    for (const t of totems) {
+      if (t.ownerId === ownerId || t.dormantOwnerId === ownerId) return t;
+    }
+    return null;
+  }
+
   public serializeTotem(totem: WorldPlacedTotem) {
     return {
       id: totem.id,
@@ -159,6 +174,8 @@ export class TotemService {
       ownerId: totem.ownerId,
       x: totem.x,
       y: totem.y,
+      claimX: typeof totem.claimX === 'number' ? totem.claimX : totem.x,
+      claimY: typeof totem.claimY === 'number' ? totem.claimY : totem.y,
       radius: totem.radius,
       level: 1,
       sizeTiles: CONFIG.TOTEM_SIZE_TILES,
@@ -166,7 +183,9 @@ export class TotemService {
       maxHp: totem.maxHp,
       huntCounts: { ...totem.huntCounts },
       nextRequirements: null,
-      nextSizeTiles: null
+      nextSizeTiles: null,
+      dormantOwnerId: totem.dormantOwnerId ?? null,
+      dormantExpiresAt: totem.dormantExpiresAt ?? null
     };
   }
 }

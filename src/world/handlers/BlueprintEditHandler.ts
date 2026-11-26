@@ -46,6 +46,16 @@ export function handleBlueprintPlaceBuildCore(
   const storedCount = ctx.blueprintService.getStoredBuildCount(player.id, itemDef.id);
   const useStored = storedCount > 0;
 
+  if (itemDef.id === 'tribe_totem' && !useStored) {
+    const bpSummary = ctx.getBlueprintSummaryForPlayer(player);
+    if (!bpSummary.totemAvailableToCraft) {
+      return {
+        ok: false,
+        error: 'You already have a Tribe Totem placed or saved. Load your saved base instead.'
+      };
+    }
+  }
+
   if (!useStored) {
     const recipe = itemDef.recipe;
     if (!recipe) return { ok: false, error: 'This structure has no build recipe.' };
@@ -207,23 +217,18 @@ export function handleBlueprintRemoveEntityCore(
     entityY = torch.y;
     label = 'Torch';
   } else if (targetKind === 'totem') {
-    const totem = ctx.placedTotems.get(targetId);
-    if (!totem) return { ok: false, error: 'Tribe Totem not found.' };
-    if (!ctx.canTribeManageEntity(player, totem.ownerId, totem.tribeId, true)) {
-      return { ok: false, error: 'Only the Tribe Host can remove the Tribe Totem.' };
-    }
-    ctx.placedTotems.delete(totem.id);
-    ctx.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
-    ctx.emitRosterEvent({ type: 'TOTEM_REMOVED', id: totem.id });
-    mappedItemId = 'tribe_totem';
-    entityX = totem.x;
-    entityY = totem.y;
-    label = 'Tribe Totem';
+    return {
+      ok: false,
+      error: 'Tribe Totem cannot be removed once placed. Disband the Tribe to pack all builds.'
+    };
   }
 
   if (!mappedItemId) return { ok: false, error: 'Unsupported build type.' };
 
+  const activeTotem = ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values());
+  const hostOwnerId = activeTotem?.ownerId || player.id;
   const nextCount = ctx.blueprintService.addStoredBuild(player.id, mappedItemId, 1);
+  ctx.syncStandingBaseAutosave(hostOwnerId);
   ctx.syncPlayerInventory(player);
   ctx.emitPlayerEvent(player.id, {
     type: 'ACTION_NOTICE',
@@ -260,6 +265,8 @@ export function handleBlueprintRotateEntityCore(
     }
     s.rotationQuarter = ((s.rotationQuarter + 1) & 3) as RotationQuarter;
     ctx.emitRosterEvent({ type: 'STRUCTURE_PLACED', structure: s });
+    const sTotem = ctx.totemService.findTotemForTribe(s.tribeId ?? player.tribeId, ctx.placedTotems.values());
+    ctx.syncStandingBaseAutosave(sTotem?.ownerId || s.ownerId);
     return { ok: true };
   }
 
@@ -304,6 +311,7 @@ export function handleBlueprintRotateEntityCore(
     halfH: newHalfH
   });
   ctx.emitRosterEvent({ type: 'WALL_PLACED', wall });
+  ctx.syncStandingBaseAutosave(tribeTotem?.ownerId || wall.ownerId);
   return { ok: true };
 }
 
@@ -327,60 +335,10 @@ export function handleBlueprintMoveEntityCore(
   }
 
   if (targetKind === 'totem') {
-    const totem = ctx.placedTotems.get(targetId);
-    if (!totem) return { ok: false, error: 'Tribe Totem not found.' };
-    if (!ctx.canTribeManageEntity(player, totem.ownerId, totem.tribeId, true)) {
-      return { ok: false, error: 'Only the Tribe Host can move the Tribe Totem.' };
-    }
-    const placeX = snapGridLine(targetX);
-    const placeY = snapGridLine(targetY);
-    const halfPx = (totem.sizeTiles * CONFIG.BUILD_GRID_SIZE) / 2;
-    if (Math.hypot(placeX - player.x, placeY - player.y) > 220) {
-      return { ok: false, error: 'Move closer to place the Tribe Totem.' };
-    }
-    if (
-      placeX - halfPx < 128 ||
-      placeX + halfPx > ctx.world.size - 128 ||
-      placeY - halfPx < 128 ||
-      placeY + halfPx > ctx.world.size - 128
-    ) {
-      return { ok: false, error: 'Too close to world border.' };
-    }
-    ctx.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
-    const blocked =
-      ctx.world.overlapsWaterOrMud(placeX, placeY, CONFIG.TOTEM_RADIUS + 14) ||
-      ctx.world.overlapsAnySolid(placeX, placeY, CONFIG.TOTEM_RADIUS + 10) ||
-      ctx.totemService.doesClaimOverlapOtherTotem(
-        placeX,
-        placeY,
-        totem.sizeTiles,
-        ctx.placedTotems.values(),
-        totem.tribeId
-      );
-    if (blocked) {
-      ctx.world.addSolidCollider({
-        kind: 'totem',
-        id: totem.id,
-        x: totem.x,
-        y: totem.y,
-        radius: totem.radius
-      });
-      return { ok: false, error: 'Target position is blocked or overlaps another Tribe.' };
-    }
-    totem.x = placeX;
-    totem.y = placeY;
-    ctx.world.addSolidCollider({
-      kind: 'totem',
-      id: totem.id,
-      x: totem.x,
-      y: totem.y,
-      radius: totem.radius
-    });
-    ctx.emitRosterEvent({
-      type: 'TOTEM_PLACED',
-      totem: ctx.totemService.serializeTotem(totem)
-    });
-    return { ok: true };
+    return {
+      ok: false,
+      error: 'Tribe Totem cannot be moved once placed. Disband the Tribe to pack all builds.'
+    };
   }
 
   const tribeTotem = ctx.totemService.findTotemForTribe(
@@ -460,6 +418,7 @@ export function handleBlueprintMoveEntityCore(
       halfH: newHalfH
     });
     ctx.emitRosterEvent({ type: 'WALL_PLACED', wall });
+    ctx.syncStandingBaseAutosave(tribeTotem.ownerId);
     return { ok: true };
   }
 
@@ -517,6 +476,7 @@ export function handleBlueprintMoveEntityCore(
     }
     ctx.registerStructureColliders(s);
     ctx.emitRosterEvent({ type: 'STRUCTURE_PLACED', structure: s });
+    ctx.syncStandingBaseAutosave(tribeTotem.ownerId);
     return { ok: true };
   }
 
@@ -571,6 +531,7 @@ export function handleBlueprintMoveEntityCore(
         ownerTribeId: chest.ownerTribeId
       }
     });
+    ctx.syncStandingBaseAutosave(tribeTotem.ownerId);
     return { ok: true };
   }
 
@@ -594,6 +555,7 @@ export function handleBlueprintMoveEntityCore(
     torch.x = placeX;
     torch.y = placeY;
     ctx.emitRosterEvent({ type: 'TORCH_PLACED', torch });
+    ctx.syncStandingBaseAutosave(tribeTotem.ownerId);
     return { ok: true };
   }
 

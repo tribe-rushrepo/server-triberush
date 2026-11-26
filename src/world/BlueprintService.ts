@@ -27,6 +27,8 @@ export interface BlueprintSlotSummary {
   savedAt: number;
   deployCooldownRemainingMs: number;
   storedBuilds: BlueprintStoredBuilds;
+  canLoadBaseNow: boolean;
+  totemAvailableToCraft: boolean;
 }
 
 interface PersistedBlueprintPayload {
@@ -300,10 +302,41 @@ export class BlueprintService {
     this.persistToDisk();
   }
 
-  public getSummary(player: ActiveWorldPlayer, now = Date.now()): BlueprintSlotSummary {
+  public clearSlot(ownerId: string): void {
+    if (this.slotsByOwnerId.delete(ownerId)) {
+      this.persistToDisk();
+      this.onPersistOwnerState?.(
+        ownerId,
+        null,
+        this.getLastDeployTimestamp(ownerId),
+        this.getStoredBuilds(ownerId)
+      );
+    }
+  }
+
+  public getSummary(
+    player: ActiveWorldPlayer,
+    now = Date.now(),
+    opts?: {
+      hasStandingOrDormantTotem?: boolean;
+      hasTotemItemInInv?: boolean;
+      hasActiveCollapseZone?: boolean;
+    }
+  ): BlueprintSlotSummary {
     const slot = this.slotsByOwnerId.get(player.id);
     const cooldownRem = this.getDeployCooldownRemainingMs(player.id, now);
     const storedBuilds = this.getStoredBuilds(player.id);
+    const hasStanding = Boolean(opts?.hasStandingOrDormantTotem);
+    const hasInvTotem = Boolean(opts?.hasTotemItemInInv);
+    const hasCollapse = Boolean(opts?.hasActiveCollapseZone);
+
+    const totemAvailableToCraft = hasCollapse
+      ? !hasStanding && !hasInvTotem && !(storedBuilds.tribe_totem > 0)
+      : !slot && !hasStanding && !hasInvTotem && !(storedBuilds.tribe_totem > 0);
+
+    const canLoadBaseNow = Boolean(
+      slot && !hasStanding && !player.hasLoadedBaseThisSession && !hasCollapse
+    );
 
     if (!slot) {
       return {
@@ -318,7 +351,9 @@ export class BlueprintService {
         torchCount: 0,
         savedAt: 0,
         deployCooldownRemainingMs: cooldownRem,
-        storedBuilds
+        storedBuilds,
+        canLoadBaseNow: false,
+        totemAvailableToCraft
       };
     }
 
@@ -343,7 +378,9 @@ export class BlueprintService {
       torchCount: slot.torches.length,
       savedAt: slot.savedAt,
       deployCooldownRemainingMs: cooldownRem,
-      storedBuilds
+      storedBuilds,
+      canLoadBaseNow,
+      totemAvailableToCraft
     };
   }
 
@@ -473,20 +510,24 @@ export class BlueprintService {
     now: number;
   }): SavedBaseBlueprintSlot {
     const { ownerId, totem, walls, structures, chests, torches, now } = params;
+    const anchorX = typeof totem.claimX === 'number' ? totem.claimX : totem.x;
+    const anchorY = typeof totem.claimY === 'number' ? totem.claimY : totem.y;
     const slot: SavedBaseBlueprintSlot = {
       ownerId,
       totemLevel: 1,
       sizeTiles: CONFIG.TOTEM_SIZE_TILES,
+      totemDx: totem.x - anchorX,
+      totemDy: totem.y - anchorY,
       huntCounts: { ...totem.huntCounts },
       walls: walls.map((w) => ({
-        dx: w.x - totem.x,
-        dy: w.y - totem.y,
+        dx: w.x - anchorX,
+        dy: w.y - anchorY,
         orientation: w.orientation
       })),
       structures: structures.map((s) => ({
         kind: s.kind,
-        dx: s.x - totem.x,
-        dy: s.y - totem.y,
+        dx: s.x - anchorX,
+        dy: s.y - anchorY,
         rotationQuarter: s.rotationQuarter
       })),
       chests: chests.map((c) => {
@@ -498,12 +539,12 @@ export class BlueprintService {
           }
         }
         return sparseItems.length > 0
-          ? { dx: c.x - totem.x, dy: c.y - totem.y, items: sparseItems }
-          : { dx: c.x - totem.x, dy: c.y - totem.y };
+          ? { dx: c.x - anchorX, dy: c.y - anchorY, items: sparseItems }
+          : { dx: c.x - anchorX, dy: c.y - anchorY };
       }),
       torches: torches.map((t) => ({
-        dx: t.x - totem.x,
-        dy: t.y - totem.y
+        dx: t.x - anchorX,
+        dy: t.y - anchorY
       })),
       savedAt: now
     };

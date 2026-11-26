@@ -218,77 +218,113 @@ describe('Phase 12: Full Supabase World, Standing Base, Chest, Tribe & Position 
     assert.ok(nextWall.wall!.id > wallRes.wall!.id);
   });
 
-  it('should keep unpacked base alive during 3-min offline grace, then purge when grace expires or all members explicitly leave', () => {
+  it('should disband Tribe when Host leaves without clicking Disband, lock Chests from tribeless players, keep Totem unbreakable for 15 minutes, sync raider destruction, and enforce 3-minute broken-totem collapse', () => {
     const room = new WorldRoom(20261126);
     const spot = findClearTotemSpot(room);
-    const p1 = room.joinPlayer(makeProfile('grace-1', 'GraceLeader')).player!;
-    const p2 = room.joinPlayer(makeProfile('grace-2', 'GraceMember')).player!;
+    const host = room.joinPlayer(makeProfile('grace-1', 'GraceLeader')).player!;
+    const member = room.joinPlayer(makeProfile('grace-2', 'GraceMember')).player!;
+    const raider = room.joinPlayer(makeProfile('raider-1', 'Raider')).player!;
+    host.spawnProtectedUntil = 0;
+    member.spawnProtectedUntil = 0;
+    raider.spawnProtectedUntil = 0;
 
-    room.handleCreateTribe(p1.id, 'Grace Clan', 'GRC', 'public');
-    room.handleJoinTribe(p2.id, 'tribe-1');
+    room.handleCreateTribe(host.id, 'Grace Clan', 'GRC', 'public');
+    room.handleJoinTribe(member.id, 'tribe-1');
 
-    p1.x = spot.x - 64;
-    p1.y = spot.y;
-    p1.inventory[0] = { itemId: 'tribe_totem', count: 1 };
-    p1.inventory[1] = { itemId: 'wooden_wall', count: 1 };
-    p1.inventory[2] = { itemId: 'wooden_chest', count: 1 };
+    host.x = spot.x - 64;
+    host.y = spot.y;
+    host.inventory[0] = { itemId: 'tribe_totem', count: 1 };
+    host.inventory[1] = { itemId: 'wooden_wall', count: 1 };
+    host.inventory[2] = { itemId: 'wooden_chest', count: 1 };
 
-    p1.activeSlot = 0;
-    assert.strictEqual(room.handleUseOrPlaceItem(p1.id, spot.x, spot.y).ok, true);
-    p1.activeSlot = 1;
-    assert.strictEqual(room.handleUseOrPlaceItem(p1.id, spot.x, spot.y - 128, 'h').ok, true);
-    p1.activeSlot = 2;
-    assert.strictEqual(room.handleUseOrPlaceItem(p1.id, spot.x - 96, spot.y - 32).ok, true);
+    host.activeSlot = 0;
+    const totemRes = room.handleUseOrPlaceItem(host.id, spot.x, spot.y);
+    assert.strictEqual(totemRes.ok, true);
+    host.activeSlot = 1;
+    const wallRes = room.handleUseOrPlaceItem(host.id, spot.x, spot.y - 128, 'h');
+    assert.strictEqual(wallRes.ok, true);
+    host.activeSlot = 2;
+    const chestRes = room.handleUseOrPlaceItem(host.id, spot.x - 96, spot.y - 32);
+    assert.strictEqual(chestRes.ok, true);
+    chestRes.chest!.slots[0] = { itemId: 'coal', count: 12 };
 
-    // 1. Both disconnect WITHOUT explicitLeave (e.g. Wi-Fi drop / browser refresh)
-    const t0 = Date.now();
-    room.removePlayer(p1.id);
-    room.removePlayer(p2.id);
+    // Active Tribe member CAN open the Chest while Tribe exists
+    member.x = chestRes.chest!.x;
+    member.y = chestRes.chest!.y + 24;
+    assert.strictEqual(room.handleOpenChest(member.id, chestRes.chest!.id).ok, true);
 
-    // At +60s (< 3 minutes), Tribe and all standing builds remain intact
-    room.sweepOfflineBases(t0 + 60_000);
-    assert.strictEqual(room.tribeManager.getTribeCount(), 1);
-    assert.strictEqual(room.placedTotems.size, 1);
-    assert.strictEqual(room.placedWalls.size, 1);
-    assert.strictEqual(room.placedChests.size, 1);
-
-    // If p1 reconnects at +90s and then explicitly leaves via LEAVE_WORLD (`explicitLeave: true`),
-    // p2 is still a grace-protected offline member, so p2 inherits leadership and base stays until p2's grace expires
-    const rejoinedP1 = room.joinPlayer(makeProfile(p1.id, p1.username)).player!;
-    assert.strictEqual(rejoinedP1.tribeId, 'tribe-1');
-    room.removePlayer(p1.id, { explicitLeave: true });
-    assert.strictEqual(room.placedTotems.size, 1);
-
-    // Once p2 also reconnects and explicitly clicks Leave (`explicitLeave: true`), 0 members remain -> immediate base cleanup!
-    const rejoinedP2 = room.joinPlayer(makeProfile(p2.id, p2.username)).player!;
-    assert.strictEqual(rejoinedP2.tribeId, 'tribe-1');
-    room.removePlayer(p2.id, { explicitLeave: true });
+    // 1. Host leaves game WITHOUT clicking Disband -> Tribe immediately disbands, members become tribeless!
+    const leaveTs = Date.now();
+    room.removePlayer(host.id, { explicitLeave: true });
     assert.strictEqual(room.tribeManager.getTribeCount(), 0);
-    assert.strictEqual(room.placedTotems.size, 0);
+    assert.strictEqual(member.tribeId, null, 'Members must immediately become tribeless when Host leaves');
+
+    // Tribeless players are NEVER allowed to open Chests!
+    const tribelessOpen = room.handleOpenChest(member.id, chestRes.chest!.id);
+    assert.strictEqual(tribelessOpen.ok, false);
+    assert.match(tribelessOpen.error || '', /Tribeless players cannot open Chests/i);
+
+    // Totem remains on map for 15 minutes and is 100% UNBREAKABLE while Host is offline!
+    const dormantTotem = room.placedTotems.get(totemRes.totem!.id)!;
+    assert.strictEqual(dormantTotem.tribeId, null);
+    assert.strictEqual(dormantTotem.dormantOwnerId, host.id);
+    assert.ok(dormantTotem.dormantExpiresAt && dormantTotem.dormantExpiresAt >= leaveTs + CONFIG.DORMANT_TOTEM_DURATION_MS - 1000);
+
+    const totemHpBefore = dormantTotem.hp;
+    raider.x = dormantTotem.x - 36;
+    raider.y = dormantTotem.y;
+    raider.inventory[0] = { itemId: 'wooden_sword', count: 1 };
+    raider.activeSlot = 0;
+    raider.lastSwingAt = 0;
+    room.handleSwing(raider.id, 0);
+    assert.strictEqual(dormantTotem.hp, totemHpBefore, 'Dormant 15-minute Totem must be 100% unbreakable');
+
+    // Raider destroying a Wall during the 15-minute window MUST remove that Wall from Host's autosaved slot!
+    const targetWall = room.placedWalls.get(wallRes.wall!.id)!;
+    targetWall.hp = 5;
+    raider.x = targetWall.x;
+    raider.y = targetWall.y + 36;
+    raider.lastSwingAt = 0;
+    room.handleSwing(raider.id, -Math.PI / 2);
+    assert.strictEqual(room.placedWalls.size, 0);
+    assert.strictEqual(
+      room.blueprintService.getSlot(host.id)?.walls.length,
+      0,
+      'Wall destroyed by raider while Host is offline must also be lost in Host autosaved Blueprint'
+    );
+
+    // 2. Host rejoins before 15 minutes and creates a new Tribe -> reclaims the dormant Totem & surviving Chest!
+    const rejoinedHost = room.joinPlayer(makeProfile(host.id, host.username)).player!;
+    rejoinedHost.spawnProtectedUntil = 0;
+    const reclaimTribe = room.handleCreateTribe(rejoinedHost.id, 'Reclaimed Clan', 'RCL', 'public');
+    assert.strictEqual(reclaimTribe.ok, true);
+    assert.strictEqual(dormantTotem.tribeId, reclaimTribe.tribe!.id);
+    assert.strictEqual(dormantTotem.dormantExpiresAt, null);
+    rejoinedHost.x = chestRes.chest!.x;
+    rejoinedHost.y = chestRes.chest!.y + 24;
+    assert.strictEqual(room.handleOpenChest(rejoinedHost.id, chestRes.chest!.id).ok, true);
+
+    // 3. Raiders break the active Totem -> Host gets 3 minutes to place a new Totem inside 20x20, else ALL builds + Chests + Chest items destroy!
+    rejoinedHost.x = spot.x + 64;
+    rejoinedHost.y = spot.y - 64;
+    rejoinedHost.inventory[0] = { itemId: 'wooden_wall', count: 1 };
+    rejoinedHost.activeSlot = 0;
+    assert.strictEqual(room.handleUseOrPlaceItem(rejoinedHost.id, spot.x + 64, spot.y - 128, 'h').ok, true);
+
+    dormantTotem.hp = 5;
+    raider.x = dormantTotem.x - 36;
+    raider.y = dormantTotem.y;
+    raider.lastSwingAt = 0;
+    room.handleSwing(raider.id, 0);
+    assert.strictEqual(room.placedTotems.size, 0, 'Active Totem must break at 0 HP');
+    assert.strictEqual(room.brokenTotemZones.size, 1, 'Breaking Totem must start 3-minute collapse timer');
+
+    // Past 3 minutes without placing a replacement Totem -> walls, Chest, Chest items, AND saved Blueprint slot are permanently destroyed!
+    const breakTs = Date.now();
+    room.sweepOfflineBases(breakTs + CONFIG.BROKEN_TOTEM_COLLAPSE_MS + 1000);
+    assert.strictEqual(room.brokenTotemZones.size, 0);
     assert.strictEqual(room.placedWalls.size, 0);
     assert.strictEqual(room.placedChests.size, 0);
-
-    // 2. Test pure 3-minute offline grace expiry when nobody reconnects
-    const solo = room.joinPlayer(makeProfile('grace-solo', 'SoloOffline')).player!;
-    room.handleCreateTribe(solo.id, 'Solo Clan', 'SOLO', 'public');
-    solo.x = spot.x - 64;
-    solo.y = spot.y;
-    solo.inventory[0] = { itemId: 'tribe_totem', count: 1 };
-    solo.inventory[1] = { itemId: 'wooden_wall', count: 1 };
-    solo.activeSlot = 0;
-    assert.strictEqual(room.handleUseOrPlaceItem(solo.id, spot.x, spot.y).ok, true);
-    solo.activeSlot = 1;
-    assert.strictEqual(room.handleUseOrPlaceItem(solo.id, spot.x, spot.y - 128, 'h').ok, true);
-
-    room.removePlayer(solo.id); // Non-explicit socket disconnect
-    const disconnectTs = Date.now();
-    assert.strictEqual(room.placedTotems.size, 1);
-    assert.strictEqual(room.placedWalls.size, 1);
-
-    // Past 3 minutes (CONFIG.OFFLINE_BASE_GRACE_MS + 1000), sweep purges offline Tribe & builds
-    room.sweepOfflineBases(disconnectTs + CONFIG.OFFLINE_BASE_GRACE_MS + 1000);
-    assert.strictEqual(room.tribeManager.getTribeCount(), 0);
-    assert.strictEqual(room.placedTotems.size, 0);
-    assert.strictEqual(room.placedWalls.size, 0);
+    assert.strictEqual(room.blueprintService.getSlot(host.id), null);
   });
 });

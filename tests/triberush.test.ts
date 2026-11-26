@@ -294,7 +294,11 @@ describe('2. Server-Authoritative Survival Loop: 32 Max Stack, Stone & Coal Mini
     extraPlayer.y = chestRes.chest!.y;
     const outsiderOpen = room.handleOpenChest('ally-31', chestId);
     assert.strictEqual(outsiderOpen.ok, false);
-    assert.match(outsiderOpen.error || '', /Locked by \[WOLF\] Tribe/);
+    assert.match(outsiderOpen.error || '', /Tribeless players cannot open Chests/i);
+    assert.strictEqual(room.handleCreateTribe('ally-31', 'Rival Pack', 'RIVL', 'public').ok, true);
+    const rivalOpen = room.handleOpenChest('ally-31', chestId);
+    assert.strictEqual(rivalOpen.ok, false);
+    assert.match(rivalOpen.error || '', /Locked by \[WOLF\] Tribe/);
 
     // 5. Leave Tribe -> defeat p2 -> full inventory loot drops onto ground -> respawn after cooldown
     room.handleSelectSlot('leader', 0);
@@ -734,18 +738,51 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     const chRes = room.handleUseOrPlaceItem('king-1', 12896, 12896);
     assert.strictEqual(chRes.ok, true);
 
-    // 7. Phase 7: Store items inside Wooden Chest — Blueprint Save & Pack MUST preserve all Chest loot!
+    // 7. Store items inside Wooden Chest — Pure Autosave + Disband-to-Pack MUST preserve all Chest loot!
+    const clear20x20ForTest = (r: WorldRoom, cx: number, cy: number) => {
+      for (const t of r.world.trees) if (Math.abs(t.x - cx) < 900 && Math.abs(t.y - cy) < 900) t.destroyedAt = 1;
+      for (const rk of r.world.rocks) if (Math.abs(rk.x - cx) < 900 && Math.abs(rk.y - cy) < 900) rk.destroyedAt = 1;
+      for (const b of r.world.bushes) if (Math.abs(b.x - cx) < 900 && Math.abs(b.y - cy) < 900) b.destroyedAt = 1;
+      r.world.fallenLogs.splice(
+        0,
+        r.world.fallenLogs.length,
+        ...r.world.fallenLogs.filter((l) => Math.abs(l.x - cx) >= 900 || Math.abs(l.y - cy) >= 900)
+      );
+      r.world.lakes.splice(
+        0,
+        r.world.lakes.length,
+        ...r.world.lakes.filter((lk) => Math.hypot(lk.x - cx, lk.y - cy) >= 900 + lk.outerRadius)
+      );
+      r.world.ponds.splice(
+        0,
+        r.world.ponds.length,
+        ...r.world.ponds.filter((pd) => Math.hypot(pd.x - cx, pd.y - cy) >= 900 + pd.radius)
+      );
+      r.world.mudPatches.splice(
+        0,
+        r.world.mudPatches.length,
+        ...r.world.mudPatches.filter((md) => Math.hypot(md.x - cx, md.y - cy) >= 900 + md.radius)
+      );
+    };
     chRes.chest!.slots[0] = { itemId: 'wood', count: 5 };
     chRes.chest!.slots[3] = { itemId: 'coal', count: 7 };
 
-    // 8. Anti-Abuse Gate Check B: Recent Raid Damage (< 60s) MUST block Blueprint Save & Pack!
-    wallRes.wall!.lastDamagedAt = Date.now();
-    const blockedRaidLock = room.handleSaveBlueprintBuild('king-1');
-    assert.strictEqual(blockedRaidLock.ok, false);
-    assert.match(blockedRaidLock.error || '', /Raid Lock/);
-    wallRes.wall!.lastDamagedAt = 0;
+    // 8. Manual Save & Pack is removed in favor of real-time Autosave + Disband Tribe!
+    assert.strictEqual(room.handleSaveBlueprintBuild('king-1').ok, false);
 
-    // 9. Valid Save & Pack consumes 1 Blueprint and packs live Totem + builds + Chest loot with ZERO duplication!
+    // Single-Totem Blueprint Gate: while Totem is placed/saved, Host CANNOT craft a second Tribe Totem!
+    leader.inventory[4] = { itemId: 'wood', count: 32 };
+    leader.inventory[5] = { itemId: 'stone', count: 15 };
+    room.handleSelectSlot('king-1', bpIdx);
+    const duplicateTotem = room.handleBlueprintPlaceBuild('king-1', 'tribe_totem', 12864, 12800);
+    assert.strictEqual(duplicateTotem.ok, false);
+
+    // Combat Mode blocks Disband Tribe!
+    leader.combatUntil = Date.now() + 10_000;
+    assert.strictEqual(room.handleDisbandTribe('king-1').ok, false);
+    leader.combatUntil = 0;
+
+    // 9. Persistent Autosave + Disband across server restarts + Clear-20x20 check on Load Base!
     const tmpBlueprintFile = path.join(
       os.tmpdir(),
       `triberush-blueprint-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
@@ -764,43 +801,57 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
       const pTotemRes = persistedRoom.handleBlueprintPlaceBuild('king-persist', 'tribe_totem', 12800, 12800);
       assert.strictEqual(pTotemRes.ok, true);
       assert.strictEqual(pTotemRes.totem!.sizeTiles, 20);
-      assert.strictEqual(persistedRoom.handleSaveBlueprintBuild('king-persist').ok, true);
+      assert.strictEqual(persistedRoom.handleDisbandTribe('king-persist').ok, true);
       await persistedRoom.blueprintService.flushPendingDiskWrite();
 
-      // Tribe Host disconnects + empty-world Day 1 reset runs -> saved slot MUST NOT disappear!
-      persistedRoom.removePlayer('king-persist');
+      persistedRoom.removePlayer('king-persist', { explicitLeave: true });
       persistedRoom.resetWorldToDayOne(20261122);
       assert.strictEqual(persistedRoom.blueprintService.getSlot('king-persist')?.sizeTiles, 20);
 
-      // Simulate full backend server restart loading from disk JSON -> saved slot STILL survives!
       const rebootedRoom = new WorldRoom(20261122, tmpBlueprintFile);
       const rejoined = rebootedRoom.joinPlayer(makeMockExplorer('king-persist', 'PersistHost')).player!;
       rejoined.spawnProtectedUntil = 0;
       rejoined.x = 12800;
       rejoined.y = 12800;
       assert.strictEqual(rebootedRoom.blueprintService.getSlot('king-persist')?.totemLevel, 1);
-      assert.strictEqual(rebootedRoom.blueprintService.getSlot('king-persist')?.sizeTiles, 20);
       assert.strictEqual(rebootedRoom.handleCreateTribe('king-persist', 'Persist Reborn', 'PRB').ok, true);
+
+      // Obstructed 20x20 territory (trees/rocks inside square) MUST block Load Base!
+      const obstructedLoad = rebootedRoom.handleLoadBlueprintBuild('king-persist', 12800, 12800);
+      assert.strictEqual(obstructedLoad.ok, false);
+      assert.match(obstructedLoad.error || '', /clear|trees|rocks|bushes/i);
+
+      // Clear 20x20 resources -> Load Base succeeds!
+      clear20x20ForTest(rebootedRoom, 12800, 12800);
       assert.strictEqual(rebootedRoom.handleLoadBlueprintBuild('king-persist', 12800, 12800).ok, true);
       await rebootedRoom.blueprintService.flushPendingDiskWrite();
 
-      // Verify 20-minute Deploy Cooldown ALSO persists across disconnect + restart!
       const rebootedAfterDeploy = new WorldRoom(20261122, tmpBlueprintFile);
       assert.ok(
         rebootedAfterDeploy.blueprintService.getDeployCooldownRemainingMs('king-persist') > 0,
-        '20-minute deploy cooldown must persist across server restarts to prevent relog bypass'
+        'Deploy cooldown must persist across server restarts to prevent relog bypass'
       );
     } finally {
       if (fs.existsSync(tmpBlueprintFile)) fs.unlinkSync(tmpBlueprintFile);
     }
 
-    const saved = room.handleSaveBlueprintBuild('king-1');
-    assert.strictEqual(saved.ok, true);
+    // Disbanding Tribe autosaves & packs all standing builds + Chest loot into Host's Blueprint Vault!
+    const disbandedPack = room.handleDisbandTribe('king-1');
+    assert.strictEqual(disbandedPack.ok, true);
     assert.strictEqual(room.placedTotems.size, 0);
     assert.strictEqual(room.placedWalls.size, 0);
     assert.strictEqual(room.placedStructures.size, 0);
     assert.strictEqual(room.placedChests.size, 0);
     assert.strictEqual(room.blueprintService.getSlot('king-1')?.sizeTiles, 20);
+
+    // Rejoin server so session-gated `Load Base` becomes available (`hasLoadedBaseThisSession === false`)!
+    room.removePlayer('king-1', { explicitLeave: true });
+    const rejoinedKing = room.joinPlayer(makeMockExplorer('king-1', 'OakKing')).player!;
+    rejoinedKing.spawnProtectedUntil = 0;
+    rejoinedKing.x = 12800;
+    rejoinedKing.y = 12800;
+    assert.strictEqual(room.handleCreateTribe('king-1', 'Oak Kingdom', 'KING', 'public').ok, true);
+    clear20x20ForTest(room, 12800, 12800);
 
     // 10. Anti-Abuse Gate Check C: Enemy player within 900u of target land MUST block Deploy!
     const invader = room.joinPlayer(makeMockExplorer('invader-9', 'Raider')).player!;
@@ -812,10 +863,10 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.match(blockedNearEnemy.error || '', /enemy players/);
     room.removePlayer('invader-9');
 
-    // 11. Deploy saved base onto open empty land restores fixed 20x20 Totem + Wall + Watchtower (rot 2) + Hut + Campfire + Chest WITH LOOT & consumes the 1 slot!
+    // 11. Deploy saved base onto clear 20x20 land restores Totem + Wall + Watchtower (rot 2) + Hut + Campfire + Chest WITH LOOT!
     const deployed = room.handleLoadBlueprintBuild('king-1', 12800, 12800);
-    assert.strictEqual(deployed.ok, true);
-    assert.strictEqual(room.blueprintService.getSlot('king-1'), null, 'Single slot must be consumed on deploy (zero cloning)');
+    assert.strictEqual(deployed.ok, true, deployed.error);
+    assert.strictEqual(rejoinedKing.hasLoadedBaseThisSession, true);
     assert.strictEqual(room.placedTotems.size, 1);
     const restoredTotem = Array.from(room.placedTotems.values())[0];
     assert.strictEqual(restoredTotem.level, 1);
@@ -831,19 +882,16 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     const restoredWt = Array.from(room.placedStructures.values()).find((s) => s.kind === 'watchtower');
     assert.strictEqual(restoredWt?.rotationQuarter, 2);
 
-    // 12. Anti-Abuse Gate Check D: Host cannot Load Base again without clicking Save & Pack first, and faces a 5-minute deploy cooldown!
+    // 12. Session-gated Load Base: even after Disbanding, Host CANNOT Load Base again in the same session without rejoining!
     assert.strictEqual(CONFIG.BLUEPRINT_DEPLOY_COOLDOWN_MS, 5 * 60000);
-    const blockedNoPack = room.handleLoadBlueprintBuild('king-1', 12800, 12800);
-    assert.strictEqual(blockedNoPack.ok, false);
-    assert.match(blockedNoPack.error || '', /Save & Pack/i);
-
-    assert.strictEqual(room.handleSaveBlueprintBuild('king-1').ok, true);
-    const blockedCooldown = room.handleLoadBlueprintBuild('king-1', 12800, 12800);
-    assert.strictEqual(blockedCooldown.ok, false);
-    assert.match(blockedCooldown.error || '', /cooldown/i);
+    assert.strictEqual(room.handleDisbandTribe('king-1').ok, true);
+    assert.strictEqual(room.handleCreateTribe('king-1', 'Oak Kingdom', 'KING', 'public').ok, true);
+    const blockedSameSession = room.handleLoadBlueprintBuild('king-1', 12800, 12800);
+    assert.strictEqual(blockedSameSession.ok, false);
+    assert.match(blockedSameSession.error || '', /already loaded|rejoin/i);
   });
 
-  it('should prevent friendly fire on own Totem, allow clicking & removing 20x20 Totem to replace, and auto-remove Totem on Tribe disband or last member leaving', () => {
+  it('should prevent friendly fire on own Totem, block moving or removing a placed Totem, and pack builds into Host vault on Disband', () => {
     const room = new WorldRoom(20261122);
     const leader = room.joinPlayer(makeMockExplorer('totem-boss', 'TotemBoss')).player!;
     const member = room.joinPlayer(makeMockExplorer('totem-ally', 'TotemAlly')).player!;
@@ -854,65 +902,51 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     member.x = 12850;
     member.y = 12800;
 
-    // Create Tribe and build fixed 20x20 Totem via Blueprint
     const created = room.handleCreateTribe('totem-boss', 'Oak Empire', 'OAK');
     assert.strictEqual(created.ok, true);
     assert.strictEqual(room.handleJoinTribe('totem-ally', created.tribe!.id).ok, true);
 
     leader.inventory[0] = { itemId: 'blueprint', count: 1 };
-    leader.inventory[1] = { itemId: 'wood', count: 20 };
+    leader.inventory[1] = { itemId: 'wood', count: 30 };
     leader.inventory[2] = { itemId: 'stone', count: 10 };
     room.handleSelectSlot('totem-boss', 0);
     const placed = room.handleBlueprintPlaceBuild('totem-boss', 'tribe_totem', 12800, 12800);
     assert.strictEqual(placed.ok, true);
     const totem = placed.totem!;
     assert.strictEqual(totem.sizeTiles, 20);
+    assert.strictEqual(
+      room.handleBlueprintPlaceBuild('totem-boss', 'wooden_wall', 12864, 12736, 'h').ok,
+      true
+    );
 
-    // Own Tribe members swinging at their own Totem must NOT damage it
+    // Friendly Tribe members swinging at their own Totem must NOT damage it
     const hpBefore = totem.hp;
     leader.x = 12770;
     leader.y = 12800;
     room.handleSwing('totem-boss', 0);
     assert.strictEqual(totem.hp, hpBefore, 'Friendly Tribe members must not damage their own Totem');
 
-    // Non-leader member cannot remove the Tribe Totem
-    const nonLeaderRemove = room.handleRemoveTotem('totem-ally', totem.id);
-    assert.strictEqual(nonLeaderRemove.ok, false);
+    // Placed Tribe Totem is strictly IMMOVABLE and NON-REMOVABLE by both members and Host!
+    assert.strictEqual(room.handleRemoveTotem('totem-ally', totem.id).ok, false);
+    assert.strictEqual(room.handleRemoveTotem('totem-boss', totem.id).ok, false);
+    assert.strictEqual(
+      room.handleBlueprintMoveEntity('totem-boss', 'totem', totem.id, 12864, 12800).ok,
+      false
+    );
+    assert.strictEqual(
+      room.handleBlueprintRemoveEntity('totem-boss', 'totem', totem.id).ok,
+      false
+    );
+    assert.strictEqual(room.placedTotems.size, 1);
 
-    // Leader removes Totem to replace -> Totem disappears from map & returns to Hotbar -> replacing creates 20x20 claim!
-    const removed = room.handleRemoveTotem('totem-boss', totem.id);
-    assert.strictEqual(removed.ok, true);
-    assert.strictEqual(room.placedTotems.size, 0);
-    const returnedSlot = leader.inventory.findIndex((s) => s?.itemId === 'tribe_totem');
-    assert.ok(returnedSlot >= 0, 'Removing Totem must return tribe_totem item to Leader inventory');
-
-    room.handleSelectSlot('totem-boss', returnedSlot);
-    const replaced = room.handleUseOrPlaceItem('totem-boss', 12864, 12800);
-    assert.strictEqual(replaced.ok, true);
-    assert.strictEqual(replaced.totem?.level, 1);
-    assert.strictEqual(replaced.totem?.sizeTiles, 20);
-
-    // Disbanding the Tribe removes ALL members AND automatically removes the placed Tribe Totem!
+    // Disbanding the Tribe packs all builds + Totem into Host's Blueprint Vault and clears them from map!
     const disbanded = room.handleDisbandTribe('totem-boss');
     assert.strictEqual(disbanded.ok, true);
     assert.strictEqual(room.placedTotems.size, 0, 'Disbanding Tribe must remove its placed Totem');
+    assert.strictEqual(room.placedWalls.size, 0, 'Disbanding Tribe must pack & remove its walls');
+    assert.strictEqual(room.blueprintService.getSlot('totem-boss')?.walls.length, 1);
     assert.strictEqual(leader.tribeId, null);
     assert.strictEqual(member.tribeId, null);
-
-    // Solo Leader creating a Tribe, building Totem via Blueprint, and Leaving Tribe also auto-removes the Totem!
-    const soloTribe = room.handleCreateTribe('totem-boss', 'Solo Clan', 'SOLO');
-    assert.strictEqual(soloTribe.ok, true);
-    leader.inventory[0] = { itemId: 'blueprint', count: 1 };
-    leader.inventory[1] = { itemId: 'wood', count: 20 };
-    leader.inventory[2] = { itemId: 'stone', count: 10 };
-    room.handleSelectSlot('totem-boss', 0);
-    assert.strictEqual(
-      room.handleBlueprintPlaceBuild('totem-boss', 'tribe_totem', 12800, 12800).ok,
-      true
-    );
-    assert.strictEqual(room.placedTotems.size, 1);
-    assert.strictEqual(room.handleLeaveTribe('totem-boss').ok, true);
-    assert.strictEqual(room.placedTotems.size, 0, 'Last member leaving Tribe must remove its placed Totem');
   });
 
   it('should persist compact sparse player inventory and Load Build blueprints with zero guest bloat, empty-row pruning, and strict anti-dupe clears', async () => {

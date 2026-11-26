@@ -2,6 +2,7 @@ import { CONFIG } from '../../config/index.js';
 import { BARE_HANDS_DEF, getItemDef } from '../../data/items/index.js';
 import type { ItemId } from '../../models/types.js';
 import { BUSH_FRUIT_ITEMS, type WorldRoomContext } from './roomContext.js';
+import { startBrokenTotemCollapseCore } from './TotemLifecycleHandler.js';
 
 export function handleSwingCore(
   ctx: WorldRoomContext,
@@ -350,6 +351,7 @@ export function handleSwingCore(
       ctx.placedWalls.delete(wall.id);
       ctx.world.removeBoxCollider('wall', wall.id, wall.x, wall.y, halfW, halfH);
       ctx.spawnGroundDrop('wood', 3, wall.x, wall.y);
+      ctx.syncStandingBaseAutosave(wall.ownerId, now);
       ctx.markWorldStateDirty();
     }
     const wallPayload = {
@@ -395,6 +397,7 @@ export function handleSwingCore(
           ctx.spawnGroundDrop('coal', 4, s.x, s.y);
           ctx.spawnGroundDrop('wood', 2, s.x, s.y);
         }
+        ctx.syncStandingBaseAutosave(s.ownerId, now);
         ctx.markWorldStateDirty();
       }
       const structPayload = {
@@ -425,6 +428,17 @@ export function handleSwingCore(
       const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
       if (dot < 0.3) continue;
 
+      if (!totem.tribeId && totem.dormantExpiresAt && now < totem.dormantExpiresAt) {
+        blockedReason = 'This Tribe Totem is unbreakable while its Host is away.';
+        ctx.emitPlayerEvent(player.id, {
+          type: 'ACTION_NOTICE',
+          message: blockedReason,
+          x: totem.x,
+          y: totem.y
+        });
+        break;
+      }
+
       totem.hp = Math.max(0, totem.hp - siegeDmg);
       totem.lastDamagedAt = now;
       const destroyed = totem.hp <= 0;
@@ -433,6 +447,7 @@ export function handleSwingCore(
         ctx.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
         ctx.spawnGroundDrop('wood', 8, totem.x, totem.y);
         ctx.spawnGroundDrop('stone', 4, totem.x, totem.y);
+        startBrokenTotemCollapseCore(ctx, totem, now);
         ctx.markWorldStateDirty();
       }
       const totemPayload = {

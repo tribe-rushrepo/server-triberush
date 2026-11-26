@@ -1,5 +1,9 @@
 import type { TribeSummary } from '../../models/types.js';
 import type { WorldRoomContext } from './roomContext.js';
+import {
+  packAndRemoveTribeBaseOnDisbandCore,
+  reclaimDormantTotemForNewTribeCore
+} from './TotemLifecycleHandler.js';
 
 export function handleCreateTribeCore(
   ctx: WorldRoomContext,
@@ -10,16 +14,28 @@ export function handleCreateTribeCore(
 ): { ok: boolean; tribe?: TribeSummary; error?: string } {
   const player = ctx.playersById.get(playerId);
   if (!player) return { ok: false, error: 'Player not found.' };
-  if (Date.now() < player.combatUntil) {
+  const now = Date.now();
+  if (now < player.combatUntil) {
     return { ok: false, error: 'Cannot change Tribe during Combat Mode.' };
   }
 
   const res = ctx.tribeManager.createTribe(player, name, tag, visibility);
   if (!res.ok) return { ok: false, error: res.error };
 
+  const reclaimed = reclaimDormantTotemForNewTribeCore(
+    ctx,
+    player,
+    player.tribeId!,
+    player.tribeTag!,
+    res.tribe?.name || name,
+    now
+  );
+
   ctx.emitPlayerEvent(player.id, {
     type: 'ACTION_NOTICE',
-    message: `Tribe [${player.tribeTag}] created (${visibility === 'private' ? 'Private' : 'Public'}). Craft a Base Blueprint to build a Tribe Totem.`,
+    message: reclaimed
+      ? `Tribe [${player.tribeTag}] created — reclaimed your Tribe Totem and standing builds!`
+      : `Tribe [${player.tribeTag}] created (${visibility === 'private' ? 'Private' : 'Public'}). Craft a Base Blueprint to build a Tribe Totem.`,
     x: Math.round(player.x),
     y: Math.round(player.y)
   });
@@ -193,6 +209,18 @@ export function handleLeaveTribeCore(
   if (Date.now() < player.combatUntil) {
     return { ok: false, error: 'Cannot change Tribe during Combat Mode.' };
   }
+  if (player.tribeId && ctx.tribeManager.isTribeLeader(player.id, player.tribeId)) {
+    const myTribe = ctx.getTribeSummaries().find((t) => t.id === player.tribeId);
+    if (myTribe && myTribe.memberCount <= 1) {
+      return handleDisbandTribeCore(ctx, playerId);
+    }
+    if (ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values())) {
+      return {
+        ok: false,
+        error: 'As Tribe Host, use Disband Tribe to auto-save and pack your Totem and builds.'
+      };
+    }
+  }
 
   const res = ctx.tribeManager.leaveTribe(player, ctx.playersById);
   if (!res.ok) return res;
@@ -221,8 +249,20 @@ export function handleDisbandTribeCore(
 ): { ok: boolean; error?: string } {
   const player = ctx.playersById.get(playerId);
   if (!player) return { ok: false, error: 'Player not found.' };
-  if (Date.now() < player.combatUntil) {
+  const now = Date.now();
+  if (now < player.combatUntil) {
     return { ok: false, error: 'Cannot disband Tribe during Combat Mode.' };
+  }
+  if (!player.tribeId) {
+    return { ok: false, error: 'You are not in a Tribe.' };
+  }
+  if (!ctx.tribeManager.isTribeLeader(player.id, player.tribeId)) {
+    return { ok: false, error: 'Only the Tribe Leader can disband the Tribe.' };
+  }
+
+  const packRes = packAndRemoveTribeBaseOnDisbandCore(ctx, player, player.tribeId, now);
+  if (!packRes.ok) {
+    return { ok: false, error: packRes.error };
   }
 
   const res = ctx.tribeManager.disbandTribe(player, ctx.playersById);
@@ -230,10 +270,6 @@ export function handleDisbandTribeCore(
     return { ok: false, error: res.error || 'Could not disband Tribe.' };
   }
 
-  const hadTotem = Boolean(
-    ctx.totemService.findTotemForTribe(res.disbandedTribeId, ctx.placedTotems.values())
-  );
-  ctx.purgeTribeBuilds(res.disbandedTribeId);
   for (const member of res.affectedPlayers || []) {
     ctx.stripSpareTribeTotemItems(member);
     ctx.syncPlayerInventory(member);
@@ -246,8 +282,10 @@ export function handleDisbandTribeCore(
     });
     ctx.emitPlayerEvent(member.id, {
       type: 'ACTION_NOTICE',
-      message: hadTotem
-        ? `Tribe [${res.disbandedTag}] disbanded and its Tribe Totem was removed.`
+      message: packRes.hadTotem
+        ? member.id === player.id
+          ? `Tribe [${res.disbandedTag}] disbanded — all builds and Chest items saved to your Blueprint Vault!`
+          : `Tribe [${res.disbandedTag}] was disbanded by the Host.`
         : `Tribe [${res.disbandedTag}] was disbanded.`,
       x: Math.round(member.x),
       y: Math.round(member.y)

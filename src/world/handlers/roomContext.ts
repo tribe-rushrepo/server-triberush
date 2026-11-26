@@ -1,6 +1,7 @@
 import { CONFIG } from '../../config/index.js';
 import type {
   ActiveWorldPlayer,
+  BrokenTotemCollapseZone,
   BushKind,
   DayCycleSnapshot,
   InventorySlotItem,
@@ -18,7 +19,7 @@ import type {
   WorldTreeNode
 } from '../../models/types.js';
 import type { AnimalService } from '../AnimalService.js';
-import type { BlueprintService } from '../BlueprintService.js';
+import type { BlueprintService, BlueprintSlotSummary } from '../BlueprintService.js';
 import type { CombatService } from '../CombatService.js';
 import type { SeededWorld } from '../SeededWorld.js';
 import type { SpatialGrid } from '../SpatialGrid.js';
@@ -67,6 +68,7 @@ export interface WorldRoomContext {
   readonly placedWalls: Map<number, WorldPlacedWall>;
   readonly placedTotems: Map<number, WorldPlacedTotem>;
   readonly placedStructures: Map<number, WorldPlacedStructure>;
+  readonly brokenTotemZones: Map<string, BrokenTotemCollapseZone>;
   readonly pendingTreeRespawns: Set<WorldTreeNode>;
   readonly pendingRockRespawns: Set<WorldRockNode>;
   readonly pendingBushRespawns: Set<WorldBushNode>;
@@ -122,4 +124,6 @@ export interface WorldRoomContext {
     hostOnly?: boolean
   ): boolean;
   broadcastTribeSync(): void;
+  syncStandingBaseAutosave(ownerId: string | null | undefined, now?: number): void;
+  getBlueprintSummaryForPlayer(player: ActiveWorldPlayer, now?: number): BlueprintSlotSummary;
 }

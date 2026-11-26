@@ -8,108 +8,18 @@ import type {
   WorldPlacedTotem,
   WorldPlacedWall
 } from '../../models/types.js';
+import { findTerritoryObstructionCore } from './TotemLifecycleHandler.js';
 import { snapGridLine, type WorldRoomContext } from './roomContext.js';
 
 export function handleSaveBlueprintBuildCore(
-  ctx: WorldRoomContext,
-  playerId: string
+  _ctx: WorldRoomContext,
+  _playerId: string
 ): { ok: boolean; error?: string } {
-  const player = ctx.playersById.get(playerId);
-  if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
-  if (!player.tribeId) return { ok: false, error: 'You must lead a Tribe with a placed Totem.' };
-
-  if (ctx.countPlayerItem(player, 'blueprint') < 1) {
-    return {
-      ok: false,
-      error: 'Requires 1 Base Blueprint (craft from 15 Paper + 5 Feathers).'
-    };
-  }
-
-  const tribe = ctx.getTribeSummaries().find((t) => t.id === player.tribeId);
-  const totem = ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values());
-  if (!tribe || !totem) {
-    return { ok: false, error: 'No active Tribe Totem placed to save.' };
-  }
-
-  const now = Date.now();
-  const check = ctx.blueprintService.validatePackUp({
-    player,
-    tribeLeaderId: tribe.leaderId,
-    totem,
-    totemService: ctx.totemService,
-    allPlayers: ctx.playersById.values(),
-    walls: ctx.placedWalls.values(),
-    structures: ctx.placedStructures.values(),
-    chests: ctx.placedChests.values(),
-    torches: ctx.placedTorches.values(),
-    now
-  });
-
-  if (!check.ok) return { ok: false, error: check.reason };
-
-  const walls = check.capturedWalls || [];
-  const structures = check.capturedStructures || [];
-  const chests = check.capturedChests || [];
-  const torches = check.capturedTorches || [];
-
-  ctx.blueprintService.saveSlot({
-    ownerId: player.id,
-    totem,
-    walls,
-    structures,
-    chests,
-    torches,
-    now
-  });
-
-  ctx.placedTotems.delete(totem.id);
-  ctx.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
-
-  const removedWallIds: number[] = [];
-  for (const w of walls) {
-    ctx.placedWalls.delete(w.id);
-    const halfW = w.orientation === 'h' ? w.length / 2 : w.thickness / 2;
-    const halfH = w.orientation === 'h' ? w.thickness / 2 : w.length / 2;
-    ctx.world.removeBoxCollider('wall', w.id, w.x, w.y, halfW, halfH);
-    removedWallIds.push(w.id);
-  }
-
-  const removedStructureIds: number[] = [];
-  for (const s of structures) {
-    ctx.removeStructureEntity(s);
-    removedStructureIds.push(s.id);
-  }
-
-  const removedChestIds: number[] = [];
-  for (const c of chests) {
-    ctx.placedChests.delete(c.id);
-    ctx.world.removeSolidCollider('chest', c.id, c.x, c.y, c.radius);
-    removedChestIds.push(c.id);
-  }
-
-  const removedTorchIds: number[] = [];
-  for (const t of torches) {
-    ctx.placedTorches.delete(t.id);
-    removedTorchIds.push(t.id);
-  }
-
-  ctx.emitRosterEvent({
-    type: 'BLUEPRINT_BASE_PACKED',
-    totemId: totem.id,
-    wallIds: removedWallIds,
-    structureIds: removedStructureIds,
-    chestIds: removedChestIds,
-    torchIds: removedTorchIds
-  });
-
-  ctx.syncPlayerInventory(player);
-  ctx.emitPlayerEvent(player.id, {
-    type: 'ACTION_NOTICE',
-    message: `Saved & packed Tribe Base (${CONFIG.TOTEM_SIZE_TILES}x${CONFIG.TOTEM_SIZE_TILES}) into Load Build slot!`,
-    x: Math.round(player.x),
-    y: Math.round(player.y)
-  });
-  return { ok: true };
+  return {
+    ok: false,
+    error:
+      'Save & Pack has been removed. Your Tribe Base autosaves automatically; Disband Tribe to pack all builds.'
+  };
 }
 
 export function handleLoadBlueprintBuildCore(
@@ -123,9 +33,12 @@ export function handleLoadBlueprintBuildCore(
 
   const slot = ctx.blueprintService.getSlot(player.id);
   if (!slot) {
+    return { ok: false, error: 'No saved Tribe Base available to load.' };
+  }
+  if (player.hasLoadedBaseThisSession) {
     return {
       ok: false,
-      error: 'Click Save & Pack first before loading your Tribe Base again.'
+      error: 'You already loaded your Tribe Base in this session. Leave and rejoin to load again.'
     };
   }
   if (!player.tribeId) {
@@ -135,11 +48,11 @@ export function handleLoadBlueprintBuildCore(
   if (!tribe || tribe.leaderId !== player.id) {
     return { ok: false, error: 'Only the Tribe Host can load a saved Tribe Base.' };
   }
-  if (ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values())) {
-    return {
-      ok: false,
-      error: 'Your Tribe already has an active Totem. Pack or remove it first.'
-    };
+  if (
+    ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values()) ||
+    ctx.totemService.findTotemForOwner(player.id, ctx.placedTotems.values())
+  ) {
+    return { ok: false, error: 'Your Tribe Totem is already standing on the map.' };
   }
 
   const now = Date.now();
@@ -192,53 +105,33 @@ export function handleLoadBlueprintBuildCore(
     }
   }
 
-  if (
-    ctx.world.overlapsWaterOrMud(cx, cy, CONFIG.TOTEM_RADIUS + 14) ||
-    ctx.world.overlapsAnySolid(cx, cy, CONFIG.TOTEM_RADIUS + 10)
-  ) {
-    return { ok: false, error: 'Totem center is blocked by water, tree, or rock.' };
-  }
-
-  for (const s of slot.structures) {
-    const sx = cx + s.dx;
-    const sy = cy + s.dy;
-    const rad = s.kind === 'hut' ? 84 : 52;
-    if (ctx.world.overlapsWaterOrMud(sx, sy, rad) || ctx.world.overlapsAnySolid(sx, sy, rad)) {
-      return {
-        ok: false,
-        error: 'Land not clear: a saved structure overlaps water or obstacles.'
-      };
-    }
-  }
-  for (const w of slot.walls) {
-    const wx = cx + w.dx;
-    const wy = cy + w.dy;
-    if (ctx.world.overlapsWaterOrMud(wx, wy, 14) || ctx.world.overlapsAnySolid(wx, wy, 12)) {
-      return { ok: false, error: 'Land not clear: a saved wall overlaps water or obstacles.' };
-    }
-  }
-  for (const c of slot.chests) {
-    const chx = cx + c.dx;
-    const chy = cy + c.dy;
-    if (ctx.world.overlapsWaterOrMud(chx, chy, 24) || ctx.world.overlapsAnySolid(chx, chy, 24)) {
-      return { ok: false, error: 'Land not clear: a saved chest overlaps water or obstacles.' };
-    }
+  const obstruction = findTerritoryObstructionCore(ctx, cx, cy, halfPx);
+  if (obstruction) {
+    return {
+      ok: false,
+      error: `Cannot load build: clear all ${obstruction} inside the ${deploySizeTiles}x${deploySizeTiles} territory first.`
+    };
   }
 
   const consumed = ctx.blueprintService.consumeSlot(player.id);
   if (!consumed) return { ok: false, error: 'Blueprint slot unavailable.' };
 
   player.lastBlueprintDeployAt = now;
+  player.hasLoadedBaseThisSession = true;
   ctx.blueprintService.recordDeployTimestamp(player.id, now);
 
+  const totemX = cx + (typeof consumed.totemDx === 'number' ? consumed.totemDx : 0);
+  const totemY = cy + (typeof consumed.totemDy === 'number' ? consumed.totemDy : 0);
   const totem: WorldPlacedTotem = {
     id: ctx.nextTotemId(),
     tribeId: tribe.id,
     tribeTag: tribe.tag,
     tribeName: tribe.name,
     ownerId: player.id,
-    x: cx,
-    y: cy,
+    x: totemX,
+    y: totemY,
+    claimX: cx,
+    claimY: cy,
     radius: CONFIG.TOTEM_RADIUS,
     level: 1,
     sizeTiles: CONFIG.TOTEM_SIZE_TILES,
@@ -402,7 +295,8 @@ export function handleLoadBlueprintBuildCore(
     torches: deployedTorches
   });
 
-  ctx.syncPlayerInventory(player);
+  // Keep standing base continuously autosaved while deployed on the map
+  ctx.syncStandingBaseAutosave(player.id, now);
   ctx.emitPlayerEvent(player.id, {
     type: 'ACTION_NOTICE',
     message: `Deployed Tribe Base (${CONFIG.TOTEM_SIZE_TILES}x${CONFIG.TOTEM_SIZE_TILES}) with Chest loot restored!`,

@@ -120,18 +120,12 @@ export class TribeManager {
 
     const id = `tribe-${this.nextTribeNum++}`;
     const tribe: InternalTribe = {
-      id,
-      name,
-      tag,
+      id, name, tag,
       visibility: visibility === 'private' ? 'private' : 'public',
-      leaderId: leader.id,
-      leaderName: leader.username,
-      memberIds: new Set([leader.id]),
-      builderIds: new Set([leader.id]),
-      pendingRequests: new Map(),
-      createdAt: Date.now(),
-      relocatedTotemState: null,
-      allMembersOfflineSince: null
+      leaderId: leader.id, leaderName: leader.username,
+      memberIds: new Set([leader.id]), builderIds: new Set([leader.id]),
+      pendingRequests: new Map(), createdAt: Date.now(),
+      relocatedTotemState: null, allMembersOfflineSince: null
     };
 
     this.clearPendingRequestsForPlayer(leader.id);
@@ -332,16 +326,10 @@ export class TribeManager {
     const tribes: PersistedTribeRecord[] = [];
     for (const t of this.tribesById.values()) {
       tribes.push({
-        id: t.id,
-        name: t.name,
-        tag: t.tag,
-        visibility: t.visibility,
-        leaderId: t.leaderId,
-        leaderName: t.leaderName,
-        memberIds: Array.from(t.memberIds),
-        builderIds: Array.from(t.builderIds),
-        pendingRequests: Array.from(t.pendingRequests.values()),
-        createdAt: t.createdAt,
+        id: t.id, name: t.name, tag: t.tag, visibility: t.visibility,
+        leaderId: t.leaderId, leaderName: t.leaderName,
+        memberIds: Array.from(t.memberIds), builderIds: Array.from(t.builderIds),
+        pendingRequests: Array.from(t.pendingRequests.values()), createdAt: t.createdAt,
         relocatedTotemState: t.relocatedTotemState
           ? { level: t.relocatedTotemState.level, huntCounts: { ...t.relocatedTotemState.huntCounts } }
           : null,
@@ -400,15 +388,11 @@ export class TribeManager {
           }
         }
         const tribe: InternalTribe = {
-          id,
-          name,
-          tag,
+          id, name, tag,
           visibility: obj.visibility === 'private' ? 'private' : 'public',
           leaderId,
           leaderName: typeof obj.leaderName === 'string' && obj.leaderName ? obj.leaderName : 'Leader',
-          memberIds,
-          builderIds,
-          pendingRequests,
+          memberIds, builderIds, pendingRequests,
           createdAt: Number(obj.createdAt) || bootNow,
           relocatedTotemState:
             obj.relocatedTotemState && typeof obj.relocatedTotemState.level === 'number'
@@ -417,7 +401,6 @@ export class TribeManager {
                   huntCounts: { ...(obj.relocatedTotemState.huntCounts || {}) } as Record<AnimalKind, number>
                 }
               : null,
-          // Refresh grace timer on boot so players reconnecting after a Render deploy get full 3 min
           allMembersOfflineSince: bootNow
         };
         this.tribesById.set(id, tribe);
@@ -663,20 +646,44 @@ export class TribeManager {
   public canAccessChest(
     player: ActiveWorldPlayer,
     chest: WorldPlacedChest,
-    playersById: ReadonlyMap<string, ActiveWorldPlayer>
-  ): { allowed: boolean; lockedTag?: string } {
-    if (chest.ownerId === player.id) {
-      return { allowed: true };
+    _playersById?: ReadonlyMap<string, ActiveWorldPlayer>
+  ): { allowed: boolean; lockedTag?: string; reason?: string } {
+    if (!player.tribeId) {
+      return {
+        allowed: false,
+        reason: 'Tribeless players cannot open Chests. Join or create a Tribe first.'
+      };
     }
-    const owner = playersById.get(chest.ownerId);
-    const effectiveTribeId = owner?.tribeId ?? chest.ownerTribeId;
-    if (effectiveTribeId) {
-      if (player.tribeId === effectiveTribeId) {
-        return { allowed: true };
-      }
-      const tribe = this.tribesById.get(effectiveTribeId);
-      return { allowed: false, lockedTag: tribe?.tag || 'TRIBE' };
+    if (!chest.ownerTribeId || player.tribeId !== chest.ownerTribeId) {
+      const tribe = chest.ownerTribeId ? this.tribesById.get(chest.ownerTribeId) : undefined;
+      return {
+        allowed: false,
+        lockedTag: tribe?.tag || 'TRIBE',
+        reason: tribe
+          ? `Locked by [${tribe.tag}] Tribe.`
+          : 'Locked: reclaim this Totem by creating a Tribe first.'
+      };
     }
     return { allowed: true };
+  }
+
+  public disbandTribeById(
+    tribeId: string,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>
+  ): { disbandedTag: string; affectedPlayers: ActiveWorldPlayer[] } | null {
+    const tribe = this.tribesById.get(tribeId);
+    if (!tribe) return null;
+    const affectedPlayers: ActiveWorldPlayer[] = [];
+    for (const memberId of tribe.memberIds) {
+      const m = playersById.get(memberId);
+      if (m) {
+        m.tribeId = null;
+        m.tribeTag = null;
+        affectedPlayers.push(m);
+      }
+    }
+    this.tribesById.delete(tribe.id);
+    this.tribesByTag.delete(tribe.tag);
+    return { disbandedTag: tribe.tag, affectedPlayers };
   }
 }

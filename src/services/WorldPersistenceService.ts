@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { CONFIG } from '../config/index.js';
 import { getItemDef } from '../data/items/index.js';
 import type {
+  BrokenTotemCollapseZone,
   InventorySlotItem,
   ItemId,
   RotationQuarter,
@@ -46,6 +47,7 @@ export interface PersistedWorldStateJson {
   };
   offlineSoloOwners: Array<[string, number]>;
   totems: WorldPlacedTotem[];
+  brokenTotemZones?: BrokenTotemCollapseZone[];
   walls: WorldPlacedWall[];
   structures: WorldPlacedStructure[];
   chests: PersistedChestRecord[];
@@ -207,6 +209,7 @@ export function serializeWorldRoom(
         ...t,
         huntCounts: { ...t.huntCounts }
       })),
+      brokenTotemZones: Array.from(room.brokenTotemZones.values()).map((z) => ({ ...z })),
       walls: Array.from(room.placedWalls.values()).map((w) => ({ ...w })),
       structures: Array.from(room.placedStructures.values()).map((s) => ({ ...s })),
       chests,
@@ -231,16 +234,30 @@ export function hydrateWorldRoomFromRow(
   let maxTotemId = 0;
   if (Array.isArray(state.totems)) {
     for (const raw of state.totems) {
-      if (!raw || typeof raw.id !== 'number' || typeof raw.tribeId !== 'string') continue;
-      if (!room.tribeManager.hasTribe(raw.tribeId)) continue;
+      if (!raw || typeof raw.id !== 'number') continue;
+      const tribeId = typeof raw.tribeId === 'string' && raw.tribeId ? raw.tribeId : null;
+      const dormantOwnerId =
+        typeof raw.dormantOwnerId === 'string' && raw.dormantOwnerId ? raw.dormantOwnerId : null;
+      const dormantExpiresAt =
+        typeof raw.dormantExpiresAt === 'number' && Number.isFinite(raw.dormantExpiresAt)
+          ? raw.dormantExpiresAt
+          : null;
+      if (tribeId && !room.tribeManager.hasTribe(tribeId)) continue;
+      if (!tribeId && (!dormantOwnerId || !dormantExpiresAt || dormantExpiresAt <= bootNow)) {
+        continue;
+      }
+      const x = Number(raw.x) || 0;
+      const y = Number(raw.y) || 0;
       const totem: WorldPlacedTotem = {
         id: Math.floor(raw.id),
-        tribeId: raw.tribeId,
+        tribeId,
         tribeTag: String(raw.tribeTag || 'TRB'),
         tribeName: String(raw.tribeName || 'Tribe'),
-        ownerId: String(raw.ownerId || ''),
-        x: Number(raw.x) || 0,
-        y: Number(raw.y) || 0,
+        ownerId: String(raw.ownerId || dormantOwnerId || ''),
+        x,
+        y,
+        claimX: typeof raw.claimX === 'number' ? raw.claimX : x,
+        claimY: typeof raw.claimY === 'number' ? raw.claimY : y,
         radius: Number(raw.radius) || CONFIG.TOTEM_RADIUS,
         level: Number(raw.level) || 1,
         sizeTiles: Number(raw.sizeTiles) || CONFIG.TOTEM_SIZE_TILES,
@@ -251,10 +268,30 @@ export function hydrateWorldRoomFromRow(
           ...(raw.huntCounts || {})
         },
         createdAt: Number(raw.createdAt) || bootNow,
-        lastDamagedAt: 0
+        lastDamagedAt: 0,
+        dormantOwnerId,
+        dormantExpiresAt
       };
       room.placedTotems.set(totem.id, totem);
       if (totem.id > maxTotemId) maxTotemId = totem.id;
+    }
+  }
+
+  if (Array.isArray(state.brokenTotemZones)) {
+    for (const raw of state.brokenTotemZones) {
+      if (!raw || typeof raw.ownerId !== 'string' || typeof raw.expiresAt !== 'number') continue;
+      if (raw.expiresAt <= bootNow) continue;
+      const key = raw.tribeId || `owner:${raw.ownerId}`;
+      room.brokenTotemZones.set(key, {
+        id: Math.floor(Number(raw.id) || 1),
+        tribeId: String(raw.tribeId || ''),
+        tribeTag: String(raw.tribeTag || 'TRB'),
+        ownerId: raw.ownerId,
+        x: Number(raw.x) || 0,
+        y: Number(raw.y) || 0,
+        sizeTiles: Number(raw.sizeTiles) || CONFIG.TOTEM_SIZE_TILES,
+        expiresAt: raw.expiresAt
+      });
     }
   }
 

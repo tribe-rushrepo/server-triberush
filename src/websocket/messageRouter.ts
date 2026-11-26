@@ -156,7 +156,7 @@ export async function dispatchClientMessage(
           tribeTag: res.player.tribeTag,
           spawnProtectionRemainingMs: Math.max(0, res.player.spawnProtectedUntil - nowMsJoin),
           combatRemainingMs: Math.max(0, res.player.combatUntil - nowMsJoin),
-          blueprintSlot: worldRoom.blueprintService.getSummary(res.player, nowMsJoin)
+          blueprintSlot: worldRoom.getBlueprintSummaryForPlayer(res.player, nowMsJoin)
         },
         roster: worldRoom.getAllPlayersMeta(),
         tribes: worldRoom.getTribeSummaries(),

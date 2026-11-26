@@ -254,7 +254,7 @@ export function handleDropHeldItemCore(
     }
     const access = ctx.tribeManager.canAccessChest(player, chest, ctx.playersById);
     if (!access.allowed) {
-      return { ok: false, error: `Locked by [${access.lockedTag || 'TRIBE'}] Tribe.` };
+      return { ok: false, error: access.reason || `Locked by [${access.lockedTag || 'TRIBE'}] Tribe.` };
     }
     if (explicitSlot < 0 || explicitSlot >= CONFIG.CHEST_SLOTS) {
       return { ok: false };
@@ -291,6 +291,10 @@ export function handleDropHeldItemCore(
   const drop = ctx.spawnGroundDrop(itemId, dropCount, player.x, player.y, targetX, targetY);
 
   if (chest) {
+    const chestTotem =
+      ctx.totemService.findTotemForTribe(chest.ownerTribeId, ctx.placedTotems.values()) ||
+      ctx.totemService.findTotemForOwner(chest.ownerId, ctx.placedTotems.values());
+    ctx.syncStandingBaseAutosave(chestTotem?.ownerId || chest.ownerId);
     ctx.emitPlayerEvent(player.id, {
       type: 'CHEST_STATE',
       chestId: chest.id,
@@ -332,7 +336,7 @@ export function handleMoveSlotCore(
     }
     const access = ctx.tribeManager.canAccessChest(player, chest, ctx.playersById);
     if (!access.allowed) {
-      return { ok: false, error: `Locked by [${access.lockedTag || 'TRIBE'}] Tribe.` };
+      return { ok: false, error: access.reason || `Locked by [${access.lockedTag || 'TRIBE'}] Tribe.` };
     }
     if (
       (fromSource === 'chest' && (fromSlot < 0 || fromSlot >= CONFIG.CHEST_SLOTS)) ||
@@ -369,6 +373,10 @@ export function handleMoveSlotCore(
 
   if (chest) {
     player.urgentInventorySaveAt = Date.now() + 1500;
+    const chestTotem =
+      ctx.totemService.findTotemForTribe(chest.ownerTribeId, ctx.placedTotems.values()) ||
+      ctx.totemService.findTotemForOwner(chest.ownerId, ctx.placedTotems.values());
+    ctx.syncStandingBaseAutosave(chestTotem?.ownerId || chest.ownerId);
   }
   ctx.syncPlayerInventory(player);
   if (chest) {
@@ -499,7 +507,10 @@ export function handleOpenChestCore(
 
   const access = ctx.tribeManager.canAccessChest(player, chest, ctx.playersById);
   if (!access.allowed) {
-    return { ok: false, error: `Locked by [${access.lockedTag || 'TRIBE'}] Tribe.` };
+    return {
+      ok: false,
+      error: access.reason || `Locked by [${access.lockedTag || 'TRIBE'}] Tribe.`
+    };
   }
 
   ctx.emitPlayerEvent(player.id, {

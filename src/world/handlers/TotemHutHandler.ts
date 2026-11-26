@@ -297,57 +297,14 @@ export function handleUpgradeTotemCore(
 }
 
 export function handleRemoveTotemCore(
-  ctx: WorldRoomContext,
-  playerId: string,
-  totemId: number
+  _ctx: WorldRoomContext,
+  _playerId: string,
+  _totemId: number
 ): { ok: boolean; error?: string } {
-  const player = ctx.playersById.get(playerId);
-  if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
-
-  const totem = ctx.placedTotems.get(totemId);
-  if (!totem) return { ok: false, error: 'Tribe Totem not found.' };
-  if (!player.tribeId || player.tribeId !== totem.tribeId) {
-    return { ok: false, error: 'This Totem belongs to another Tribe.' };
-  }
-
-  const tribe = ctx.getTribeSummaries().find((t) => t.id === player.tribeId);
-  if (!tribe || tribe.leaderId !== player.id) {
-    return { ok: false, error: 'Only the Tribe Leader can remove and replace the Totem.' };
-  }
-  if (Math.hypot(totem.x - player.x, totem.y - player.y) > CONFIG.TOTEM_INTERACT_RADIUS + 60) {
-    return { ok: false, error: 'Walk closer to your Tribe Totem to remove it.' };
-  }
-
-  const now = Date.now();
-  if (now < player.combatUntil) {
-    return { ok: false, error: 'Cannot remove Tribe Totem during Combat Mode.' };
-  }
-  if (totem.lastDamagedAt > 0 && now - totem.lastDamagedAt < CONFIG.BLUEPRINT_RAID_LOCK_MS) {
-    return {
-      ok: false,
-      error: 'Raid Lock active: cannot remove Tribe Totem within 60s of enemy damage.'
-    };
-  }
-
-  ctx.tribeManager.setRelocatedTotemState(totem.tribeId, {
-    level: totem.level,
-    huntCounts: { ...totem.huntCounts }
-  });
-  ctx.removeTotemFromWorld(totem);
-
-  const leftover = ctx.addItemToSlots(player.inventory, player.unlockedSlots, 'tribe_totem', 1);
-  if (leftover > 0) {
-    ctx.spawnGroundDrop('tribe_totem', 1, player.x, player.y);
-  }
-
-  ctx.syncPlayerInventory(player);
-  ctx.emitPlayerEvent(player.id, {
-    type: 'ACTION_NOTICE',
-    message: 'Tribe Totem removed! Place it elsewhere from your Hotbar.',
-    x: Math.round(player.x),
-    y: Math.round(player.y)
-  });
-  return { ok: true };
+  return {
+    ok: false,
+    error: 'Tribe Totem cannot be removed once placed. Disband the Tribe to pack all builds.'
+  };
 }
 
 export function handleSetHutHomeCore(

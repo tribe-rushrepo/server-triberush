@@ -16,6 +16,10 @@ import {
   stepResourceRegrowthAndDrops
 } from './SnapshotHandler.js';
 import { checkPlayerShelterCore, hasUnpackedSoloBuildsCore } from './TotemHutHandler.js';
+import {
+  handleHostLeftWithoutDisbandCore,
+  stepDormantTotemsAndCollapseZonesCore
+} from './TotemLifecycleHandler.js';
 import type { WorldRoomContext } from './roomContext.js';
 import type { SessionResumeCache } from './sessionResumeCache.js';
 
@@ -64,10 +68,18 @@ export function joinPlayerCore(
 
   const now = Date.now();
   const emptySince = hooks.getEmptySince();
+  let hasActiveDormantTotem = false;
+  for (const t of ctx.placedTotems.values()) {
+    if (!t.tribeId && t.dormantExpiresAt && now < t.dormantExpiresAt) {
+      hasActiveDormantTotem = true;
+      break;
+    }
+  }
   if (
     ctx.playersById.size === 0 &&
     emptySince !== null &&
     now - emptySince >= CONFIG.EMPTY_RESET_GRACE_MS &&
+    !hasActiveDormantTotem &&
     !ctx.tribeManager.hasGraceProtectedOfflineTribes(now, CONFIG.OFFLINE_BASE_GRACE_MS) &&
     !hooks.hasGraceProtectedSoloBuilds(now)
   ) {
@@ -175,6 +187,7 @@ export function joinPlayerCore(
     pvpKills: 0,
     structuresBuilt: 0,
     lastBlueprintDeployAt: 0,
+    hasLoadedBaseThisSession: false,
     isDead: false,
     diedAt: 0,
     killedByText: null,
@@ -247,6 +260,11 @@ export function removePlayerCore(
   const clearedPending = ctx.tribeManager.clearPendingRequestsForPlayer(existing.id);
 
   const applyTribeAndSoloLeavePolicy = () => {
+    if (wasTribeLeader && prevTribeId) {
+      handleHostLeftWithoutDisbandCore(ctx, existing.id, prevTribeId, now);
+      hooks.clearSoloOwnerDisconnected(existing.id);
+      return;
+    }
     if (explicitLeave) {
       if (existing.tribeId) {
         const leaveRes = ctx.tribeManager.leaveTribe(existing, ctx.playersById);
@@ -288,9 +306,9 @@ export function removePlayerCore(
       existing.unlockedSlots,
       existing.hasBackpack
     );
-    const savedTribeId = explicitLeave ? null : prevTribeId;
-    const savedBuildPerm = explicitLeave ? false : hadBuildPermission;
-    const savedLeader = explicitLeave ? false : wasTribeLeader;
+    const savedTribeId = explicitLeave || wasTribeLeader ? null : prevTribeId;
+    const savedBuildPerm = explicitLeave || wasTribeLeader ? false : hadBuildPermission;
+    const savedLeader = false;
     const playerState: SavedPlayerWorldState = {
       ...buildSavedPlayerWorldState(ctx, existing, now),
       tribeId: savedTribeId,
@@ -324,6 +342,7 @@ export function stepPlayersAndWorldCore(
 ): void {
   if (serverTick % 20 === 0) {
     stepResourceRegrowthAndDrops(ctx, now);
+    stepDormantTotemsAndCollapseZonesCore(ctx, now);
   }
 
   ctx.spatialGrid.clear();

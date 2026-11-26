@@ -162,6 +162,7 @@ export function buildDynamicWorldStateSnapshot(ctx: WorldRoomContext) {
     torches: Array.from(ctx.placedTorches.values()),
     walls: Array.from(ctx.placedWalls.values()),
     totems: Array.from(ctx.placedTotems.values()).map((t) => ctx.totemService.serializeTotem(t)),
+    collapseZones: Array.from(ctx.brokenTotemZones.values()),
     structures: Array.from(ctx.placedStructures.values()),
     leaderboard: ctx.getLeaderboardEntries(),
     tribes: ctx.getTribeSummaries()
@@ -307,7 +308,7 @@ export function sendPlayerInventorySync(ctx: WorldRoomContext, player: ActiveWor
     tribeTag: player.tribeTag,
     spawnProtectionRemainingMs: Math.max(0, player.spawnProtectedUntil - now),
     combatRemainingMs: Math.max(0, player.combatUntil - now),
-    blueprintSlot: ctx.blueprintService.getSummary(player, now)
+    blueprintSlot: ctx.getBlueprintSummaryForPlayer(player, now)
   });
 }
 
