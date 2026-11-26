@@ -5,7 +5,6 @@ import websocket from '@fastify/websocket';
 import { CONFIG } from './config/index.js';
 import { getClientCatalogPayload } from './data/items/index.js';
 import { tribeRushAuthService } from './services/AuthService.js';
-import { playerSaveService } from './services/PlayerSaveService.js';
 import { worldPersistenceService } from './services/WorldPersistenceService.js';
 import { webSocketManager } from './websocket/WebSocketManager.js';
 import { SsoExchangeSchema } from './websocket/schemas.js';
@@ -57,19 +56,12 @@ async function main() {
     const onlinePlayers = webSocketManager.getOnlinePlayerCount();
     return {
       status: 'ok',
-      service: 'marble-triberush-server',
-      version: '1.0.0',
       regionId: CONFIG.REGION_ID,
       regionName: CONFIG.REGION_NAME,
       onlinePlayers,
       activePlayers: onlinePlayers,
       activeLobbies: 1,
-      maxPlayers: CONFIG.MAX_PLAYERS,
-      worldSeed: webSocketManager.worldRoom.world.seed,
-      worldSize: CONFIG.WORLD_SIZE,
-      persistenceMode: playerSaveService.getPersistenceMode(),
-      tribesActive: webSocketManager.worldRoom.tribeManager.getTribeCount(),
-      totemsPlaced: webSocketManager.worldRoom.placedTotems.size
+      maxPlayers: CONFIG.MAX_PLAYERS
     };
   };
 
