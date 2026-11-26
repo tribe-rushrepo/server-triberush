@@ -82,3 +82,16 @@ CREATE TABLE IF NOT EXISTS public.triberush_world_state (
 -- Strict RLS: NO public/client read or write policies!
 -- Only the authoritative Render backend using SUPABASE_SERVICE_ROLE_KEY can read/write world state.
 ALTER TABLE public.triberush_world_state ENABLE ROW LEVEL SECURITY;
+
+-- 4. Explicit Role Grants (Required so Supabase `service_role` / `sb_secret_...` never hits 42501)
+--    `service_role` has BYPASSRLS but is NOT a PostgreSQL superuser, so explicit table GRANTs are mandatory.
+GRANT USAGE ON SCHEMA public TO service_role, anon, authenticated;
+
+GRANT ALL ON TABLE public.triberush_profiles TO service_role;
+GRANT SELECT ON TABLE public.triberush_profiles TO anon, authenticated;
+
+GRANT ALL ON TABLE public.triberush_player_saves TO service_role;
+REVOKE ALL ON TABLE public.triberush_player_saves FROM anon, authenticated;
+
+GRANT ALL ON TABLE public.triberush_world_state TO service_role;
+REVOKE ALL ON TABLE public.triberush_world_state FROM anon, authenticated;

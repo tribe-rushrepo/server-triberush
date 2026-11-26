@@ -350,6 +350,7 @@ export function handleSwingCore(
       ctx.placedWalls.delete(wall.id);
       ctx.world.removeBoxCollider('wall', wall.id, wall.x, wall.y, halfW, halfH);
       ctx.spawnGroundDrop('wood', 3, wall.x, wall.y);
+      ctx.markWorldStateDirty();
     }
     const wallPayload = {
       type: 'WALL_HIT',
@@ -394,6 +395,7 @@ export function handleSwingCore(
           ctx.spawnGroundDrop('coal', 4, s.x, s.y);
           ctx.spawnGroundDrop('wood', 2, s.x, s.y);
         }
+        ctx.markWorldStateDirty();
       }
       const structPayload = {
         type: 'STRUCTURE_HIT',
@@ -431,6 +433,7 @@ export function handleSwingCore(
         ctx.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
         ctx.spawnGroundDrop('wood', 8, totem.x, totem.y);
         ctx.spawnGroundDrop('stone', 4, totem.x, totem.y);
+        ctx.markWorldStateDirty();
       }
       const totemPayload = {
         type: 'TOTEM_HIT',
