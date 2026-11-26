@@ -32,7 +32,9 @@ export function handleSwingCore(
 
   const stats = itemDef.combat;
   const now = Date.now();
-  if (now - player.lastSwingAt < stats.cooldownMs) return { ok: false };
+  // Absorb up to 45ms of network arrival jitter while staying strictly server-authoritative
+  const minSwingIntervalMs = Math.max(200, stats.cooldownMs - 45);
+  if (now - player.lastSwingAt < minSwingIntervalMs) return { ok: false };
 
   player.lastSwingAt = now;
   player.swingHand = player.swingHand === 0 ? 1 : 0;
@@ -40,6 +42,7 @@ export function handleSwingCore(
 
   const dirX = Math.cos(player.angle);
   const dirY = Math.sin(player.angle);
+  const resourceReachPad = 12;
   let blockedReason: string | undefined;
 
   // 1. Check Tree Hit inside forward cone
@@ -50,10 +53,11 @@ export function handleSwingCore(
     const dx = tree.x - player.x;
     const dy = tree.y - player.y;
     const dist = Math.hypot(dx, dy);
-    if (dist > stats.reach + tree.trunkRadius) continue;
+    if (dist > stats.reach + tree.trunkRadius + resourceReachPad) continue;
 
     const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
-    if (dot < 0.35) continue;
+    const isPointBlank = dist <= CONFIG.PLAYER_RADIUS + tree.trunkRadius + 18;
+    if (!isPointBlank && dot < 0.15) continue;
 
     if (stats.treeDmg <= 0) {
       blockedReason = 'Requires Wooden Axe or Empty Hand for Trees';
@@ -106,10 +110,11 @@ export function handleSwingCore(
     const dx = rock.x - player.x;
     const dy = rock.y - player.y;
     const dist = Math.hypot(dx, dy);
-    if (dist > stats.reach + rock.radius) continue;
+    if (dist > stats.reach + rock.radius + resourceReachPad) continue;
 
     const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
-    if (dot < 0.35) continue;
+    const isPointBlank = dist <= CONFIG.PLAYER_RADIUS + rock.radius + 18;
+    if (!isPointBlank && dot < 0.15) continue;
 
     if (stats.rockDmg <= 0) {
       blockedReason = 'Requires Wooden Pickaxe';
@@ -159,10 +164,11 @@ export function handleSwingCore(
     const dx = bush.x - player.x;
     const dy = bush.y - player.y;
     const dist = Math.hypot(dx, dy);
-    if (dist > stats.reach + bush.radius) continue;
+    if (dist > stats.reach + bush.radius + resourceReachPad) continue;
 
     const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
-    if (dot < 0.35) continue;
+    const isPointBlank = dist <= CONFIG.PLAYER_RADIUS + bush.radius + 18;
+    if (!isPointBlank && dot < 0.15) continue;
     if (stats.bushDmg <= 0) break;
 
     bush.hp = Math.max(0, bush.hp - stats.bushDmg);

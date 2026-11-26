@@ -333,7 +333,9 @@ describe('2. Server-Authoritative Survival Loop: 32 Max Stack, Stone & Coal Mini
     let snapshotBuf: Buffer | null = null;
     room.setCallbacks({
       onBinarySnapshot: (pid, frame) => {
-        if (pid === 'p-1') snapshotBuf = frame;
+        if (pid === 'p-1' && frame.readUInt8(0) === BINARY_PACKET_SNAPSHOT) {
+          snapshotBuf = frame;
+        }
       },
       onRosterEvent: () => {}
     });
@@ -351,7 +353,7 @@ describe('2. Server-Authoritative Survival Loop: 32 Max Stack, Stone & Coal Mini
     assert.strictEqual(buf.length, SNAPSHOT_HEADER_BYTES + count * SNAPSHOT_PLAYER_STRIDE);
   });
 
-  it('should spawn all 5 wildlife animals in designated habitats, trigger 4s slower-than-player flee on hit, drop raw meats + 50% Cow Leather, and stream 16-byte binary animal snapshots', () => {
+  it('should spawn all 5 wildlife animals in designated habitats, trigger 4s slower-than-player flee on hit, drop raw meats + 60% Cow Leather, and stream 16-byte binary animal snapshots', () => {
     const room = new WorldRoom(20261122);
     const animals = room.animalService.animals;
     assert.ok(animals.length >= 40, 'World should spawn thriving wildlife population');
@@ -436,7 +438,7 @@ describe('2. Server-Authoritative Survival Loop: 32 Max Stack, Stone & Coal Mini
     room.animalService.step(0.05, hitNow + ANIMAL_FLEE_DURATION_MS + 50, [hunter]);
     assert.strictEqual(cow.fleeUntil, 0);
 
-    // Kill Cow with guaranteed leather roll (< 0.5) -> verify both raw_beef AND leather drop!
+    // Kill Cow with guaranteed leather roll (< 0.6) -> verify both raw_beef AND leather drop!
     cow.hp = 10;
     cow.x = hunter.x + 46;
     cow.y = hunter.y;
@@ -464,7 +466,7 @@ describe('2. Server-Authoritative Survival Loop: 32 Max Stack, Stone & Coal Mini
         onBroadcastProximityEvent: () => {}
       },
       hitNow + 5000,
-      0.25 // < 0.50 -> triggers 50% Cow Leather drop!
+      0.25 // < 0.60 -> triggers 60% Cow Leather drop!
     );
     assert.strictEqual(cow.isDead, true);
     assert.ok(drops.some((d) => d.itemId === 'raw_beef' && d.count >= 3 && d.count <= 4));

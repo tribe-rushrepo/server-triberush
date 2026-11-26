@@ -200,10 +200,11 @@ export class SeededWorld {
   ): boolean {
     const nextPos = this.findRandomResourceSpawn(tree.trunkRadius + 14, isBlockedByTerritory);
     if (!nextPos) return false;
-    this.removeNodeBucket(this.treeBuckets, tree, tree.canopyRadius + 90);
+    const margin = Math.max(tree.canopyRadius + 90, tree.trunkRadius + 220);
+    this.removeNodeBucket(this.treeBuckets, tree, margin);
     tree.x = nextPos.x;
     tree.y = nextPos.y;
-    this.insertNodeBucket(this.treeBuckets, tree, tree.canopyRadius + 90);
+    this.insertNodeBucket(this.treeBuckets, tree, margin);
     this.relocatedTreeIds.add(tree.id);
     return true;
   }
@@ -214,10 +215,10 @@ export class SeededWorld {
   ): boolean {
     const nextPos = this.findRandomResourceSpawn(rock.radius + 14, isBlockedByTerritory);
     if (!nextPos) return false;
-    this.removeNodeBucket(this.rockBuckets, rock, rock.radius + 130);
+    this.removeNodeBucket(this.rockBuckets, rock, rock.radius + 220);
     rock.x = nextPos.x;
     rock.y = nextPos.y;
-    this.insertNodeBucket(this.rockBuckets, rock, rock.radius + 130);
+    this.insertNodeBucket(this.rockBuckets, rock, rock.radius + 220);
     this.relocatedRockIds.add(rock.id);
     return true;
   }
@@ -228,10 +229,10 @@ export class SeededWorld {
   ): boolean {
     const nextPos = this.findRandomResourceSpawn(bush.radius + 10, isBlockedByTerritory);
     if (!nextPos) return false;
-    this.removeNodeBucket(this.bushBuckets, bush, bush.radius + 130);
+    this.removeNodeBucket(this.bushBuckets, bush, bush.radius + 220);
     bush.x = nextPos.x;
     bush.y = nextPos.y;
-    this.insertNodeBucket(this.bushBuckets, bush, bush.radius + 130);
+    this.insertNodeBucket(this.bushBuckets, bush, bush.radius + 220);
     this.relocatedBushIds.add(bush.id);
     return true;
   }

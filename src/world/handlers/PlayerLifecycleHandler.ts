@@ -329,10 +329,8 @@ export function stepPlayersAndWorldCore(
     ctx.spatialGrid.insert(p);
   }
 
-  // Step wildlife AI at 10Hz (matching the 10Hz binary animal snapshot cadence)
-  if (serverTick % 2 === 0) {
-    ctx.animalService.step(dt * 2, now, activePlayersScratch);
-  }
+  // Step awake wildlife AI smoothly at 20Hz (cell-dirty spatial grid keeps idle cost near zero)
+  ctx.animalService.step(dt, now, activePlayersScratch);
 
   if (serverTick % 20 === 0 && hasPlayerEventCb) {
     broadcastWatchtowerRadars(ctx);

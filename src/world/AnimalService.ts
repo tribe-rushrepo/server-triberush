@@ -185,7 +185,7 @@ export class AnimalService {
 
     const dirX = Math.cos(attacker.angle);
     const dirY = Math.sin(attacker.angle);
-    const nearby = this.queryNearby(attacker.x, attacker.y, stats.reach + 52);
+    const nearby = this.queryNearby(attacker.x, attacker.y, stats.reach + 84);
     let hits = 0;
 
     for (let i = 0; i < nearby.length; i++) {
@@ -196,7 +196,8 @@ export class AnimalService {
       const dx = animal.x - attacker.x;
       const dy = animal.y - attacker.y;
       const dist = Math.hypot(dx, dy);
-      const maxReach = stats.reach + animal.radius;
+      const reachForgiveness = animal.isMoving || now < animal.fleeUntil ? 26 : 16;
+      const maxReach = stats.reach + animal.radius + reachForgiveness;
       if (dist > maxReach) continue;
 
       const nx = dist > 0.001 ? dx / dist : dirX;
@@ -206,13 +207,14 @@ export class AnimalService {
       const proj = dx * dirX + dy * dirY;
       const perpDist = Math.abs(dx * -dirY + dy * dirX);
       const inSpearCorridor =
-        isSpear && proj > 0 && proj <= maxReach && perpDist <= animal.radius + 20;
-      if (dot < 0.3 && !inSpearCorridor) continue;
+        isSpear && proj > 0 && proj <= maxReach && perpDist <= animal.radius + 24;
+      const isPointBlank = dist <= CONFIG.PLAYER_RADIUS + animal.radius + 22;
+      if (!isPointBlank && dot < 0.05 && !inSpearCorridor) continue;
 
       animal.lastDamagedAt = now;
       animal.hp = Math.max(0, animal.hp - stats.combatDmg);
 
-      const kbSpeed = (stats.knockback || 210) * 0.85;
+      const kbSpeed = (stats.knockback || 210) * 0.42;
       animal.kbVx = nx * kbSpeed;
       animal.kbVy = ny * kbSpeed;
 
@@ -332,8 +334,11 @@ export class AnimalService {
       let moveVy = 0;
 
       if (now < a.fleeUntil) {
-        moveVx = a.fleeDirX * a.fleeSpeed;
-        moveVy = a.fleeDirY * a.fleeSpeed;
+        // Brief 220ms hit-stagger pause so knockback and flee speed never stack to 500 px/s
+        if (now - a.lastDamagedAt >= 220) {
+          moveVx = a.fleeDirX * a.fleeSpeed;
+          moveVy = a.fleeDirY * a.fleeSpeed;
+        }
         a.angle = Math.atan2(a.fleeDirY, a.fleeDirX);
         a.isMoving = true;
       } else {

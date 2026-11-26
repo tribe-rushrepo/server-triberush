@@ -617,19 +617,16 @@ export class WorldRoom {
 
     if (!this.onBroadcastBinarySnapshot) return;
 
-    const sendAnimalsThisTick = this.serverTick % 2 === 0;
     for (const viewer of this.playersById.values()) {
       const nearby = this.spatialGrid.queryNearby(viewer.x, viewer.y, CONFIG.AOI_RADIUS);
       this.onBroadcastBinarySnapshot(viewer.id, this.encodeBinarySnapshot(viewer, nearby, now));
-      if (sendAnimalsThisTick) {
-        const animalFrame = this.animalService.encodeBinaryAnimalSnapshot(
-          viewer.x,
-          viewer.y,
-          this.serverTick,
-          now
-        );
-        this.onBroadcastBinarySnapshot(viewer.id, animalFrame);
-      }
+      const animalFrame = this.animalService.encodeBinaryAnimalSnapshot(
+        viewer.x,
+        viewer.y,
+        this.serverTick,
+        now
+      );
+      this.onBroadcastBinarySnapshot(viewer.id, animalFrame);
     }
   }
 

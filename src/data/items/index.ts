@@ -25,7 +25,7 @@ export const BARE_HANDS_DEF: ItemDefinition = {
   combat: {
     cooldownMs: 560, // Deliberate, balanced bare-hand punching pace
     durationMs: 360,
-    reach: 64,
+    reach: 82,
     treeDmg: 10,
     bushDmg: 10,
     rockDmg: 0,

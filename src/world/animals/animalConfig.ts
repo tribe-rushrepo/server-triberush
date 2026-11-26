@@ -7,7 +7,7 @@ import {
 } from '../../models/types.js';
 
 /**
- * Compact 16-Byte Binary Wildlife Packet Layout (Little-Endian, 10Hz AOI):
+ * Compact 16-Byte Binary Wildlife Packet Layout (Little-Endian, 20Hz AOI):
  * - Header (4 bytes): [0]=packetType(2), [1]=count(<=120), [2..3]=serverTick & 0xffff
  * - Per-Animal Record (16 bytes * count)
  */
@@ -22,7 +22,7 @@ export const ANIMAL_WAKE_RADIUS = 2200;
 export const ANIMAL_MAX_DUCKS = 6;
 export const PIG_SPAWN_RATE = 0.5;
 export const DUCK_SPAWN_RATE = 0.5;
-export const COW_LEATHER_DROP_CHANCE = 0.5;
+export const COW_LEATHER_DROP_CHANCE = 0.6;
 
 export const ANIMAL_GRID_CELL = 512;
 

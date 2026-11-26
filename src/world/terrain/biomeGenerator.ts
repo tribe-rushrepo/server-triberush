@@ -251,7 +251,7 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
     target.trees.push(node);
     target.treesById.set(node.id, node);
     target.addSolidCollider({ kind: 'tree', id: node.id, x, y, radius: trunkRadius });
-    target.registerTreeBucket(node, trunkRadius + 130);
+    target.registerTreeBucket(node, trunkRadius + 220);
   }
 
   // FEATURE 7: Multi-Block Sculpted Stone Rocks (40%) & Coal-Veined Rocks (60%)
@@ -295,7 +295,7 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
     target.rocks.push(node);
     target.rocksById.set(node.id, node);
     target.addSolidCollider({ kind: 'rock', id: node.id, x, y, radius });
-    target.registerRockBucket(node, radius + 130);
+    target.registerRockBucket(node, radius + 220);
   }
 
   // FEATURE 8: 5 Detailed Fruit & Berry Bush Types
@@ -330,7 +330,7 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
     };
     target.bushes.push(node);
     target.bushesById.set(node.id, node);
-    target.registerBushBucket(node, radius + 130);
+    target.registerBushBucket(node, radius + 220);
   }
 
   // FEATURE 9: Wildflowers across 5 distinct flower types
