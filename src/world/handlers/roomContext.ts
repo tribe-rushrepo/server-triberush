@@ -27,7 +27,8 @@ import type { TotemService } from '../TotemService.js';
 import type { TribeManager } from '../TribeManager.js';
 
 export const BINARY_PACKET_SNAPSHOT = 1;
-export const SNAPSHOT_HEADER_BYTES = 10;
+export const SNAPSHOT_HEADER_BYTES = 8;
+export const SNAPSHOT_TRAILER_BYTES = 2;
 export const SNAPSHOT_PLAYER_STRIDE = 18;
 
 export const BUSH_FRUIT_ITEMS: Record<BushKind, ItemId> = {

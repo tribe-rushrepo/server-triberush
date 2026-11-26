@@ -94,11 +94,17 @@ import {
   BINARY_PACKET_SNAPSHOT,
   SNAPSHOT_HEADER_BYTES,
   SNAPSHOT_PLAYER_STRIDE,
+  SNAPSHOT_TRAILER_BYTES,
   type WorldRoomContext
 } from './handlers/roomContext.js';
 import { SessionResumeCache } from './handlers/sessionResumeCache.js';
 
-export { BINARY_PACKET_SNAPSHOT, SNAPSHOT_HEADER_BYTES, SNAPSHOT_PLAYER_STRIDE };
+export {
+  BINARY_PACKET_SNAPSHOT,
+  SNAPSHOT_HEADER_BYTES,
+  SNAPSHOT_PLAYER_STRIDE,
+  SNAPSHOT_TRAILER_BYTES
+};
 
 export class WorldRoom {
   public readonly world: SeededWorld;

@@ -23,6 +23,7 @@ import {
   BINARY_PACKET_SNAPSHOT,
   SNAPSHOT_HEADER_BYTES,
   SNAPSHOT_PLAYER_STRIDE,
+  SNAPSHOT_TRAILER_BYTES,
   WorldRoom
 } from '../src/world/WorldRoom.js';
 import type { PlayerProfileData } from '../src/models/types.js';
@@ -347,10 +348,17 @@ describe('2. Server-Authoritative Survival Loop: 32 Max Stack, Stone & Coal Mini
     assert.strictEqual(buf.readUInt8(0), BINARY_PACKET_SNAPSHOT);
     const count = buf.readUInt8(1);
     assert.ok(count >= 1 && count <= 100);
-    assert.strictEqual(SNAPSHOT_HEADER_BYTES, 10);
-    assert.strictEqual(buf.readUInt16LE(8), 427, 'Binary snapshot header must echo viewer ackSeq');
+    assert.strictEqual(SNAPSHOT_HEADER_BYTES, 8);
     assert.strictEqual(SNAPSHOT_PLAYER_STRIDE, 18);
-    assert.strictEqual(buf.length, SNAPSHOT_HEADER_BYTES + count * SNAPSHOT_PLAYER_STRIDE);
+    assert.strictEqual(
+      buf.readUInt16LE(SNAPSHOT_HEADER_BYTES + count * SNAPSHOT_PLAYER_STRIDE),
+      427,
+      'Binary snapshot trailer must echo viewer ackSeq without shifting 8-byte header'
+    );
+    assert.strictEqual(
+      buf.length,
+      SNAPSHOT_HEADER_BYTES + count * SNAPSHOT_PLAYER_STRIDE + SNAPSHOT_TRAILER_BYTES
+    );
   });
 
   it('should spawn all 5 wildlife animals in designated habitats, trigger 4s slower-than-player flee on hit, drop raw meats + 60% Cow Leather, and stream 16-byte binary animal snapshots', () => {

@@ -44,6 +44,12 @@ describe('Phase 11: Guaranteed Position Sync, Tree-vs-Rock Swing Priority & Rede
     assert.ok(selfRec, 'Viewer must always be present in encoded binary snapshot');
     assert.ok(Math.abs(selfRec.x - 7091.4) < 0.2);
     assert.ok(Math.abs(selfRec.y - 1046.2) < 0.2);
+
+    // Verify backwards compatibility with 8-byte legacy client decoders (offset = 8 + i * 18)
+    assert.strictEqual(frame.readUInt16LE(8), p1.shortId);
+    assert.ok(Math.abs(frame.readFloatLE(10) - 7091.4) < 0.2);
+    assert.ok(Math.abs(frame.readFloatLE(14) - 1046.2) < 0.2);
+    assert.strictEqual(frame.readUInt16LE(8 + 2 * 18), 421);
   });
 
   it('should decode binary animal snapshots cleanly for zero-disconnect USE_JSON_SNAPSHOTS fallback', () => {

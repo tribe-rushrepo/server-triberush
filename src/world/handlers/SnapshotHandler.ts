@@ -15,6 +15,7 @@ import {
   BINARY_PACKET_SNAPSHOT,
   SNAPSHOT_HEADER_BYTES,
   SNAPSHOT_PLAYER_STRIDE,
+  SNAPSHOT_TRAILER_BYTES,
   type WorldRoomContext
 } from './roomContext.js';
 
@@ -468,13 +469,15 @@ export function encodePlayerBinarySnapshot(
   }
   const source: ReadonlyArray<ActiveWorldPlayer> = hasViewer ? nearby : [viewer, ...nearby];
   const count = Math.min(CONFIG.MAX_PLAYERS, source.length);
-  const buf = Buffer.allocUnsafe(SNAPSHOT_HEADER_BYTES + count * SNAPSHOT_PLAYER_STRIDE);
+  const playersBytes = count * SNAPSHOT_PLAYER_STRIDE;
+  const buf = Buffer.allocUnsafe(
+    SNAPSHOT_HEADER_BYTES + playersBytes + SNAPSHOT_TRAILER_BYTES
+  );
 
   buf.writeUInt8(BINARY_PACKET_SNAPSHOT, 0);
   buf.writeUInt8(count, 1);
   buf.writeUInt16LE(viewer.shortId, 2);
   buf.writeUInt32LE(serverTick, 4);
-  buf.writeUInt16LE((viewer.lastProcessedInputSeq ?? 0) & 0xffff, 8);
 
   for (let i = 0; i < count; i++) {
     const p = source[i];
@@ -514,6 +517,9 @@ export function encodePlayerBinarySnapshot(
     buf.writeUInt8(hpPct, offset + 17);
   }
 
+  // Append 2-byte ackSeq trailer AFTER player records so 8-byte legacy clients never byte-shift!
+  buf.writeUInt16LE((viewer.lastProcessedInputSeq ?? 0) & 0xffff, SNAPSHOT_HEADER_BYTES + playersBytes);
+
   return buf;
 }
 
@@ -524,11 +530,12 @@ export function decodeBinarySnapshotToJson(frame: Buffer): Record<string, unknow
     const count = frame.readUInt8(1);
     const selfShortId = frame.readUInt16LE(2);
     const serverTick = frame.readUInt32LE(4);
-    const ackSeq = frame.readUInt16LE(8);
     const maxReadable = Math.min(
       count,
       Math.floor((frame.length - SNAPSHOT_HEADER_BYTES) / SNAPSHOT_PLAYER_STRIDE)
     );
+    const trailerOffset = SNAPSHOT_HEADER_BYTES + maxReadable * SNAPSHOT_PLAYER_STRIDE;
+    const ackSeq = frame.length >= trailerOffset + 2 ? frame.readUInt16LE(trailerOffset) : 0;
     const players = [];
     for (let i = 0; i < maxReadable; i++) {
       const off = SNAPSHOT_HEADER_BYTES + i * SNAPSHOT_PLAYER_STRIDE;
