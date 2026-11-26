@@ -8,7 +8,10 @@ import type {
   WorldPlacedTotem,
   WorldPlacedWall
 } from '../../models/types.js';
-import { findTerritoryObstructionCore } from './TotemLifecycleHandler.js';
+import {
+  findActiveCollapseZoneForPlayer,
+  findTerritoryObstructionCore
+} from './TotemLifecycleHandler.js';
 import { snapGridLine, type WorldRoomContext } from './roomContext.js';
 
 export function handleSaveBlueprintBuildCore(
@@ -18,7 +21,7 @@ export function handleSaveBlueprintBuildCore(
   return {
     ok: false,
     error:
-      'Save & Pack has been removed. Your Tribe Base autosaves automatically; Disband Tribe to pack all builds.'
+      'Save & Pack is automatic: your Tribe Base autosaves into the Tribe Totem when all members go offline for 15 minutes.'
   };
 }
 
@@ -31,35 +34,42 @@ export function handleLoadBlueprintBuildCore(
   const player = ctx.playersById.get(playerId);
   if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
 
-  const slot = ctx.blueprintService.getSlot(player.id);
-  if (!slot) {
-    return { ok: false, error: 'No saved Tribe Base available to load.' };
-  }
-  if (player.hasLoadedBaseThisSession) {
-    return {
-      ok: false,
-      error: 'You already loaded your Tribe Base in this session. Leave and rejoin to load again.'
-    };
-  }
   if (!player.tribeId) {
-    return { ok: false, error: 'Create a Tribe first to deploy your saved Tribe Base.' };
+    return { ok: false, error: 'Join or create a Tribe first to deploy a Tribe Base.' };
   }
   const tribe = ctx.getTribeSummaries().find((t) => t.id === player.tribeId);
-  if (!tribe || tribe.leaderId !== player.id) {
-    return { ok: false, error: 'Only the Tribe Host can load a saved Tribe Base.' };
+  if (!tribe || !ctx.tribeManager.hasBuildPermission(player)) {
+    return {
+      ok: false,
+      error: 'Only the Chief, High Chief, or Chieftains can load the Tribe Base.'
+    };
   }
+
+  const now = Date.now();
   if (
     ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values()) ||
     ctx.totemService.findTotemForOwner(player.id, ctx.placedTotems.values())
   ) {
-    return { ok: false, error: 'Your Tribe Totem is already standing on the map.' };
+    return { ok: false, error: 'Your Tribe Base is already placed on this server.' };
+  }
+  if (findActiveCollapseZoneForPlayer(ctx, player, now)) {
+    return {
+      ok: false,
+      error: 'Your Tribe Totem was broken! Place a replacement Totem inside your 20x20 territory first.'
+    };
   }
 
-  const now = Date.now();
+  if (ctx.tribeManager.isPrimaryChief(player.id, player.tribeId)) {
+    ctx.blueprintService.migrateLegacyOwnerToTribe(player.id, player.tribeId);
+  }
+  const slot = ctx.blueprintService.getSlot(player.tribeId);
+  if (!slot) {
+    return { ok: false, error: 'No saved Tribe Base available in your Tribe Totem.' };
+  }
   if (now < player.combatUntil) {
     return { ok: false, error: 'Cannot deploy a saved base during Combat Mode.' };
   }
-  const cooldownRem = ctx.blueprintService.getDeployCooldownRemainingMs(player.id, now);
+  const cooldownRem = ctx.blueprintService.getDeployCooldownRemainingMs(player.tribeId, now);
   if (cooldownRem > 0) {
     const totalSec = Math.ceil(cooldownRem / 1000);
     const mins = Math.floor(totalSec / 60);
@@ -113,12 +123,12 @@ export function handleLoadBlueprintBuildCore(
     };
   }
 
-  const consumed = ctx.blueprintService.consumeSlot(player.id);
+  const consumed = ctx.blueprintService.consumeSlot(player.tribeId);
   if (!consumed) return { ok: false, error: 'Blueprint slot unavailable.' };
 
   player.lastBlueprintDeployAt = now;
   player.hasLoadedBaseThisSession = true;
-  ctx.blueprintService.recordDeployTimestamp(player.id, now);
+  ctx.blueprintService.recordDeployTimestamp(player.tribeId, now);
 
   const totemX = cx + (typeof consumed.totemDx === 'number' ? consumed.totemDx : 0);
   const totemY = cy + (typeof consumed.totemDy === 'number' ? consumed.totemDy : 0);
@@ -127,7 +137,7 @@ export function handleLoadBlueprintBuildCore(
     tribeId: tribe.id,
     tribeTag: tribe.tag,
     tribeName: tribe.name,
-    ownerId: player.id,
+    ownerId: tribe.leaderId,
     x: totemX,
     y: totemY,
     claimX: cx,
@@ -174,7 +184,7 @@ export function handleLoadBlueprintBuildCore(
       thickness: CONFIG.WALL_THICKNESS,
       hp: CONFIG.WALL_MAX_HP,
       maxHp: CONFIG.WALL_MAX_HP,
-      ownerId: player.id,
+      ownerId: tribe.leaderId,
       tribeId: tribe.id,
       createdAt: now,
       lastDamagedAt: 0
@@ -199,7 +209,9 @@ export function handleLoadBlueprintBuildCore(
         ? CONFIG.HUT_MAX_HP
         : s.kind === 'watchtower'
           ? CONFIG.WATCHTOWER_MAX_HP
-          : CONFIG.CAMPFIRE_MAX_HP;
+          : s.kind === 'cooking_pot'
+            ? CONFIG.COOKING_POT_MAX_HP
+            : CONFIG.CAMPFIRE_MAX_HP;
     const structure: WorldPlacedStructure = {
       id: ctx.nextStructureId(),
       kind: s.kind,
@@ -210,10 +222,11 @@ export function handleLoadBlueprintBuildCore(
       rotationQuarter: s.kind === 'watchtower' ? s.rotationQuarter : 0,
       hp: maxHp,
       maxHp,
-      ownerId: player.id,
+      ownerId: tribe.leaderId,
       tribeId: tribe.id,
       createdAt: now,
-      lastDamagedAt: 0
+      lastDamagedAt: 0,
+      ...(s.kind === 'campfire' || s.kind === 'cooking_pot' ? { litUntil: 0 } : {})
     };
     ctx.placedStructures.set(structure.id, structure);
     ctx.registerStructureColliders(structure);
@@ -249,7 +262,7 @@ export function handleLoadBlueprintBuildCore(
       x: cx + c.dx,
       y: cy + c.dy,
       radius: 25,
-      ownerId: player.id,
+      ownerId: tribe.leaderId,
       ownerTribeId: tribe.id,
       slots: restoredSlots,
       createdAt: now
@@ -277,7 +290,7 @@ export function handleLoadBlueprintBuildCore(
       id: ctx.nextTorchId(),
       x: cx + t.dx,
       y: cy + t.dy,
-      ownerId: player.id,
+      ownerId: tribe.leaderId,
       ownerTribeId: tribe.id,
       createdAt: now
     };
@@ -285,7 +298,6 @@ export function handleLoadBlueprintBuildCore(
     deployedTorches.push(torch);
   }
 
-  // Single batched deploy broadcast instead of 80+ individual global frames!
   ctx.emitRosterEvent({
     type: 'BLUEPRINT_BASE_DEPLOYED',
     totem: serializedTotem,
@@ -295,8 +307,8 @@ export function handleLoadBlueprintBuildCore(
     torches: deployedTorches
   });
 
-  // Keep standing base continuously autosaved while deployed on the map
-  ctx.syncStandingBaseAutosave(player.id, now);
+  // Autosave standing Tribe Base & lock `canLoadBaseNow = false` across ALL online Tribe members!
+  ctx.syncStandingBaseAutosave(tribe.id, now);
   ctx.emitPlayerEvent(player.id, {
     type: 'ACTION_NOTICE',
     message: `Deployed Tribe Base (${CONFIG.TOTEM_SIZE_TILES}x${CONFIG.TOTEM_SIZE_TILES}) with Chest loot restored!`,

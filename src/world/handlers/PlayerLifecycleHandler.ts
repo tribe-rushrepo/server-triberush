@@ -17,8 +17,8 @@ import {
 } from './SnapshotHandler.js';
 import { checkPlayerShelterCore, hasUnpackedSoloBuildsCore } from './TotemHutHandler.js';
 import {
-  handleHostLeftWithoutDisbandCore,
-  stepDormantTotemsAndCollapseZonesCore
+  stepDormantTotemsAndCollapseZonesCore,
+  syncStandingBaseAutosaveCore
 } from './TotemLifecycleHandler.js';
 import type { WorldRoomContext } from './roomContext.js';
 import type { SessionResumeCache } from './sessionResumeCache.js';
@@ -70,7 +70,7 @@ export function joinPlayerCore(
   const emptySince = hooks.getEmptySince();
   let hasActiveDormantTotem = false;
   for (const t of ctx.placedTotems.values()) {
-    if (!t.tribeId && t.dormantExpiresAt && now < t.dormantExpiresAt) {
+    if (t.dormantExpiresAt && now < t.dormantExpiresAt) {
       hasActiveDormantTotem = true;
       break;
     }
@@ -80,7 +80,7 @@ export function joinPlayerCore(
     emptySince !== null &&
     now - emptySince >= CONFIG.EMPTY_RESET_GRACE_MS &&
     !hasActiveDormantTotem &&
-    !ctx.tribeManager.hasGraceProtectedOfflineTribes(now, CONFIG.OFFLINE_BASE_GRACE_MS) &&
+    !ctx.tribeManager.hasGraceProtectedOfflineTribes(now, CONFIG.DORMANT_TOTEM_DURATION_MS) &&
     !hooks.hasGraceProtectedSoloBuilds(now)
   ) {
     hooks.resetWorldToDayOne();
@@ -203,13 +203,27 @@ export function joinPlayerCore(
   ctx.playersById.set(player.id, player);
   ctx.playersByShortId.set(player.shortId, player);
 
-  let tribeRestored = false;
-  if (stateSource?.tribeId) {
-    tribeRestored = ctx.tribeManager.rejoinTribeById(
-      player,
-      stateSource.tribeId,
-      Boolean(stateSource.hadBuildPermission)
+  const { restored: tribeRestored } = ctx.tribeManager.rejoinTribeOnLogin(
+    player,
+    stateSource?.tribeId,
+    now
+  );
+  if (player.tribeId) {
+    if (ctx.tribeManager.isPrimaryChief(player.id, player.tribeId)) {
+      ctx.blueprintService.migrateLegacyOwnerToTribe(player.id, player.tribeId);
+    }
+    const tribeTotem = ctx.totemService.findTotemForTribe(
+      player.tribeId,
+      ctx.placedTotems.values()
     );
+    if (tribeTotem && tribeTotem.dormantExpiresAt) {
+      tribeTotem.dormantExpiresAt = null;
+      tribeTotem.dormantOwnerId = null;
+      ctx.emitRosterEvent({
+        type: 'TOTEM_UPDATED',
+        totem: ctx.totemService.serializeTotem(tribeTotem)
+      });
+    }
   }
 
   ctx.emitRosterEvent({
@@ -250,9 +264,6 @@ export function removePlayerCore(
 
   const wasInCombat = !existing.isDead && now < existing.combatUntil;
   const prevTribeId = existing.tribeId;
-  const wasTribeLeader = prevTribeId
-    ? ctx.tribeManager.isTribeLeader(existing.id, prevTribeId)
-    : false;
   const hadBuildPermission = prevTribeId ? ctx.tribeManager.hasBuildPermission(existing) : false;
 
   ctx.playersById.delete(playerId);
@@ -260,28 +271,34 @@ export function removePlayerCore(
   const clearedPending = ctx.tribeManager.clearPendingRequestsForPlayer(existing.id);
 
   const applyTribeAndSoloLeavePolicy = () => {
-    if (wasTribeLeader && prevTribeId) {
-      handleHostLeftWithoutDisbandCore(ctx, existing.id, prevTribeId, now);
+    if (prevTribeId) {
+      const { allOfflineNow } = ctx.tribeManager.handleMemberDisconnected(
+        existing.id,
+        prevTribeId,
+        ctx.playersById,
+        now
+      );
+      if (allOfflineNow) {
+        const totem = ctx.totemService.findTotemForTribe(prevTribeId, ctx.placedTotems.values());
+        if (totem) {
+          totem.dormantExpiresAt = now + CONFIG.DORMANT_TOTEM_DURATION_MS;
+          syncStandingBaseAutosaveCore(ctx, prevTribeId, now);
+          ctx.emitRosterEvent({
+            type: 'TOTEM_UPDATED',
+            totem: ctx.totemService.serializeTotem(totem)
+          });
+        }
+      }
+      ctx.broadcastTribeSync();
       hooks.clearSoloOwnerDisconnected(existing.id);
       return;
     }
+
     if (explicitLeave) {
-      if (existing.tribeId) {
-        const leaveRes = ctx.tribeManager.leaveTribe(existing, ctx.playersById);
-        if (leaveRes.disbandedTribeId) {
-          ctx.purgeTribeBuilds(leaveRes.disbandedTribeId);
-        }
-        ctx.broadcastTribeSync();
-      }
       ctx.purgeSoloOwnerBuilds(existing.id);
       hooks.clearSoloOwnerDisconnected(existing.id);
-    } else {
-      if (prevTribeId) {
-        ctx.tribeManager.handleMemberDisconnected(existing.id, prevTribeId, ctx.playersById, now);
-        ctx.broadcastTribeSync();
-      } else if (hasUnpackedSoloBuildsCore(ctx, existing.id)) {
-        hooks.markSoloOwnerDisconnected(existing.id, now);
-      }
+    } else if (hasUnpackedSoloBuildsCore(ctx, existing.id)) {
+      hooks.markSoloOwnerDisconnected(existing.id, now);
     }
   };
 
@@ -306,9 +323,11 @@ export function removePlayerCore(
       existing.unlockedSlots,
       existing.hasBackpack
     );
-    const savedTribeId = explicitLeave || wasTribeLeader ? null : prevTribeId;
-    const savedBuildPerm = explicitLeave || wasTribeLeader ? false : hadBuildPermission;
-    const savedLeader = false;
+    const savedTribeId = prevTribeId;
+    const savedBuildPerm = hadBuildPermission;
+    const savedLeader = Boolean(
+      prevTribeId && ctx.tribeManager.isPrimaryChief(existing.id, prevTribeId)
+    );
     const playerState: SavedPlayerWorldState = {
       ...buildSavedPlayerWorldState(ctx, existing, now),
       tribeId: savedTribeId,
@@ -417,7 +436,39 @@ export function stepPlayersAndWorldCore(
     ctx.spatialGrid.insert(p);
   }
 
-  ctx.animalService.step(dt, now, activePlayersScratch);
+  ctx.animalService.step(dt, now, activePlayersScratch, {
+    dayPhase: ctx.getDayCycleSnapshot().phase,
+    playersById: ctx.playersById,
+    groundDrops: ctx.groundDrops,
+    callbacks: {
+      onPredatorAttackPlayer: (predator, victim, damage, causeText) => {
+        ctx.combatService.applyWildlifeAttackDamage(predator, victim, damage, causeText, {
+          onSpawnDrop: (itemId, count, ox, oy) => ctx.spawnGroundDrop(itemId, count, ox, oy),
+          onBroadcastProximityEvent: (x, y, payload) =>
+            ctx.broadcastProximityEvent(x, y, payload),
+          onBroadcastGlobalEvent: (payload) => ctx.emitRosterEvent(payload),
+          onSendPlayerEvent: (pid, payload) => ctx.emitPlayerEvent(pid, payload),
+          onSyncInventory: (v) => ctx.syncPlayerInventory(v),
+          onPlayerDied: (v) => {
+            ctx.clearPlayerInventoryPersistence(v.id);
+            ctx.clearSessionResume(v.id);
+          }
+        });
+      },
+      onCrowStealDrop: (_crow, drop) => {
+        if (ctx.groundDrops.delete(drop.id)) {
+          ctx.emitRosterEvent({
+            type: 'DROP_COLLECTED',
+            dropId: drop.id,
+            collectorShortId: 0
+          });
+        }
+      },
+      onCrowDropStolenItem: (_crow, itemId, count, x, y) => {
+        ctx.spawnGroundDrop(itemId, count, x, y, x, y, false);
+      }
+    }
+  });
 
   if (serverTick % 20 === 0 && hasPlayerEventCb) {
     broadcastWatchtowerRadars(ctx);

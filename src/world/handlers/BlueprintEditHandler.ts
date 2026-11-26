@@ -12,6 +12,7 @@ import type {
   WorldPlacedWall
 } from '../../models/types.js';
 import { placeBuildableEntityCore } from './BuildingHandler.js';
+import { syncTribeBlueprintToOnlineMembers } from './TotemLifecycleHandler.js';
 import { snapGridLine, snapTileCenter, type WorldRoomContext } from './roomContext.js';
 
 export function handleBlueprintPlaceBuildCore(
@@ -37,13 +38,23 @@ export function handleBlueprintPlaceBuildCore(
   if (ctx.countPlayerItem(player, 'blueprint') < 1) {
     return { ok: false, error: 'Hold a Base Blueprint to build structures.' };
   }
+  if (!player.tribeId) {
+    return { ok: false, error: 'Create or join a Tribe before building on the Blueprint.' };
+  }
+  if (!ctx.tribeManager.hasBuildPermission(player)) {
+    return {
+      ok: false,
+      error: 'Only the Chief, High Chief, or Chieftains can build on the Blueprint.'
+    };
+  }
 
   const itemDef = getItemDef(itemId);
   if (!itemDef || !itemDef.placeable) {
     return { ok: false, error: 'Invalid buildable item.' };
   }
 
-  const storedCount = ctx.blueprintService.getStoredBuildCount(player.id, itemDef.id);
+  const vaultKey = player.tribeId;
+  const storedCount = ctx.blueprintService.getStoredBuildCount(vaultKey, itemDef.id);
   const useStored = storedCount > 0;
 
   if (itemDef.id === 'tribe_totem' && !useStored) {
@@ -51,7 +62,7 @@ export function handleBlueprintPlaceBuildCore(
     if (!bpSummary.totemAvailableToCraft) {
       return {
         ok: false,
-        error: 'You already have a Tribe Totem placed or saved. Load your saved base instead.'
+        error: 'Your Tribe already has a Totem placed or saved. Load Base instead.'
       };
     }
   }
@@ -80,7 +91,7 @@ export function handleBlueprintPlaceBuildCore(
     rotationQuarter,
     () => {
       if (useStored) {
-        ctx.blueprintService.consumeStoredBuild(player.id, itemDef.id);
+        ctx.blueprintService.consumeStoredBuild(vaultKey, itemDef.id);
       } else if (itemDef.recipe) {
         for (const cost of itemDef.recipe.costs) {
           ctx.deductPlayerItem(player, cost.itemId, cost.count);
@@ -90,6 +101,7 @@ export function handleBlueprintPlaceBuildCore(
   );
 
   if (!res.ok) return { ok: false, error: res.error };
+  syncTribeBlueprintToOnlineMembers(ctx, vaultKey);
   return {
     ok: true,
     usedStored: useStored,
@@ -170,7 +182,9 @@ export function handleBlueprintRemoveEntityCore(
         ? 'Circular Hut'
         : s.kind === 'watchtower'
           ? 'Wooden Watchtower'
-          : 'Campfire';
+          : s.kind === 'cooking_pot'
+            ? 'Cooking Pot'
+            : 'Campfire';
   } else if (targetKind === 'chest') {
     const chest = ctx.placedChests.get(targetId);
     if (!chest) return { ok: false, error: 'Chest not found.' };
@@ -219,20 +233,23 @@ export function handleBlueprintRemoveEntityCore(
   } else if (targetKind === 'totem') {
     return {
       ok: false,
-      error: 'Tribe Totem cannot be removed once placed. Disband the Tribe to pack all builds.'
+      error: 'Tribe Totem cannot be removed once placed.'
     };
   }
 
   if (!mappedItemId) return { ok: false, error: 'Unsupported build type.' };
 
-  const activeTotem = ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values());
-  const hostOwnerId = activeTotem?.ownerId || player.id;
-  const nextCount = ctx.blueprintService.addStoredBuild(player.id, mappedItemId, 1);
-  ctx.syncStandingBaseAutosave(hostOwnerId);
-  ctx.syncPlayerInventory(player);
+  const vaultKey = player.tribeId || player.id;
+  const nextCount = ctx.blueprintService.addStoredBuild(vaultKey, mappedItemId, 1);
+  ctx.syncStandingBaseAutosave(vaultKey);
+  if (player.tribeId) {
+    syncTribeBlueprintToOnlineMembers(ctx, player.tribeId);
+  } else {
+    ctx.syncPlayerInventory(player);
+  }
   ctx.emitPlayerEvent(player.id, {
     type: 'ACTION_NOTICE',
-    message: `Stored ${label} in Blueprint (${nextCount}x)`,
+    message: `Stored ${label} in Tribe Totem (${nextCount}x)`,
     x: Math.round(entityX),
     y: Math.round(entityY)
   });
@@ -266,7 +283,7 @@ export function handleBlueprintRotateEntityCore(
     s.rotationQuarter = ((s.rotationQuarter + 1) & 3) as RotationQuarter;
     ctx.emitRosterEvent({ type: 'STRUCTURE_PLACED', structure: s });
     const sTotem = ctx.totemService.findTotemForTribe(s.tribeId ?? player.tribeId, ctx.placedTotems.values());
-    ctx.syncStandingBaseAutosave(sTotem?.ownerId || s.ownerId);
+    ctx.syncStandingBaseAutosave(sTotem?.tribeId || sTotem?.ownerId || s.ownerId);
     return { ok: true };
   }
 
@@ -311,7 +328,7 @@ export function handleBlueprintRotateEntityCore(
     halfH: newHalfH
   });
   ctx.emitRosterEvent({ type: 'WALL_PLACED', wall });
-  ctx.syncStandingBaseAutosave(tribeTotem?.ownerId || wall.ownerId);
+  ctx.syncStandingBaseAutosave(tribeTotem?.tribeId || tribeTotem?.ownerId || wall.ownerId);
   return { ok: true };
 }
 
@@ -337,7 +354,7 @@ export function handleBlueprintMoveEntityCore(
   if (targetKind === 'totem') {
     return {
       ok: false,
-      error: 'Tribe Totem cannot be moved once placed. Disband the Tribe to pack all builds.'
+      error: 'Tribe Totem cannot be moved once placed.'
     };
   }
 
@@ -418,7 +435,7 @@ export function handleBlueprintMoveEntityCore(
       halfH: newHalfH
     });
     ctx.emitRosterEvent({ type: 'WALL_PLACED', wall });
-    ctx.syncStandingBaseAutosave(tribeTotem.ownerId);
+    ctx.syncStandingBaseAutosave(tribeTotem.tribeId || tribeTotem.ownerId);
     return { ok: true };
   }
 
@@ -476,7 +493,7 @@ export function handleBlueprintMoveEntityCore(
     }
     ctx.registerStructureColliders(s);
     ctx.emitRosterEvent({ type: 'STRUCTURE_PLACED', structure: s });
-    ctx.syncStandingBaseAutosave(tribeTotem.ownerId);
+    ctx.syncStandingBaseAutosave(tribeTotem.tribeId || tribeTotem.ownerId);
     return { ok: true };
   }
 
@@ -531,7 +548,7 @@ export function handleBlueprintMoveEntityCore(
         ownerTribeId: chest.ownerTribeId
       }
     });
-    ctx.syncStandingBaseAutosave(tribeTotem.ownerId);
+    ctx.syncStandingBaseAutosave(tribeTotem.tribeId || tribeTotem.ownerId);
     return { ok: true };
   }
 
@@ -555,7 +572,7 @@ export function handleBlueprintMoveEntityCore(
     torch.x = placeX;
     torch.y = placeY;
     ctx.emitRosterEvent({ type: 'TORCH_PLACED', torch });
-    ctx.syncStandingBaseAutosave(tribeTotem.ownerId);
+    ctx.syncStandingBaseAutosave(tribeTotem.tribeId || tribeTotem.ownerId);
     return { ok: true };
   }
 

@@ -174,6 +174,33 @@ export const BUILDABLE_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     }
   },
   {
+    id: 'cooking_pot',
+    name: 'Cooking Pot',
+    category: 'Build',
+    maxStack: 4,
+    iconKey: 'cooking_pot',
+    handStyle: 'held_item',
+    placeable: {
+      kind: 'cooking_pot',
+      maxDistance: 180,
+      tilesW: 2,
+      tilesH: 2,
+      rotatable: false,
+      maxHp: 300,
+      requiresTotem: true,
+      lightRadius: 420
+    },
+    recipe: {
+      costs: [
+        { itemId: 'clay', count: 15 },
+        { itemId: 'stone', count: 5 },
+        { itemId: 'coal', count: 7 }
+      ],
+      outputCount: 1,
+      station: 'hand'
+    }
+  },
+  {
     id: 'blueprint',
     name: 'Base Blueprint',
     category: 'Build',

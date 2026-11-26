@@ -33,7 +33,7 @@ export interface ItemRecipeConfig {
 }
 
 export interface ItemPlaceableConfig {
-  kind: 'chest' | 'torch' | 'wall' | 'totem' | 'hut' | 'watchtower' | 'campfire';
+  kind: 'chest' | 'torch' | 'wall' | 'totem' | 'hut' | 'watchtower' | 'campfire' | 'cooking_pot';
   maxDistance: number;
   radius?: number;
   chestSlots?: number;

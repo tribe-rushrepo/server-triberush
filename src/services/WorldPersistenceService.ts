@@ -203,7 +203,11 @@ export function serializeWorldRoom(
       __v: 1,
       savedAt: now,
       counters: { ...meta.counters },
-      tribesState: room.tribeManager.exportPersistedState(),
+      tribesState: room.tribeManager.exportPersistedState((tribeId) => ({
+        vaultSlot: room.blueprintService.getSlot(tribeId),
+        storedBuilds: room.blueprintService.getStoredBuilds(tribeId),
+        lastDeployAt: room.blueprintService.getLastDeployTimestamp(tribeId)
+      })),
       offlineSoloOwners: Array.from(meta.offlineSoloOwners.entries()),
       totems: Array.from(room.placedTotems.values()).map((t) => ({
         ...t,
@@ -229,7 +233,13 @@ export function hydrateWorldRoomFromRow(
   room.resetWorldToDayOne(validSeed);
 
   const state = (row.state_json || {}) as Partial<PersistedWorldStateJson>;
-  room.tribeManager.importPersistedState(state.tribesState, bootNow);
+  room.tribeManager.importPersistedState(
+    state.tribesState,
+    bootNow,
+    (tribeId, slot, lastDeployAt, storedBuilds) => {
+      room.blueprintService.hydrateOwnerState(tribeId, slot, lastDeployAt, storedBuilds);
+    }
+  );
 
   let maxTotemId = 0;
   if (Array.isArray(state.totems)) {
@@ -326,7 +336,9 @@ export function hydrateWorldRoomFromRow(
       if (!raw || typeof raw.id !== 'number') continue;
       if (raw.tribeId && !room.tribeManager.hasTribe(raw.tribeId)) continue;
       const kind: StructureKind =
-        raw.kind === 'hut' || raw.kind === 'watchtower' ? raw.kind : 'campfire';
+        raw.kind === 'hut' || raw.kind === 'watchtower' || raw.kind === 'cooking_pot'
+          ? raw.kind
+          : 'campfire';
       const rot = ((Number(raw.rotationQuarter) || 0) & 3) as RotationQuarter;
       const structure: WorldPlacedStructure = {
         id: Math.floor(raw.id),
@@ -341,7 +353,8 @@ export function hydrateWorldRoomFromRow(
         ownerId: String(raw.ownerId || ''),
         tribeId: raw.tribeId ? String(raw.tribeId) : null,
         createdAt: Number(raw.createdAt) || bootNow,
-        lastDamagedAt: 0
+        lastDamagedAt: 0,
+        litUntil: typeof raw.litUntil === 'number' ? raw.litUntil : 0
       };
       room.placedStructures.set(structure.id, structure);
       if (structure.id > maxStructureId) maxStructureId = structure.id;

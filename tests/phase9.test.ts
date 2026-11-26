@@ -108,14 +108,16 @@ describe('5. Phase 9: Exact-Count Drop Slider, Reconnect Session Resume, Batched
     assert.strictEqual(room.handleBlueprintPlaceBuild('bat-host', 'tribe_totem', 12800, 12800).ok, true);
     assert.strictEqual(room.handleBlueprintPlaceBuild('bat-host', 'wooden_wall', 12864, 12736, 'h').ok, true);
     assert.strictEqual(room.handleBlueprintPlaceBuild('bat-host', 'wooden_chest', 12896, 12896).ok, true);
-    assert.strictEqual(room.handleDisbandTribe('bat-host').ok, true);
 
     room.removePlayer('bat-host', { explicitLeave: true });
+    room.sweepOfflineBases(Date.now() + 16 * 60_000);
+    assert.strictEqual(room.placedTotems.size, 0);
+
     const rejoinedHost = room.joinPlayer(makeExplorer('bat-host', 'BatchHost')).player!;
     rejoinedHost.spawnProtectedUntil = 0;
     rejoinedHost.x = 12800;
     rejoinedHost.y = 12800;
-    assert.strictEqual(room.handleCreateTribe('bat-host', 'Batch Clan', 'BTCH').ok, true);
+    assert.strictEqual(rejoinedHost.tribeTag, 'BTCH');
     for (const t of room.world.trees) if (Math.abs(t.x - 12800) < 900 && Math.abs(t.y - 12800) < 900) t.destroyedAt = 1;
     for (const rk of room.world.rocks) if (Math.abs(rk.x - 12800) < 900 && Math.abs(rk.y - 12800) < 900) rk.destroyedAt = 1;
     for (const b of room.world.bushes) if (Math.abs(b.x - 12800) < 900 && Math.abs(b.y - 12800) < 900) b.destroyedAt = 1;

@@ -3,7 +3,9 @@ import type { ItemCombatConfig } from '../data/items/index.js';
 import type {
   ActiveWorldPlayer,
   AnimalKind,
-  WorldAnimalEntity
+  DayPhaseName,
+  WorldAnimalEntity,
+  WorldGroundDrop
 } from '../models/types.js';
 import type { SeededWorld } from './SeededWorld.js';
 import {
@@ -22,8 +24,10 @@ import {
   PIG_SPAWN_RATE,
   encodeBinaryAnimalSnapshotBuffer,
   type AnimalCombatCallbacks,
-  type AnimalSpeciesSpec
+  type AnimalSpeciesSpec,
+  type AnimalStepCallbacks
 } from './animals/animalConfig.js';
+import { stepPredatorOrBirdEntity } from './animals/predatorAndBirdAi.js';
 import { spawnInitialWildlifeEntities } from './animals/animalSpawner.js';
 
 export {
@@ -79,7 +83,7 @@ export class AnimalService {
     this.lastCellByAnimalId.clear();
     for (let i = 0; i < this.animals.length; i++) {
       const a = this.animals[i];
-      if (a.isDead) continue;
+      if (a.isDead || a.isHiddenByCycle) continue;
       const cx = Math.max(0, Math.min(this.gridCols - 1, Math.floor(a.x / ANIMAL_GRID_CELL)));
       const cy = Math.max(0, Math.min(this.gridCols - 1, Math.floor(a.y / ANIMAL_GRID_CELL)));
       const key = this.bucketKey(cx, cy);
@@ -107,7 +111,7 @@ export class AnimalService {
         if (!list) continue;
         for (let i = 0; i < list.length; i++) {
           const a = list[i];
-          if (a.isDead) continue;
+          if (a.isDead || a.isHiddenByCycle) continue;
           const dx = a.x - x;
           const dy = a.y - y;
           if (dx * dx + dy * dy <= rSq) {
@@ -190,7 +194,8 @@ export class AnimalService {
 
     for (let i = 0; i < nearby.length; i++) {
       const animal = nearby[i];
-      if (animal.isDead) continue;
+      if (animal.isDead || animal.isHiddenByCycle) continue;
+      if ((animal.kind === 'sparrow' || animal.kind === 'crow') && animal.isAirborne) continue;
       if (now - animal.lastDamagedAt < CONFIG.HIT_IFRAME_MS) continue;
 
       const dx = animal.x - attacker.x;
@@ -203,7 +208,7 @@ export class AnimalService {
       const nx = dist > 0.001 ? dx / dist : dirX;
       const ny = dist > 0.001 ? dy / dist : dirY;
       const dot = nx * dirX + ny * dirY;
-      const isSpear = weaponId === 'wooden_spear';
+      const isSpear = weaponId === 'wooden_spear' || weaponId === 'stone_spear';
       const proj = dx * dirX + dy * dirY;
       const perpDist = Math.abs(dx * -dirY + dy * dirX);
       const inSpearCorridor =
@@ -218,10 +223,19 @@ export class AnimalService {
       animal.kbVx = nx * kbSpeed;
       animal.kbVy = ny * kbSpeed;
 
-      animal.fleeUntil = now + ANIMAL_FLEE_DURATION_MS;
-      animal.fleeDirX = nx;
-      animal.fleeDirY = ny;
-      animal.angle = Math.atan2(ny, nx);
+      if (animal.kind === 'wolf' || animal.kind === 'lion') {
+        animal.aggroTargetId = attacker.id;
+        if (animal.kind === 'lion') {
+          animal.lionSneakReady = false;
+          animal.lionSpotted = true;
+        }
+        animal.angle = Math.atan2(-ny, -nx);
+      } else {
+        animal.fleeUntil = now + ANIMAL_FLEE_DURATION_MS;
+        animal.fleeDirX = nx;
+        animal.fleeDirY = ny;
+        animal.angle = Math.atan2(ny, nx);
+      }
       animal.isMoving = true;
 
       const killed = animal.hp <= 0;
@@ -248,14 +262,32 @@ export class AnimalService {
         animal.respawnAt = now + ANIMAL_RESPAWN_MS;
         animal.fleeUntil = 0;
         animal.isMoving = false;
+        animal.isAirborne = false;
+        animal.aggroTargetId = null;
+        animal.lionSneakReady = false;
+        animal.lionSpotted = false;
         animal.kbVx = 0;
         animal.kbVy = 0;
 
+        if (animal.carriedItemId && (animal.carriedItemCount || 0) > 0) {
+          callbacks.onSpawnDrop(
+            animal.carriedItemId,
+            animal.carriedItemCount || 1,
+            animal.x,
+            animal.y
+          );
+          animal.carriedItemId = null;
+          animal.carriedItemCount = 0;
+        }
+        animal.targetDropId = null;
+
         const spec = ANIMAL_SPECIES[animal.kind];
-        const meatCount =
-          spec.meatMin +
-          Math.floor(Math.random() * (spec.meatMax - spec.meatMin + 1));
-        callbacks.onSpawnDrop(spec.meatItem, meatCount, animal.x, animal.y);
+        if (spec.meatMax > 0 && spec.meatItem) {
+          const meatCount =
+            spec.meatMin +
+            Math.floor(Math.random() * (spec.meatMax - spec.meatMin + 1));
+          callbacks.onSpawnDrop(spec.meatItem, meatCount, animal.x, animal.y);
+        }
 
         if (spec.leatherChance > 0) {
           const roll =
@@ -266,11 +298,21 @@ export class AnimalService {
           }
         }
 
+        const fRoll =
+          typeof featherRollOverride === 'number' ? featherRollOverride : Math.random();
         if (animal.kind === 'chicken') {
-          const roll =
-            typeof featherRollOverride === 'number' ? featherRollOverride : Math.random();
-          if (roll < CONFIG.CHICKEN_FEATHER_DROP_CHANCE) {
+          if (fRoll < CONFIG.CHICKEN_FEATHER_DROP_CHANCE) {
             const featherCount = 1 + Math.floor(Math.random() * 4);
+            callbacks.onSpawnDrop('feather', featherCount, animal.x, animal.y);
+          }
+        } else if (animal.kind === 'sparrow') {
+          if (fRoll < CONFIG.SPARROW_FEATHER_DROP_CHANCE) {
+            const featherCount = 2 + Math.floor(Math.random() * 2); // 2-3 feathers (70%)
+            callbacks.onSpawnDrop('feather', featherCount, animal.x, animal.y);
+          }
+        } else if (animal.kind === 'crow') {
+          if (fRoll < CONFIG.CROW_FEATHER_DROP_CHANCE) {
+            const featherCount = 4 + Math.floor(Math.random() * 3); // 4-6 feathers (80%)
             callbacks.onSpawnDrop('feather', featherCount, animal.x, animal.y);
           }
         }
@@ -288,24 +330,61 @@ export class AnimalService {
   public step(
     dt: number,
     now: number,
-    activePlayers: ReadonlyArray<ActiveWorldPlayer>
+    activePlayers: ReadonlyArray<ActiveWorldPlayer>,
+    stepCtx?: {
+      dayPhase?: DayPhaseName;
+      playersById?: ReadonlyMap<string, ActiveWorldPlayer>;
+      groundDrops?: ReadonlyMap<number, WorldGroundDrop>;
+      callbacks?: AnimalStepCallbacks;
+    }
   ): void {
     const wakeSq = ANIMAL_WAKE_RADIUS * ANIMAL_WAKE_RADIUS;
     const kbDecay = Math.exp(-CONFIG.KNOCKBACK_DAMPING * dt);
+    const dayPhase: DayPhaseName = stepCtx?.dayPhase ?? 'DAYTIME';
+    const claimedDropIds = new Set<number>();
     let anyMoved = false;
+    let visibilityChanged = false;
 
     for (let i = 0; i < this.animals.length; i++) {
       const a = this.animals[i];
 
       if (a.isDead) {
         if (a.respawnAt !== null && now >= a.respawnAt) {
-          this.respawnAnimal(a, now);
+          this.respawnAnimal(a, now, dayPhase);
           anyMoved = true;
+          visibilityChanged = true;
         }
         continue;
       }
 
-      let awake = now < a.fleeUntil || Math.abs(a.kbVx) > 2 || Math.abs(a.kbVy) > 2;
+      const isPhase13Species =
+        a.kind === 'wolf' || a.kind === 'lion' || a.kind === 'sparrow' || a.kind === 'crow';
+
+      if (a.kind === 'wolf' || a.kind === 'lion') {
+        const shouldHide =
+          a.kind === 'wolf'
+            ? dayPhase !== 'NIGHTTIME'
+            : dayPhase !== 'DAYTIME' && dayPhase !== 'SUNRISE';
+        if (Boolean(a.isHiddenByCycle) !== shouldHide) {
+          visibilityChanged = true;
+          if (shouldHide) {
+            a.isHiddenByCycle = true;
+            a.aggroTargetId = null;
+            a.lionSneakReady = false;
+            a.lionSpotted = false;
+            a.isMoving = false;
+            continue;
+          }
+        } else if (shouldHide) {
+          continue;
+        }
+      }
+
+      let awake =
+        now < a.fleeUntil ||
+        Boolean(a.carriedItemId) ||
+        Math.abs(a.kbVx) > 2 ||
+        Math.abs(a.kbVy) > 2;
       if (!awake) {
         for (let pIdx = 0; pIdx < activePlayers.length; pIdx++) {
           const p = activePlayers[pIdx];
@@ -328,6 +407,23 @@ export class AnimalService {
       if (Math.hypot(a.kbVx, a.kbVy) < 4) {
         a.kbVx = 0;
         a.kbVy = 0;
+      }
+
+      if (isPhase13Species) {
+        const moved = stepPredatorOrBirdEntity({
+          world: this.world,
+          animal: a,
+          dt,
+          now,
+          dayPhase,
+          activePlayers,
+          playersById: stepCtx?.playersById,
+          groundDrops: stepCtx?.groundDrops,
+          claimedDropIds,
+          callbacks: stepCtx?.callbacks
+        });
+        if (moved) anyMoved = true;
+        continue;
       }
 
       let moveVx = 0;
@@ -453,21 +549,23 @@ export class AnimalService {
       }
     }
 
-    let gridDirty = false;
-    for (let i = 0; i < this.animals.length; i++) {
-      const a = this.animals[i];
-      if (a.isDead) {
-        if (this.lastCellByAnimalId.has(a.id)) {
+    let gridDirty = visibilityChanged;
+    if (!gridDirty) {
+      for (let i = 0; i < this.animals.length; i++) {
+        const a = this.animals[i];
+        if (a.isDead || a.isHiddenByCycle) {
+          if (this.lastCellByAnimalId.has(a.id)) {
+            gridDirty = true;
+            break;
+          }
+          continue;
+        }
+        const cx = Math.max(0, Math.min(this.gridCols - 1, Math.floor(a.x / ANIMAL_GRID_CELL)));
+        const cy = Math.max(0, Math.min(this.gridCols - 1, Math.floor(a.y / ANIMAL_GRID_CELL)));
+        if (this.lastCellByAnimalId.get(a.id) !== this.bucketKey(cx, cy)) {
           gridDirty = true;
           break;
         }
-        continue;
-      }
-      const cx = Math.max(0, Math.min(this.gridCols - 1, Math.floor(a.x / ANIMAL_GRID_CELL)));
-      const cy = Math.max(0, Math.min(this.gridCols - 1, Math.floor(a.y / ANIMAL_GRID_CELL)));
-      if (this.lastCellByAnimalId.get(a.id) !== this.bucketKey(cx, cy)) {
-        gridDirty = true;
-        break;
       }
     }
     if (gridDirty || anyMoved) {
@@ -514,7 +612,7 @@ export class AnimalService {
     a.wanderTargetY = Math.max(pad, Math.min(this.world.size - pad, a.y + Math.sin(ang) * stepDist));
   }
 
-  private respawnAnimal(a: WorldAnimalEntity, now: number): void {
+  private respawnAnimal(a: WorldAnimalEntity, now: number, dayPhase: DayPhaseName = 'DAYTIME'): void {
     const spec = ANIMAL_SPECIES[a.kind];
     a.hp = spec.maxHp;
     a.maxHp = spec.maxHp;
@@ -524,6 +622,20 @@ export class AnimalService {
     a.kbVx = 0;
     a.kbVy = 0;
     a.isMoving = false;
+    a.aggroTargetId = null;
+    a.lionSneakReady = false;
+    a.lionSpotted = false;
+    a.carriedItemId = null;
+    a.carriedItemCount = 0;
+    a.targetDropId = null;
+    if (a.kind === 'wolf') {
+      a.isHiddenByCycle = dayPhase !== 'NIGHTTIME';
+    } else if (a.kind === 'lion') {
+      a.isHiddenByCycle = dayPhase !== 'DAYTIME' && dayPhase !== 'SUNRISE';
+    } else if (a.kind === 'sparrow' || a.kind === 'crow') {
+      a.isAirborne = false;
+      a.birdPhaseUntil = now + 4500 + Math.floor(Math.random() * 3500);
+    }
     a.wanderWaitUntil = now + 1500;
 
     const ang = Math.random() * Math.PI * 2;

@@ -87,7 +87,8 @@ export function spawnGroundDropCore(
   originX: number,
   originY: number,
   targetX?: number,
-  targetY?: number
+  targetY?: number,
+  droppedByPlayer = false
 ): WorldGroundDrop {
   const angle = Math.random() * Math.PI * 2;
   const dist = 28 + Math.random() * 44;
@@ -111,6 +112,7 @@ export function spawnGroundDropCore(
       if (dx * dx + dy * dy <= mergeR * mergeR && existing.count + count <= maxStack) {
         existing.count += count;
         existing.spawnedAt = Date.now();
+        if (droppedByPlayer) existing.droppedByPlayer = true;
         ctx.emitRosterEvent({ type: 'DROP_UPDATED', drop: existing });
         return existing;
       }
@@ -137,7 +139,8 @@ export function spawnGroundDropCore(
     y,
     originX: Math.round(originX),
     originY: Math.round(originY),
-    spawnedAt: Date.now()
+    spawnedAt: Date.now(),
+    ...(droppedByPlayer ? { droppedByPlayer: true } : {})
   };
   ctx.groundDrops.set(drop.id, drop);
   ctx.emitRosterEvent({ type: 'DROP_SPAWNED', drop });
@@ -288,13 +291,23 @@ export function handleDropHeldItemCore(
 
   const targetX = player.x + Math.cos(player.angle) * 56;
   const targetY = player.y + Math.sin(player.angle) * 56;
-  const drop = ctx.spawnGroundDrop(itemId, dropCount, player.x, player.y, targetX, targetY);
+  const drop = ctx.spawnGroundDrop(
+    itemId,
+    dropCount,
+    player.x,
+    player.y,
+    targetX,
+    targetY,
+    true
+  );
 
   if (chest) {
     const chestTotem =
       ctx.totemService.findTotemForTribe(chest.ownerTribeId, ctx.placedTotems.values()) ||
       ctx.totemService.findTotemForOwner(chest.ownerId, ctx.placedTotems.values());
-    ctx.syncStandingBaseAutosave(chestTotem?.ownerId || chest.ownerId);
+    ctx.syncStandingBaseAutosave(
+      chestTotem?.tribeId || chestTotem?.ownerId || chest.ownerTribeId || chest.ownerId
+    );
     ctx.emitPlayerEvent(player.id, {
       type: 'CHEST_STATE',
       chestId: chest.id,
@@ -376,7 +389,9 @@ export function handleMoveSlotCore(
     const chestTotem =
       ctx.totemService.findTotemForTribe(chest.ownerTribeId, ctx.placedTotems.values()) ||
       ctx.totemService.findTotemForOwner(chest.ownerId, ctx.placedTotems.values());
-    ctx.syncStandingBaseAutosave(chestTotem?.ownerId || chest.ownerId);
+    ctx.syncStandingBaseAutosave(
+      chestTotem?.tribeId || chestTotem?.ownerId || chest.ownerTribeId || chest.ownerId
+    );
   }
   ctx.syncPlayerInventory(player);
   if (chest) {

@@ -121,15 +121,18 @@ export function placeBuildableEntityCore(
       ? targetY
       : player.y + Math.sin(player.angle) * 72;
 
-  // 1. Placing a Tribe Totem (Host-only)
+  // 1. Placing a Tribe Totem (Chief, High Chief, or Chieftain)
   if (placeCfg.kind === 'totem') {
     if (!player.tribeId) {
       return { ok: false, error: 'Create or join a Tribe before placing a Tribe Totem.' };
     }
     const myTribe = ctx.getTribeSummaries().find((t) => t.id === player.tribeId);
     if (!myTribe) return { ok: false, error: 'Tribe not found.' };
-    if (myTribe.leaderId !== player.id) {
-      return { ok: false, error: 'Only the Tribe Host can place the Tribe Totem.' };
+    if (!ctx.tribeManager.hasBuildPermission(player)) {
+      return {
+        ok: false,
+        error: 'Only the Chief, High Chief, or Chieftains can place the Tribe Totem.'
+      };
     }
     if (
       ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values()) ||
@@ -139,10 +142,10 @@ export function placeBuildableEntityCore(
     }
 
     const collapseZone = findActiveCollapseZoneForPlayer(ctx, player, now);
-    if (!collapseZone && ctx.blueprintService.getSlot(player.id)) {
+    if (!collapseZone && ctx.blueprintService.getSlot(myTribe.id)) {
       return {
         ok: false,
-        error: 'You already have a saved Tribe Totem. Load your saved base instead.'
+        error: 'Your Tribe already has a saved base in the Totem. Load Base instead.'
       };
     }
 
@@ -218,7 +221,7 @@ export function placeBuildableEntityCore(
       tribeId: myTribe.id,
       tribeTag: myTribe.tag,
       tribeName: myTribe.name,
-      ownerId: player.id,
+      ownerId: myTribe.leaderId,
       x: placeX,
       y: placeY,
       claimX,
@@ -255,7 +258,7 @@ export function placeBuildableEntityCore(
       });
     }
 
-    ctx.syncStandingBaseAutosave(player.id, now);
+    ctx.syncStandingBaseAutosave(myTribe.id, now);
     ctx.emitRosterEvent({
       type: 'TOTEM_PLACED',
       totem: ctx.totemService.serializeTotem(totem)
@@ -263,7 +266,7 @@ export function placeBuildableEntityCore(
     return { ok: true, action: 'totem_placed', totem };
   }
 
-  // Strict Tribe Totem Territory Gate + Host/Builder Permission Check
+  // Strict Tribe Totem Territory Gate + Chief/High Chief/Chieftain Permission Check
   const tribeTotem = ctx.totemService.findTotemForTribe(
     player.tribeId,
     ctx.placedTotems.values()
@@ -278,7 +281,7 @@ export function placeBuildableEntityCore(
   if (!ctx.tribeManager.hasBuildPermission(player)) {
     return {
       ok: false,
-      error: 'Only the Tribe Host or members with Build Permission can build.'
+      error: 'Only the Chief, High Chief, or Chieftains can build.'
     };
   }
 
@@ -336,8 +339,8 @@ export function placeBuildableEntityCore(
     player.structuresBuilt += 1;
     player.score += 15;
 
-    ctx.syncStandingBaseAutosave(tribeTotem.ownerId, now);
-    if (tribeTotem.ownerId !== player.id) ctx.syncPlayerInventory(player);
+    ctx.syncStandingBaseAutosave(tribeTotem.tribeId || tribeTotem.ownerId, now);
+    if (!tribeTotem.tribeId) ctx.syncPlayerInventory(player);
     ctx.emitRosterEvent({
       type: 'CHEST_PLACED',
       chest: {
@@ -392,8 +395,8 @@ export function placeBuildableEntityCore(
     player.structuresBuilt += 1;
     player.score += 10;
 
-    ctx.syncStandingBaseAutosave(tribeTotem.ownerId, now);
-    if (tribeTotem.ownerId !== player.id) ctx.syncPlayerInventory(player);
+    ctx.syncStandingBaseAutosave(tribeTotem.tribeId || tribeTotem.ownerId, now);
+    if (!tribeTotem.tribeId) ctx.syncPlayerInventory(player);
     ctx.emitRosterEvent({ type: 'TORCH_PLACED', torch });
     return { ok: true, action: 'torch_placed', torch };
   }
@@ -481,17 +484,18 @@ export function placeBuildableEntityCore(
     player.structuresBuilt += 1;
     player.score += 15;
 
-    ctx.syncStandingBaseAutosave(tribeTotem.ownerId, now);
-    if (tribeTotem.ownerId !== player.id) ctx.syncPlayerInventory(player);
+    ctx.syncStandingBaseAutosave(tribeTotem.tribeId || tribeTotem.ownerId, now);
+    if (!tribeTotem.tribeId) ctx.syncPlayerInventory(player);
     ctx.emitRosterEvent({ type: 'WALL_PLACED', wall });
     return { ok: true, action: 'wall_placed', wall };
   }
 
-  // 5. Multi-Tile Structures (Hut, Watchtower, Campfire)
+  // 5. Multi-Tile Structures (Hut, Watchtower, Campfire, Cooking Pot)
   if (
     placeCfg.kind === 'hut' ||
     placeCfg.kind === 'watchtower' ||
-    placeCfg.kind === 'campfire'
+    placeCfg.kind === 'campfire' ||
+    placeCfg.kind === 'cooking_pot'
   ) {
     const sKind: StructureKind = placeCfg.kind;
     const tilesW = placeCfg.tilesW ?? (sKind === 'hut' ? 3 : 2);
@@ -518,13 +522,17 @@ export function placeBuildableEntityCore(
         ? CONFIG.MAX_HUTS_PER_PLAYER
         : sKind === 'watchtower'
           ? CONFIG.MAX_WATCHTOWERS_PER_PLAYER
-          : CONFIG.MAX_CAMPFIRES_PER_PLAYER;
+          : sKind === 'cooking_pot'
+            ? CONFIG.MAX_COOKING_POTS_PER_PLAYER
+            : CONFIG.MAX_CAMPFIRES_PER_PLAYER;
     const worldCap =
       sKind === 'hut'
         ? CONFIG.MAX_WORLD_HUTS
         : sKind === 'watchtower'
           ? CONFIG.MAX_WORLD_WATCHTOWERS
-          : CONFIG.MAX_WORLD_CAMPFIRES;
+          : sKind === 'cooking_pot'
+            ? CONFIG.MAX_WORLD_COOKING_POTS
+            : CONFIG.MAX_WORLD_CAMPFIRES;
 
     let ownedOfKind = 0;
     let worldOfKind = 0;
@@ -565,7 +573,9 @@ export function placeBuildableEntityCore(
         ? CONFIG.HUT_MAX_HP
         : sKind === 'watchtower'
           ? CONFIG.WATCHTOWER_MAX_HP
-          : CONFIG.CAMPFIRE_MAX_HP);
+          : sKind === 'cooking_pot'
+            ? CONFIG.COOKING_POT_MAX_HP
+            : CONFIG.CAMPFIRE_MAX_HP);
 
     const structure: WorldPlacedStructure = {
       id: ctx.nextStructureId(),
@@ -580,15 +590,16 @@ export function placeBuildableEntityCore(
       ownerId: player.id,
       tribeId: player.tribeId,
       createdAt: now,
-      lastDamagedAt: 0
+      lastDamagedAt: 0,
+      ...(sKind === 'campfire' || sKind === 'cooking_pot' ? { litUntil: 0 } : {})
     };
     ctx.placedStructures.set(structure.id, structure);
     ctx.registerStructureColliders(structure);
     player.structuresBuilt += 1;
     player.score += sKind === 'hut' ? 60 : sKind === 'watchtower' ? 45 : 30;
 
-    ctx.syncStandingBaseAutosave(tribeTotem.ownerId, now);
-    if (tribeTotem.ownerId !== player.id) ctx.syncPlayerInventory(player);
+    ctx.syncStandingBaseAutosave(tribeTotem.tribeId || tribeTotem.ownerId, now);
+    if (!tribeTotem.tribeId) ctx.syncPlayerInventory(player);
     ctx.emitRosterEvent({ type: 'STRUCTURE_PLACED', structure });
     return { ok: true, action: 'structure_placed', structure };
   }

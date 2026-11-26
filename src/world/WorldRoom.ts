@@ -1,7 +1,7 @@
 import { CONFIG } from '../config/index.js';
 import type {
   ActiveWorldPlayer, BlueprintTargetKind, BrokenTotemCollapseZone, DayCycleSnapshot, DayPhaseName, InventorySlotItem,
-  ItemId, LeaderboardEntry, PlayerProfileData, RotationQuarter, TribeSummary, WallOrientation,
+  ItemId, LeaderboardEntry, PlayerProfileData, RotationQuarter, TribeRole, TribeSummary, WallOrientation,
   WorldBushNode, WorldGroundDrop, WorldPlacedChest, WorldPlacedStructure, WorldPlacedTorch,
   WorldPlacedTotem, WorldPlacedWall, WorldRockNode, WorldTreeNode
 } from '../models/types.js';
@@ -46,9 +46,14 @@ import {
   syncStandingBaseAutosaveCore
 } from './handlers/TotemLifecycleHandler.js';
 import {
+  handleCookMeatCore,
+  handleFeedStructureCore
+} from './handlers/StructureFuelCookHandler.js';
+import {
   handleChatMessageCore, handleCreateTribeCore, handleDisbandTribeCore, handleJoinTribeCore,
-  handleKickTribeMemberCore, handleLeaveTribeCore, handleRespondTribeRequestCore,
-  handleSetTribeBuildPermissionCore, handleSetTribeVisibilityCore
+  handleKickTribeMemberCore, handleLeaveTribeCore, handleRenameTribeCore, handleRespondTribeLeaveCore,
+  handleRespondTribeRequestCore, handleSetTribeBuildPermissionCore, handleSetTribeMemberRolesCore,
+  handleSetTribeVisibilityCore
 } from './handlers/TribeChatHandler.js';
 import {
   BINARY_PACKET_SNAPSHOT, SNAPSHOT_HEADER_BYTES, SNAPSHOT_PLAYER_STRIDE,
@@ -137,6 +142,7 @@ export class WorldRoom {
     this.animalService = new AnimalService(this.world);
     this.totemService = new TotemService();
     this.blueprintService = new BlueprintService(blueprintStoragePath);
+    this.blueprintService.onMarkTribeVaultDirty = () => this.onMarkWorldDirty?.();
 
     this.ctx = {
       world: this.world,
@@ -186,7 +192,8 @@ export class WorldRoom {
       addItemToSlots: (slots, max, itemId, count) => addItemToSlotsCore(slots, max, itemId, count),
       countPlayerItem: (p, itemId) => countPlayerItemCore(p, itemId),
       deductPlayerItem: (p, itemId, count) => deductPlayerItemCore(p, itemId, count),
-      spawnGroundDrop: (itemId, count, ox, oy, tx, ty) => spawnGroundDropCore(this.ctx, itemId, count, ox, oy, tx, ty),
+      spawnGroundDrop: (itemId, count, ox, oy, tx, ty, droppedByPlayer) =>
+        spawnGroundDropCore(this.ctx, itemId, count, ox, oy, tx, ty, droppedByPlayer),
       registerStructureColliders: (s) => registerStructureCollidersCore(this.ctx, s),
       removeStructureEntity: (s) => removeStructureEntityCore(this.ctx, s),
       removeTotemFromWorld: (totem) => removeTotemFromWorldCore(this.ctx, totem),
@@ -372,7 +379,9 @@ export class WorldRoom {
     this.pendingRockRespawns.clear();
     this.pendingBushRespawns.clear();
     this.offlineSoloOwners.clear();
-    this.tribeManager.clear();
+    if (typeof explicitSeed === 'number') {
+      this.tribeManager.clear();
+    }
     this.sessionResumeCache.clear();
     const nextSeed = typeof explicitSeed === 'number' ? explicitSeed : this.world.seed;
     this.world.regenerateWithSeed(nextSeed);
@@ -445,11 +454,15 @@ export class WorldRoom {
     return addItemToSlotsCore(slots, maxSlotIndex, itemId, count);
   }
 
-  public spawnGroundDrop(itemId: ItemId, count: number, originX: number, originY: number, targetX?: number, targetY?: number): WorldGroundDrop {
-    return spawnGroundDropCore(this.ctx, itemId, count, originX, originY, targetX, targetY);
+  public spawnGroundDrop(itemId: ItemId, count: number, originX: number, originY: number, targetX?: number, targetY?: number, droppedByPlayer = false): WorldGroundDrop {
+    return spawnGroundDropCore(this.ctx, itemId, count, originX, originY, targetX, targetY, droppedByPlayer);
   }
 
-  public handleSwing(playerId: string, angle?: number) { return handleSwingCore(this.ctx, playerId, angle); }
+  public handleSwing(playerId: string, angle?: number, clayRollOverride?: number) { return handleSwingCore(this.ctx, playerId, angle, clayRollOverride); }
+  public handleFeedStructure(playerId: string, structureId: number) { return handleFeedStructureCore(this.ctx, playerId, structureId); }
+  public handleCookMeat(playerId: string, structureId: number, rawItemId: ItemId, cookAll = false) {
+    return handleCookMeatCore(this.ctx, playerId, structureId, rawItemId, cookAll);
+  }
   public handlePickupOrHarvest(playerId: string) { return handlePickupOrHarvestCore(this.ctx, playerId); }
   public handleDropHeldItem(playerId: string, dropAll = false, source: 'inventory' | 'chest' = 'inventory', explicitSlot?: number, chestId?: number, explicitCount?: number) {
     const res = handleDropHeldItemCore(this.ctx, playerId, dropAll, source, explicitSlot, chestId, explicitCount);
@@ -490,7 +503,15 @@ export class WorldRoom {
   public handleCreateTribe(playerId: string, name: string, tag: string, visibility: 'public' | 'private' = 'public') {
     return this.dirtyIfOk(handleCreateTribeCore(this.ctx, playerId, name, tag, visibility));
   }
-  public handleSetTribeVisibility(leaderId: string, visibility: 'public' | 'private') { return handleSetTribeVisibilityCore(this.ctx, leaderId, visibility); }
+  public handleRenameTribe(actorId: string, name: string, tag: string) {
+    return this.dirtyIfOk(handleRenameTribeCore(this.ctx, actorId, name, tag));
+  }
+  public handleSetTribeVisibility(leaderId: string, visibility: 'public' | 'private') {
+    return this.dirtyIfOk(handleSetTribeVisibilityCore(this.ctx, leaderId, visibility));
+  }
+  public handleSetTribeMemberRoles(actorId: string, updates: ReadonlyArray<{ targetPlayerId: string; role: TribeRole }>) {
+    return this.dirtyIfOk(handleSetTribeMemberRolesCore(this.ctx, actorId, updates));
+  }
   public handleSetTribeBuildPermission(leaderId: string, targetPlayerId: string, allowed: boolean) {
     return this.dirtyIfOk(handleSetTribeBuildPermissionCore(this.ctx, leaderId, targetPlayerId, allowed));
   }
@@ -499,6 +520,9 @@ export class WorldRoom {
     return this.dirtyIfOk(handleRespondTribeRequestCore(this.ctx, leaderId, targetPlayerId, accept));
   }
   public handleLeaveTribe(playerId: string) { return handleLeaveTribeCore(this.ctx, playerId); }
+  public handleRespondTribeLeave(actorId: string, targetPlayerId: string, accept: boolean) {
+    return this.dirtyIfOk(handleRespondTribeLeaveCore(this.ctx, actorId, targetPlayerId, accept));
+  }
   public handleDisbandTribe(playerId: string) { return handleDisbandTribeCore(this.ctx, playerId); }
   public handleKickTribeMember(leaderId: string, targetPlayerId: string) { return this.dirtyIfOk(handleKickTribeMemberCore(this.ctx, leaderId, targetPlayerId)); }
   public handleChatMessage(playerId: string, rawText: string) { return handleChatMessageCore(this.ctx, playerId, rawText); }
@@ -522,7 +546,7 @@ export class WorldRoom {
     if (this.playersById.size === 0) {
       let hasActiveDormantOrCollapse = false;
       for (const t of this.placedTotems.values()) {
-        if (!t.tribeId && t.dormantExpiresAt && now < t.dormantExpiresAt) {
+        if (t.dormantExpiresAt && now < t.dormantExpiresAt) {
           hasActiveDormantOrCollapse = true;
           break;
         }
@@ -539,12 +563,12 @@ export class WorldRoom {
         this.emptySince !== null &&
         now - this.emptySince >= CONFIG.EMPTY_RESET_GRACE_MS &&
         !hasActiveDormantOrCollapse &&
-        !this.tribeManager.hasGraceProtectedOfflineTribes(now, CONFIG.OFFLINE_BASE_GRACE_MS) &&
+        !this.tribeManager.hasGraceProtectedOfflineTribes(now, CONFIG.DORMANT_TOTEM_DURATION_MS) &&
         this.offlineSoloOwners.size === 0 &&
         (this.dayNumber > 1 || this.tickAccumulator > 0 || this.placedTotems.size > 0 ||
           this.brokenTotemZones.size > 0 || this.placedWalls.size > 0 ||
           this.placedStructures.size > 0 || this.placedChests.size > 0 ||
-          this.placedTorches.size > 0 || this.groundDrops.size > 0 || this.tribeManager.getTribeCount() > 0)
+          this.placedTorches.size > 0 || this.groundDrops.size > 0)
       ) {
         this.resetWorldToDayOne();
       }

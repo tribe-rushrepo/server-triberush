@@ -1,81 +1,129 @@
+import crypto from 'crypto';
 import { CONFIG } from '../config/index.js';
 import type {
   ActiveWorldPlayer,
-  AnimalKind,
-  TribeJoinRequest,
+  BlueprintStoredBuilds,
+  SavedBaseBlueprintSlot,
+  TribeMemberRecord,
+  TribeRole,
   TribeSummary,
   TribeVisibility,
   WorldPlacedChest
 } from '../models/types.js';
+import { isPersistableAccount } from '../services/PlayerSaveService.js';
+import {
+  kickMemberCore,
+  requestOrAutoLeaveTribeCore,
+  respondToJoinRequestCore,
+  respondToLeaveRequestCore,
+  setMemberRolesBatchCore
+} from './tribes/tribeMembershipActions.js';
+import {
+  exportPersistedTribeState,
+  importPersistedTribeState
+} from './tribes/tribePersistenceHelpers.js';
+import {
+  hasBlueprintBuildRole,
+  isExecutiveTribeRole,
+  sanitizeTribeNameAndTag,
+  sortTribeMembersByHierarchy,
+  type InternalTribe,
+  type PersistedTribeRecord,
+  type RelocatedTotemState
+} from './tribes/tribeTypesAndHelpers.js';
 
-export interface RelocatedTotemState {
-  level: number;
-  huntCounts: Record<AnimalKind, number>;
-}
+export type { PersistedTribeRecord, RelocatedTotemState };
 
-export interface PersistedTribeRecord {
-  id: string;
-  name: string;
-  tag: string;
-  visibility: TribeVisibility;
-  leaderId: string;
-  leaderName: string;
-  memberIds: string[];
-  builderIds: string[];
-  pendingRequests: TribeJoinRequest[];
-  createdAt: number;
-  relocatedTotemState: RelocatedTotemState | null;
-  allMembersOfflineSince: number | null;
-}
-
-interface InternalTribe {
-  id: string;
-  name: string;
-  tag: string;
-  visibility: TribeVisibility;
-  leaderId: string;
-  leaderName: string;
-  memberIds: Set<string>;
-  builderIds: Set<string>;
-  pendingRequests: Map<string, TribeJoinRequest>;
-  createdAt: number;
-  relocatedTotemState: RelocatedTotemState | null;
-  allMembersOfflineSince: number | null;
-}
+export const DUPLICATE_TRIBE_NAME_MSG = 'Name already existing, please try another name.';
 
 /**
- * Server-Authoritative Tribe Manager (Maximum 30 Players per Tribe):
- * Handles Tribe creation, [TAG] validation, 30-member cap enforcement, leadership handoff,
- * zero friendly fire checks, shared Tribe Chest access control, and 3-minute offline grace persistence.
+ * Server-Authoritative Tribe Manager (Phase 14):
+ * - Max 15 Players per Tribe across 6 Hierarchy Ranks:
+ *   High Chief (0/1), Chief (0/1), Chieftain (0/2), Council (0/3), Elders (*), Members (*).
+ * - Strict case-insensitive uniqueness on BOTH Tribe Name and 4-character Tag.
+ * - One-time Tribe creation per account; 30-day rename cooldown; 5-minute bidirectional privacy cooldown.
+ * - Chief/High-Chief-approved Leave Requests (with 7-day inactive-Chief auto-approval) & Outcast/Exile.
+ * - Permanent Tribe membership across disconnects (15-minute all-offline vanish only packs map builds).
  */
 export class TribeManager {
   private readonly tribesById: Map<string, InternalTribe> = new Map();
   private readonly tribesByTag: Map<string, InternalTribe> = new Map();
+  private readonly tribesByLowerName: Map<string, InternalTribe> = new Map();
+  private readonly founderPlayerIds: Set<string> = new Set();
   private nextTribeNum = 1;
 
   public clear(): void {
     this.tribesById.clear();
     this.tribesByTag.clear();
+    this.tribesByLowerName.clear();
+    this.founderPlayerIds.clear();
   }
 
-  public getTribeCount(): number { return this.tribesById.size; }
-  public hasTribe(tribeId: string): boolean { return this.tribesById.has(tribeId); }
+  public getTribeCount(): number {
+    return this.tribesById.size;
+  }
+
+  public hasTribe(tribeId: string): boolean {
+    return this.tribesById.has(tribeId);
+  }
+
+  public getTribeMeta(tribeId: string | null | undefined): { id: string; name: string; tag: string; leaderId: string } | null {
+    if (!tribeId) return null;
+    const t = this.tribesById.get(tribeId);
+    if (!t) return null;
+    return { id: t.id, name: t.name, tag: t.tag, leaderId: t.leaderId };
+  }
+
+  public findTribeIdForMember(playerId: string): string | null {
+    for (const t of this.tribesById.values()) {
+      if (t.members.has(playerId)) return t.id;
+    }
+    return null;
+  }
+
+  public getMemberRole(playerId: string, tribeId?: string | null): TribeRole | null {
+    if (!tribeId) return null;
+    const t = this.tribesById.get(tribeId);
+    if (!t) return null;
+    return t.members.get(playerId)?.role ?? null;
+  }
 
   public getAllTribeSummaries(playersById: ReadonlyMap<string, ActiveWorldPlayer>): TribeSummary[] {
     const list: TribeSummary[] = [];
     for (const t of this.tribesById.values()) {
-      const memberIds = Array.from(t.memberIds);
+      const sortedMembers = sortTribeMembersByHierarchy(t.members.values(), playersById);
+      const memberIds = sortedMembers.map((m) => m.playerId);
       const memberShortIds: number[] = [];
-      for (const pid of memberIds) {
-        const p = playersById.get(pid);
-        if (p) memberShortIds.push(p.shortId);
+      const builderIds: string[] = [];
+      for (const m of sortedMembers) {
+        if (typeof m.shortId === 'number') memberShortIds.push(m.shortId);
+        if (hasBlueprintBuildRole(m.role)) builderIds.push(m.playerId);
+      }
+      const chiefRec = t.members.get(t.leaderId);
+      if (chiefRec && playersById.has(t.leaderId)) {
+        t.leaderName = playersById.get(t.leaderId)!.username;
       }
       list.push({
-        id: t.id, name: t.name, tag: t.tag, visibility: t.visibility,
-        leaderId: t.leaderId, leaderName: t.leaderName,
-        memberCount: t.memberIds.size, maxMembers: CONFIG.MAX_TRIBE_MEMBERS,
-        memberIds, memberShortIds, builderIds: Array.from(t.builderIds),
-        pendingRequests: Array.from(t.pendingRequests.values()).sort((a, b) => a.requestedAt - b.requestedAt)
+        id: t.id,
+        name: t.name,
+        tag: t.tag,
+        visibility: t.visibility,
+        leaderId: t.leaderId,
+        leaderName: t.leaderName,
+        memberCount: t.members.size,
+        maxMembers: CONFIG.MAX_TRIBE_MEMBERS,
+        memberIds,
+        memberShortIds,
+        builderIds,
+        members: sortedMembers,
+        pendingRequests: Array.from(t.pendingRequests.values()).sort(
+          (a, b) => a.requestedAt - b.requestedAt
+        ),
+        pendingLeaveRequests: Array.from(t.pendingLeaveRequests.values()).sort(
+          (a, b) => a.requestedAt - b.requestedAt
+        ),
+        renameCooldownUntil: t.renameCooldownUntil,
+        visibilityCooldownUntil: t.visibilityCooldownUntil
       });
     }
     return list;
@@ -84,9 +132,7 @@ export class TribeManager {
   public clearPendingRequestsForPlayer(playerId: string): boolean {
     let changed = false;
     for (const t of this.tribesById.values()) {
-      if (t.pendingRequests.delete(playerId)) {
-        changed = true;
-      }
+      if (t.pendingRequests.delete(playerId)) changed = true;
     }
     return changed;
   }
@@ -95,66 +141,176 @@ export class TribeManager {
     leader: ActiveWorldPlayer,
     rawName: string,
     rawTag: string,
-    visibility: TribeVisibility = 'public'
+    visibility: TribeVisibility = 'public',
+    now: number = Date.now()
   ): { ok: boolean; tribe?: InternalTribe; error?: string } {
-    if (leader.tribeId) {
-      return { ok: false, error: 'Leave your current Tribe first.' };
+    if (leader.tribeId || this.findTribeIdForMember(leader.id)) {
+      return { ok: false, error: 'You already belong to a Tribe.' };
+    }
+    if (isPersistableAccount(leader.id) && this.founderPlayerIds.has(leader.id)) {
+      return { ok: false, error: 'Creating a Tribe can only be done once.' };
     }
 
-    const name = rawName.replace(/[^a-zA-Z0-9_\- ]/g, '').trim().slice(0, 20);
-    const tag = rawTag
-      .replace(/[^a-zA-Z0-9]/g, '')
-      .toUpperCase()
-      .trim()
-      .slice(0, 5);
+    const parsed = sanitizeTribeNameAndTag(rawName, rawTag);
+    if (!parsed.ok) {
+      return { ok: false, error: parsed.error };
+    }
+    const { name, tag } = parsed;
+    const lowerName = name.toLowerCase();
 
-    if (name.length < 2) {
-      return { ok: false, error: 'Tribe name must be at least 2 characters.' };
-    }
-    if (tag.length < 2 || tag.length > 5) {
-      return { ok: false, error: 'Tribe tag must be 2 to 5 letters/numbers.' };
-    }
-    if (this.tribesByTag.has(tag)) {
-      return { ok: false, error: `Tag [${tag}] is already taken.` };
+    if (this.tribesByLowerName.has(lowerName) || this.tribesByTag.has(tag)) {
+      return { ok: false, error: DUPLICATE_TRIBE_NAME_MSG };
     }
 
-    const id = `tribe-${this.nextTribeNum++}`;
+    const id = `trb_${this.nextTribeNum++}_${crypto.randomBytes(3).toString('hex')}`;
+    const members = new Map<string, TribeMemberRecord>();
+    members.set(leader.id, {
+      playerId: leader.id,
+      username: leader.username,
+      role: 'chief',
+      colorIndex: leader.colorIndex,
+      joinedAt: now,
+      lastSeenAt: now,
+      leaveRequestedAt: null
+    });
+
     const tribe: InternalTribe = {
-      id, name, tag,
+      id,
+      name,
+      tag,
       visibility: visibility === 'private' ? 'private' : 'public',
-      leaderId: leader.id, leaderName: leader.username,
-      memberIds: new Set([leader.id]), builderIds: new Set([leader.id]),
-      pendingRequests: new Map(), createdAt: Date.now(),
-      relocatedTotemState: null, allMembersOfflineSince: null
+      leaderId: leader.id,
+      leaderName: leader.username,
+      members,
+      pendingRequests: new Map(),
+      pendingLeaveRequests: new Map(),
+      createdAt: now,
+      renameCooldownUntil: 0,
+      visibilityCooldownUntil: 0,
+      relocatedTotemState: null,
+      allMembersOfflineSince: null
     };
 
     this.clearPendingRequestsForPlayer(leader.id);
     this.tribesById.set(id, tribe);
     this.tribesByTag.set(tag, tribe);
+    this.tribesByLowerName.set(lowerName, tribe);
+    if (isPersistableAccount(leader.id)) {
+      this.founderPlayerIds.add(leader.id);
+    }
     leader.tribeId = id;
     leader.tribeTag = tag;
     return { ok: true, tribe };
   }
 
+  public renameTribe(
+    actor: ActiveWorldPlayer,
+    rawName: string,
+    rawTag: string,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>,
+    now: number = Date.now()
+  ): { ok: boolean; tribeId?: string; name?: string; tag?: string; renameCooldownUntil?: number; error?: string } {
+    if (!actor.tribeId) return { ok: false, error: 'Not in a Tribe.' };
+    const tribe = this.tribesById.get(actor.tribeId);
+    if (!tribe) return { ok: false, error: 'Tribe not found.' };
+
+    const actorRole = tribe.members.get(actor.id)?.role;
+    if (!isExecutiveTribeRole(actorRole)) {
+      return { ok: false, error: 'Only the Chief or High Chief can rename the Tribe.' };
+    }
+    if (now < tribe.renameCooldownUntil) {
+      const remDays = Math.max(1, Math.ceil((tribe.renameCooldownUntil - now) / (24 * 60 * 60 * 1000)));
+      return {
+        ok: false,
+        error: `Tribe rename cooldown active (${remDays} day${remDays === 1 ? '' : 's'} remaining).`
+      };
+    }
+
+    const parsed = sanitizeTribeNameAndTag(rawName, rawTag);
+    if (!parsed.ok) return { ok: false, error: parsed.error };
+    const { name, tag } = parsed;
+    const lowerName = name.toLowerCase();
+
+    const existingByName = this.tribesByLowerName.get(lowerName);
+    if (existingByName && existingByName.id !== tribe.id) {
+      return { ok: false, error: DUPLICATE_TRIBE_NAME_MSG };
+    }
+    const existingByTag = this.tribesByTag.get(tag);
+    if (existingByTag && existingByTag.id !== tribe.id) {
+      return { ok: false, error: DUPLICATE_TRIBE_NAME_MSG };
+    }
+
+    if (name === tribe.name && tag === tribe.tag) {
+      return { ok: false, error: 'Enter a new Tribe Name or 4-character Tag.' };
+    }
+
+    this.tribesByLowerName.delete(tribe.name.toLowerCase());
+    this.tribesByTag.delete(tribe.tag);
+
+    tribe.name = name;
+    tribe.tag = tag;
+    tribe.renameCooldownUntil = now + CONFIG.TRIBE_RENAME_COOLDOWN_MS;
+
+    this.tribesByLowerName.set(lowerName, tribe);
+    this.tribesByTag.set(tag, tribe);
+
+    for (const memberId of tribe.members.keys()) {
+      const p = playersById.get(memberId);
+      if (p) p.tribeTag = tag;
+    }
+
+    return {
+      ok: true,
+      tribeId: tribe.id,
+      name: tribe.name,
+      tag: tribe.tag,
+      renameCooldownUntil: tribe.renameCooldownUntil
+    };
+  }
+
   public setVisibility(
-    leader: ActiveWorldPlayer,
-    _visibility: TribeVisibility
-  ): { ok: boolean; visibility?: TribeVisibility; error?: string } {
-    if (!leader.tribeId) return { ok: false, error: 'Not in a Tribe.' };
-    const tribe = this.tribesById.get(leader.tribeId);
-    if (!tribe || tribe.leaderId !== leader.id) {
-      return { ok: false, error: 'Only the Tribe Host can manage Tribe settings.' };
+    actor: ActiveWorldPlayer,
+    visibility: TribeVisibility,
+    now: number = Date.now()
+  ): { ok: boolean; visibility?: TribeVisibility; cooldownUntil?: number; error?: string } {
+    if (!actor.tribeId) return { ok: false, error: 'Not in a Tribe.' };
+    const tribe = this.tribesById.get(actor.tribeId);
+    if (!tribe) return { ok: false, error: 'Tribe not found.' };
+
+    const actorRole = tribe.members.get(actor.id)?.role;
+    if (!isExecutiveTribeRole(actorRole)) {
+      return { ok: false, error: 'Only the Chief or High Chief can change Tribe privacy.' };
+    }
+    if (tribe.visibility === visibility) {
+      return { ok: true, visibility: tribe.visibility, cooldownUntil: tribe.visibilityCooldownUntil };
+    }
+    if (now < tribe.visibilityCooldownUntil) {
+      const remSec = Math.max(1, Math.ceil((tribe.visibilityCooldownUntil - now) / 1000));
+      const m = Math.floor(remSec / 60);
+      const s = remSec % 60;
+      return {
+        ok: false,
+        visibility: tribe.visibility,
+        error: `Privacy toggle cooldown active (${m}m ${String(s).padStart(2, '0')}s remaining).`
+      };
+    }
+
+    tribe.visibility = visibility === 'private' ? 'private' : 'public';
+    tribe.visibilityCooldownUntil = now + CONFIG.TRIBE_VISIBILITY_COOLDOWN_MS;
+    if (tribe.visibility === 'public') {
+      tribe.pendingRequests.clear();
     }
     return {
-      ok: false,
+      ok: true,
       visibility: tribe.visibility,
-      error: 'Tribe privacy (Public/Private) is locked once the Tribe is created.'
+      cooldownUntil: tribe.visibilityCooldownUntil
     };
   }
 
   public joinTribe(
     player: ActiveWorldPlayer,
-    tribeId: string
+    tribeId: string,
+    now: number = Date.now()
   ): {
     ok: boolean;
     pending?: boolean;
@@ -163,28 +319,28 @@ export class TribeManager {
     tribeName?: string;
     error?: string;
   } {
-    if (player.tribeId) {
+    if (player.tribeId || this.findTribeIdForMember(player.id)) {
       return { ok: false, error: 'You are already in a Tribe.' };
     }
     const tribe = this.tribesById.get(tribeId);
     if (!tribe) {
       return { ok: false, error: 'Tribe no longer exists.' };
     }
-    if (!tribe.memberIds.has(player.id) && tribe.memberIds.size >= CONFIG.MAX_TRIBE_MEMBERS) {
+    if (!tribe.members.has(player.id) && tribe.members.size >= CONFIG.MAX_TRIBE_MEMBERS) {
       return {
         ok: false,
         error: `Tribe [${tribe.tag}] is full (${CONFIG.MAX_TRIBE_MEMBERS}/${CONFIG.MAX_TRIBE_MEMBERS}).`
       };
     }
 
-    if (tribe.visibility === 'private' && !tribe.memberIds.has(player.id)) {
+    if (tribe.visibility === 'private' && !tribe.members.has(player.id)) {
       if (tribe.pendingRequests.has(player.id)) {
         return { ok: false, error: `Join request already sent to [${tribe.tag}].` };
       }
       tribe.pendingRequests.set(player.id, {
         playerId: player.id,
         username: player.username,
-        requestedAt: Date.now()
+        requestedAt: now
       });
       return {
         ok: true,
@@ -196,7 +352,15 @@ export class TribeManager {
     }
 
     this.clearPendingRequestsForPlayer(player.id);
-    tribe.memberIds.add(player.id);
+    tribe.members.set(player.id, {
+      playerId: player.id,
+      username: player.username,
+      role: 'member',
+      colorIndex: player.colorIndex,
+      joinedAt: now,
+      lastSeenAt: now,
+      leaveRequestedAt: null
+    });
     tribe.allMembersOfflineSince = null;
     player.tribeId = tribe.id;
     player.tribeTag = tribe.tag;
@@ -204,49 +368,63 @@ export class TribeManager {
   }
 
   /**
-   * Restores Tribe membership cleanly when a player reconnects within the
-   * session-resume / redeploy grace window (works for both Public and Private Tribes).
+   * Restores permanent Tribe membership when a player logs in — even if their display
+   * username changed on Marble Games Hub (keyed strictly by immutable player.id UUID).
    */
-  public rejoinTribeById(
+  public rejoinTribeOnLogin(
     player: ActiveWorldPlayer,
-    tribeId: string,
-    restoreBuildPermission: boolean = false
-  ): boolean {
-    if (player.tribeId) return false;
-    const tribe = this.tribesById.get(tribeId);
-    if (!tribe) return false;
-    if (!tribe.memberIds.has(player.id) && tribe.memberIds.size >= CONFIG.MAX_TRIBE_MEMBERS) {
-      return false;
+    hintTribeId?: string | null,
+    now: number = Date.now()
+  ): { restored: boolean; tribeId: string | null } {
+    const matchedId =
+      (hintTribeId && this.tribesById.get(hintTribeId)?.members.has(player.id)
+        ? hintTribeId
+        : null) || this.findTribeIdForMember(player.id);
+
+    if (!matchedId) {
+      player.tribeId = null;
+      player.tribeTag = null;
+      return { restored: false, tribeId: null };
     }
-    this.clearPendingRequestsForPlayer(player.id);
-    tribe.memberIds.add(player.id);
-    if (restoreBuildPermission || tribe.leaderId === player.id) {
-      tribe.builderIds.add(player.id);
-    }
+
+    const tribe = this.tribesById.get(matchedId)!;
+    const rec = tribe.members.get(player.id)!;
+    rec.username = player.username; // Automatically refresh username if player renamed!
+    rec.colorIndex = player.colorIndex;
+    rec.lastSeenAt = now;
     if (tribe.leaderId === player.id) {
       tribe.leaderName = player.username;
+      rec.role = 'chief';
     }
+    this.clearPendingRequestsForPlayer(player.id);
     tribe.allMembersOfflineSince = null;
     player.tribeId = tribe.id;
     player.tribeTag = tribe.tag;
-    return true;
+    return { restored: true, tribeId: tribe.id };
   }
 
-  /**
-   * Keeps a disconnecting player in their Tribe during the 3-minute reconnect/redeploy
-   * grace window, stamping `allMembersOfflineSince` only when 0 Tribe members remain online.
-   */
+  public rejoinTribeById(
+    player: ActiveWorldPlayer,
+    tribeId: string,
+    _restoreBuildPermission: boolean = false
+  ): boolean {
+    return this.rejoinTribeOnLogin(player, tribeId).restored;
+  }
+
   public handleMemberDisconnected(
     playerId: string,
     tribeId: string | null,
     playersById: ReadonlyMap<string, ActiveWorldPlayer>,
     now: number = Date.now()
-  ): void {
-    if (!tribeId) return;
+  ): { allOfflineNow: boolean } {
+    if (!tribeId) return { allOfflineNow: false };
     const tribe = this.tribesById.get(tribeId);
-    if (!tribe) return;
+    if (!tribe) return { allOfflineNow: false };
+    const rec = tribe.members.get(playerId);
+    if (rec) rec.lastSeenAt = now;
+
     let anyOtherOnline = false;
-    for (const memberId of tribe.memberIds) {
+    for (const memberId of tribe.members.keys()) {
       if (memberId !== playerId && playersById.has(memberId)) {
         anyOtherOnline = true;
         break;
@@ -254,13 +432,29 @@ export class TribeManager {
     }
     if (anyOtherOnline) {
       tribe.allMembersOfflineSince = null;
-    } else if (tribe.allMembersOfflineSince === null) {
+      return { allOfflineNow: false };
+    }
+    if (tribe.allMembersOfflineSince === null) {
       tribe.allMembersOfflineSince = now;
     }
+    return { allOfflineNow: true };
+  }
+
+  public isAllMembersOffline(
+    tribeId: string,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>
+  ): boolean {
+    const tribe = this.tribesById.get(tribeId);
+    if (!tribe) return true;
+    for (const memberId of tribe.members.keys()) {
+      if (playersById.has(memberId)) return false;
+    }
+    return true;
   }
 
   /**
-   * Disbands and returns IDs of Tribes whose members have ALL been offline for >= graceMs.
+   * Returns Tribe IDs whose members have ALL been offline for >= graceMs, WITHOUT
+   * deleting the permanent Tribe or its members!
    */
   public collectExpiredOfflineTribes(
     playersById: ReadonlyMap<string, ActiveWorldPlayer>,
@@ -270,7 +464,7 @@ export class TribeManager {
     const expiredIds: string[] = [];
     for (const tribe of this.tribesById.values()) {
       let anyOnline = false;
-      for (const memberId of tribe.memberIds) {
+      for (const memberId of tribe.members.keys()) {
         if (playersById.has(memberId)) {
           anyOnline = true;
           break;
@@ -286,13 +480,6 @@ export class TribeManager {
       }
       if (now - tribe.allMembersOfflineSince >= graceMs) {
         expiredIds.push(tribe.id);
-      }
-    }
-    for (let i = 0; i < expiredIds.length; i++) {
-      const t = this.tribesById.get(expiredIds[i]);
-      if (t) {
-        this.tribesById.delete(t.id);
-        this.tribesByTag.delete(t.tag);
       }
     }
     return expiredIds;
@@ -312,7 +499,7 @@ export class TribeManager {
   ): void {
     for (const tribe of this.tribesById.values()) {
       let anyOnline = false;
-      for (const memberId of tribe.memberIds) {
+      for (const memberId of tribe.members.keys()) {
         if (playersById.has(memberId)) {
           anyOnline = true;
           break;
@@ -322,273 +509,89 @@ export class TribeManager {
     }
   }
 
-  public exportPersistedState(): { nextTribeNum: number; tribes: PersistedTribeRecord[] } {
-    const tribes: PersistedTribeRecord[] = [];
-    for (const t of this.tribesById.values()) {
-      tribes.push({
-        id: t.id, name: t.name, tag: t.tag, visibility: t.visibility,
-        leaderId: t.leaderId, leaderName: t.leaderName,
-        memberIds: Array.from(t.memberIds), builderIds: Array.from(t.builderIds),
-        pendingRequests: Array.from(t.pendingRequests.values()), createdAt: t.createdAt,
-        relocatedTotemState: t.relocatedTotemState
-          ? { level: t.relocatedTotemState.level, huntCounts: { ...t.relocatedTotemState.huntCounts } }
-          : null,
-        allMembersOfflineSince: t.allMembersOfflineSince
-      });
-    }
-    return { nextTribeNum: this.nextTribeNum, tribes };
-  }
-
-  public importPersistedState(
-    raw: { nextTribeNum?: number; tribes?: unknown[] } | null | undefined,
-    bootNow: number = Date.now()
-  ): void {
-    this.clear();
-    let maxNum = typeof raw?.nextTribeNum === 'number' && raw.nextTribeNum >= 1
-      ? Math.floor(raw.nextTribeNum)
-      : 1;
-    if (Array.isArray(raw?.tribes)) {
-      for (const item of raw.tribes) {
-        if (!item || typeof item !== 'object') continue;
-        const obj = item as Partial<PersistedTribeRecord>;
-        const id = typeof obj.id === 'string' ? obj.id.trim() : '';
-        const name = typeof obj.name === 'string' ? obj.name.trim().slice(0, 20) : '';
-        const tag = typeof obj.tag === 'string' ? obj.tag.trim().toUpperCase().slice(0, 5) : '';
-        const leaderId = typeof obj.leaderId === 'string' ? obj.leaderId.trim() : '';
-        if (!id || !name || !tag || !leaderId || this.tribesById.has(id) || this.tribesByTag.has(tag)) {
-          continue;
-        }
-        const match = /^tribe-(\d+)$/.exec(id);
-        if (match) {
-          const parsedNum = Number(match[1]);
-          if (Number.isInteger(parsedNum) && parsedNum >= maxNum) maxNum = parsedNum + 1;
-        }
-        const memberIds = new Set<string>(
-          Array.isArray(obj.memberIds)
-            ? obj.memberIds.filter((m): m is string => typeof m === 'string' && m.length > 0)
-            : [leaderId]
-        );
-        memberIds.add(leaderId);
-        const builderIds = new Set<string>(
-          Array.isArray(obj.builderIds)
-            ? obj.builderIds.filter((b): b is string => typeof b === 'string' && memberIds.has(b))
-            : [leaderId]
-        );
-        builderIds.add(leaderId);
-        const pendingRequests = new Map<string, TribeJoinRequest>();
-        if (Array.isArray(obj.pendingRequests)) {
-          for (const req of obj.pendingRequests) {
-            if (req && typeof req.playerId === 'string' && typeof req.username === 'string') {
-              pendingRequests.set(req.playerId, {
-                playerId: req.playerId,
-                username: req.username,
-                requestedAt: Number(req.requestedAt) || bootNow
-              });
-            }
-          }
-        }
-        const tribe: InternalTribe = {
-          id, name, tag,
-          visibility: obj.visibility === 'private' ? 'private' : 'public',
-          leaderId,
-          leaderName: typeof obj.leaderName === 'string' && obj.leaderName ? obj.leaderName : 'Leader',
-          memberIds, builderIds, pendingRequests,
-          createdAt: Number(obj.createdAt) || bootNow,
-          relocatedTotemState:
-            obj.relocatedTotemState && typeof obj.relocatedTotemState.level === 'number'
-              ? {
-                  level: obj.relocatedTotemState.level,
-                  huntCounts: { ...(obj.relocatedTotemState.huntCounts || {}) } as Record<AnimalKind, number>
-                }
-              : null,
-          allMembersOfflineSince: bootNow
-        };
-        this.tribesById.set(id, tribe);
-        this.tribesByTag.set(tag, tribe);
-      }
-    }
-    this.nextTribeNum = Math.max(1, maxNum);
-  }
-
   public respondToJoinRequest(
-    leader: ActiveWorldPlayer,
+    actor: ActiveWorldPlayer,
+    targetPlayerId: string,
+    accept: boolean,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>,
+    now: number = Date.now()
+  ) {
+    return respondToJoinRequestCore({
+      actor,
+      targetPlayerId,
+      accept,
+      playersById,
+      tribesById: this.tribesById,
+      findTribeIdForMember: (pid) => this.findTribeIdForMember(pid),
+      clearPendingRequestsForPlayer: (pid) => this.clearPendingRequestsForPlayer(pid),
+      now
+    });
+  }
+
+  public requestOrAutoLeaveTribe(
+    player: ActiveWorldPlayer,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>,
+    now: number = Date.now()
+  ) {
+    return requestOrAutoLeaveTribeCore(player, playersById, this.tribesById, now);
+  }
+
+  public respondToLeaveRequest(
+    actor: ActiveWorldPlayer,
     targetPlayerId: string,
     accept: boolean,
     playersById: ReadonlyMap<string, ActiveWorldPlayer>
-  ): {
-    ok: boolean;
-    accepted?: boolean;
-    targetPlayer?: ActiveWorldPlayer;
-    tribeTag?: string;
-    tribeName?: string;
-    error?: string;
-  } {
-    if (!leader.tribeId) return { ok: false, error: 'Not in a Tribe.' };
-    const tribe = this.tribesById.get(leader.tribeId);
-    if (!tribe || tribe.leaderId !== leader.id) {
-      return { ok: false, error: 'Only the Tribe Leader can manage join requests.' };
-    }
-    const req = tribe.pendingRequests.get(targetPlayerId);
-    if (!req) {
-      return { ok: false, error: 'Join request no longer exists.' };
-    }
-    tribe.pendingRequests.delete(targetPlayerId);
-
-    const target = playersById.get(targetPlayerId);
-    if (!accept) {
-      return {
-        ok: true,
-        accepted: false,
-        targetPlayer: target,
-        tribeTag: tribe.tag,
-        tribeName: tribe.name
-      };
-    }
-
-    if (!target) {
-      return { ok: false, error: 'Player is no longer online.' };
-    }
-    if (target.tribeId) {
-      return { ok: false, error: `${target.username} already joined another Tribe.` };
-    }
-    if (Date.now() < target.combatUntil) {
-      return { ok: false, error: `${target.username} is currently in Combat Mode.` };
-    }
-    if (tribe.memberIds.size >= CONFIG.MAX_TRIBE_MEMBERS) {
-      return {
-        ok: false,
-        error: `Tribe [${tribe.tag}] is full (${CONFIG.MAX_TRIBE_MEMBERS}/${CONFIG.MAX_TRIBE_MEMBERS}).`
-      };
-    }
-
-    this.clearPendingRequestsForPlayer(target.id);
-    tribe.memberIds.add(target.id);
-    tribe.allMembersOfflineSince = null;
-    target.tribeId = tribe.id;
-    target.tribeTag = tribe.tag;
-    return {
-      ok: true,
-      accepted: true,
-      targetPlayer: target,
-      tribeTag: tribe.tag,
-      tribeName: tribe.name
-    };
-  }
-
-  public setRelocatedTotemState(tribeId: string, state: RelocatedTotemState | null): void {
-    const tribe = this.tribesById.get(tribeId);
-    if (tribe) {
-      tribe.relocatedTotemState = state
-        ? { level: state.level, huntCounts: { ...state.huntCounts } }
-        : null;
-    }
-  }
-
-  public consumeRelocatedTotemState(tribeId: string): RelocatedTotemState | null {
-    const tribe = this.tribesById.get(tribeId);
-    if (!tribe || !tribe.relocatedTotemState) return null;
-    const saved = tribe.relocatedTotemState;
-    tribe.relocatedTotemState = null;
-    return saved;
-  }
-
-  public leaveTribe(
-    player: ActiveWorldPlayer,
-    playersById: ReadonlyMap<string, ActiveWorldPlayer>
-  ): { ok: boolean; disbandedTribeId?: string; disbandedTag?: string } {
-    if (!player.tribeId) return { ok: false };
-    const tribe = this.tribesById.get(player.tribeId);
-    player.tribeId = null;
-    player.tribeTag = null;
-    if (!tribe) return { ok: true };
-
-    tribe.memberIds.delete(player.id);
-    tribe.builderIds.delete(player.id);
-    if (tribe.memberIds.size === 0) {
-      this.tribesById.delete(tribe.id);
-      this.tribesByTag.delete(tribe.tag);
-      return { ok: true, disbandedTribeId: tribe.id, disbandedTag: tribe.tag };
-    }
-
-    if (tribe.leaderId === player.id) {
-      const nextLeaderId = Array.from(tribe.memberIds)[0];
-      const nextLeader = playersById.get(nextLeaderId);
-      tribe.leaderId = nextLeaderId;
-      tribe.leaderName = nextLeader ? nextLeader.username : 'Leader';
-      tribe.builderIds.add(nextLeaderId);
-    }
-    return { ok: true };
-  }
-
-  public disbandTribe(
-    leader: ActiveWorldPlayer,
-    playersById: ReadonlyMap<string, ActiveWorldPlayer>
-  ): {
-    ok: boolean;
-    disbandedTribeId?: string;
-    disbandedTag?: string;
-    affectedPlayers?: ActiveWorldPlayer[];
-    error?: string;
-  } {
-    if (!leader.tribeId) return { ok: false, error: 'You are not in a Tribe.' };
-    const tribe = this.tribesById.get(leader.tribeId);
-    if (!tribe) {
-      leader.tribeId = null;
-      leader.tribeTag = null;
-      return { ok: false, error: 'Tribe no longer exists.' };
-    }
-    if (tribe.leaderId !== leader.id) {
-      return { ok: false, error: 'Only the Tribe Leader can disband the Tribe.' };
-    }
-
-    const affectedPlayers: ActiveWorldPlayer[] = [];
-    for (const memberId of tribe.memberIds) {
-      const m = playersById.get(memberId);
-      if (m) {
-        m.tribeId = null;
-        m.tribeTag = null;
-        affectedPlayers.push(m);
-      }
-    }
-
-    this.tribesById.delete(tribe.id);
-    this.tribesByTag.delete(tribe.tag);
-    return {
-      ok: true,
-      disbandedTribeId: tribe.id,
-      disbandedTag: tribe.tag,
-      affectedPlayers
-    };
+  ) {
+    return respondToLeaveRequestCore(actor, targetPlayerId, accept, playersById, this.tribesById);
   }
 
   public kickMember(
-    leader: ActiveWorldPlayer,
+    actor: ActiveWorldPlayer,
     targetPlayerId: string,
     playersById: ReadonlyMap<string, ActiveWorldPlayer>
-  ): { ok: boolean; error?: string } {
-    if (!leader.tribeId) return { ok: false, error: 'Not in a Tribe.' };
-    const tribe = this.tribesById.get(leader.tribeId);
-    if (!tribe || tribe.leaderId !== leader.id) {
-      return { ok: false, error: 'Only the Tribe Leader can kick members.' };
-    }
-    if (targetPlayerId === leader.id) {
-      return { ok: false, error: 'Use Leave Tribe instead.' };
-    }
-    if (!tribe.memberIds.has(targetPlayerId)) {
-      return { ok: false, error: 'Member not found in Tribe.' };
-    }
+  ) {
+    return kickMemberCore(actor, targetPlayerId, playersById, this.tribesById);
+  }
 
-    tribe.memberIds.delete(targetPlayerId);
-    tribe.builderIds.delete(targetPlayerId);
-    const target = playersById.get(targetPlayerId);
-    if (target) {
-      target.tribeId = null;
-      target.tribeTag = null;
-    }
-    return { ok: true };
+  public setMemberRolesBatch(
+    actor: ActiveWorldPlayer,
+    updates: ReadonlyArray<{ targetPlayerId: string; role: TribeRole }>,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>
+  ) {
+    return setMemberRolesBatchCore(actor, updates, playersById, this.tribesById);
+  }
+
+  /**
+   * Backward-compatible helper: maps `allowed=true` -> `chieftain` and `allowed=false` -> `member`.
+   */
+  public setMemberBuildPermission(
+    leader: ActiveWorldPlayer,
+    targetPlayerId: string,
+    allowed: boolean,
+    playersById: ReadonlyMap<string, ActiveWorldPlayer>
+  ): { ok: boolean; allowed?: boolean; targetPlayer?: ActiveWorldPlayer; tribeTag?: string; error?: string } {
+    const res = this.setMemberRolesBatch(
+      leader,
+      [{ targetPlayerId, role: allowed ? 'chieftain' : 'member' }],
+      playersById
+    );
+    if (!res.ok) return { ok: false, error: res.error };
+    return {
+      ok: true,
+      allowed,
+      targetPlayer: playersById.get(targetPlayerId),
+      tribeTag: res.tribeTag
+    };
   }
 
   public isTribeLeader(playerId: string, tribeId?: string | null): boolean {
+    if (!tribeId) return false;
+    const tribe = this.tribesById.get(tribeId);
+    if (!tribe) return false;
+    return isExecutiveTribeRole(tribe.members.get(playerId)?.role);
+  }
+
+  public isPrimaryChief(playerId: string, tribeId?: string | null): boolean {
     if (!tribeId) return false;
     const tribe = this.tribesById.get(tribeId);
     return Boolean(tribe && tribe.leaderId === playerId);
@@ -598,44 +601,7 @@ export class TribeManager {
     if (!player.tribeId) return false;
     const tribe = this.tribesById.get(player.tribeId);
     if (!tribe) return false;
-    return tribe.leaderId === player.id || tribe.builderIds.has(player.id);
-  }
-
-  public setMemberBuildPermission(
-    leader: ActiveWorldPlayer,
-    targetPlayerId: string,
-    allowed: boolean,
-    playersById: ReadonlyMap<string, ActiveWorldPlayer>
-  ): {
-    ok: boolean;
-    allowed?: boolean;
-    targetPlayer?: ActiveWorldPlayer;
-    tribeTag?: string;
-    error?: string;
-  } {
-    if (!leader.tribeId) return { ok: false, error: 'Not in a Tribe.' };
-    const tribe = this.tribesById.get(leader.tribeId);
-    if (!tribe || tribe.leaderId !== leader.id) {
-      return { ok: false, error: 'Only the Tribe Host can grant or revoke build permissions.' };
-    }
-    if (targetPlayerId === leader.id) {
-      return { ok: false, error: 'Tribe Host always has full build permissions.' };
-    }
-    if (!tribe.memberIds.has(targetPlayerId)) {
-      return { ok: false, error: 'Member not found in your Tribe.' };
-    }
-
-    if (allowed) {
-      tribe.builderIds.add(targetPlayerId);
-    } else {
-      tribe.builderIds.delete(targetPlayerId);
-    }
-    return {
-      ok: true,
-      allowed,
-      targetPlayer: playersById.get(targetPlayerId),
-      tribeTag: tribe.tag
-    };
+    return hasBlueprintBuildRole(tribe.members.get(player.id)?.role);
   }
 
   public areAllies(a: ActiveWorldPlayer, b: ActiveWorldPlayer): boolean {
@@ -659,31 +625,73 @@ export class TribeManager {
       return {
         allowed: false,
         lockedTag: tribe?.tag || 'TRIBE',
-        reason: tribe
-          ? `Locked by [${tribe.tag}] Tribe.`
-          : 'Locked: reclaim this Totem by creating a Tribe first.'
+        reason: tribe ? `Locked by [${tribe.tag}] Tribe.` : 'Locked by another Tribe.'
       };
     }
     return { allowed: true };
   }
 
-  public disbandTribeById(
-    tribeId: string,
-    playersById: ReadonlyMap<string, ActiveWorldPlayer>
-  ): { disbandedTag: string; affectedPlayers: ActiveWorldPlayer[] } | null {
+  public getTribeMemberIds(tribeId: string | null | undefined): string[] {
+    if (!tribeId) return [];
     const tribe = this.tribesById.get(tribeId);
-    if (!tribe) return null;
-    const affectedPlayers: ActiveWorldPlayer[] = [];
-    for (const memberId of tribe.memberIds) {
-      const m = playersById.get(memberId);
-      if (m) {
-        m.tribeId = null;
-        m.tribeTag = null;
-        affectedPlayers.push(m);
-      }
+    return tribe ? Array.from(tribe.members.keys()) : [];
+  }
+
+  public setRelocatedTotemState(tribeId: string, state: RelocatedTotemState | null): void {
+    const tribe = this.tribesById.get(tribeId);
+    if (tribe) {
+      tribe.relocatedTotemState = state
+        ? { level: state.level, huntCounts: { ...state.huntCounts } }
+        : null;
     }
-    this.tribesById.delete(tribe.id);
-    this.tribesByTag.delete(tribe.tag);
-    return { disbandedTag: tribe.tag, affectedPlayers };
+  }
+
+  public consumeRelocatedTotemState(tribeId: string): RelocatedTotemState | null {
+    const tribe = this.tribesById.get(tribeId);
+    if (!tribe || !tribe.relocatedTotemState) return null;
+    const saved = tribe.relocatedTotemState;
+    tribe.relocatedTotemState = null;
+    return saved;
+  }
+
+  public exportPersistedState(
+    getVault?: (tribeId: string) => {
+      vaultSlot: SavedBaseBlueprintSlot | null;
+      storedBuilds: BlueprintStoredBuilds;
+      lastDeployAt: number;
+    }
+  ): {
+    nextTribeNum: number;
+    founderPlayerIds: string[];
+    tribes: PersistedTribeRecord[];
+  } {
+    return exportPersistedTribeState(
+      this.tribesById,
+      this.founderPlayerIds,
+      this.nextTribeNum,
+      getVault
+    );
+  }
+
+  public importPersistedState(
+    raw: { nextTribeNum?: number; founderPlayerIds?: unknown[]; tribes?: unknown[] } | null | undefined,
+    bootNow: number = Date.now(),
+    onHydrateVault?: (
+      tribeId: string,
+      slot: SavedBaseBlueprintSlot | null,
+      lastDeployAt: number,
+      storedBuilds: BlueprintStoredBuilds | undefined
+    ) => void
+  ): void {
+    this.clear();
+    this.nextTribeNum = importPersistedTribeState({
+      raw,
+      bootNow,
+      tribesById: this.tribesById,
+      tribesByTag: this.tribesByTag,
+      tribesByLowerName: this.tribesByLowerName,
+      founderPlayerIds: this.founderPlayerIds,
+      onHydrateVault
+    });
   }
 }

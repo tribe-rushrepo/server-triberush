@@ -50,5 +50,61 @@ export const TOOL_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
       outputCount: 1,
       station: 'hand'
     }
+  },
+  {
+    id: 'stone_axe',
+    name: 'Stone Axe',
+    category: 'Tools',
+    maxStack: 1,
+    iconKey: 'stone-axe',
+    handStyle: 'heavy_swing',
+    trailTheme: 'stone',
+    toolTier: 2,
+    combat: {
+      cooldownMs: 510,
+      durationMs: 360,
+      reach: 108,
+      treeDmg: 32,
+      bushDmg: 24,
+      rockDmg: 0,
+      combatDmg: 14,
+      knockback: 360
+    },
+    recipe: {
+      costs: [
+        { itemId: 'wood', count: 12 },
+        { itemId: 'stone', count: 9 }
+      ],
+      outputCount: 1,
+      station: 'hand'
+    }
+  },
+  {
+    id: 'stone_pickaxe',
+    name: 'Stone Pickaxe',
+    category: 'Tools',
+    maxStack: 1,
+    iconKey: 'stone-pickaxe',
+    handStyle: 'heavy_swing',
+    trailTheme: 'stone',
+    toolTier: 2,
+    combat: {
+      cooldownMs: 530,
+      durationMs: 370,
+      reach: 108,
+      treeDmg: 0,
+      bushDmg: 0,
+      rockDmg: 28,
+      combatDmg: 12,
+      knockback: 280
+    },
+    recipe: {
+      costs: [
+        { itemId: 'wood', count: 12 },
+        { itemId: 'stone', count: 9 }
+      ],
+      outputCount: 1,
+      station: 'hand'
+    }
   }
 ];

@@ -82,5 +82,13 @@ export const RESOURCE_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
       outputCount: 1,
       station: 'hand'
     }
+  },
+  {
+    id: 'clay',
+    name: 'Clay',
+    category: 'Resources',
+    maxStack: 32,
+    iconKey: 'clay',
+    handStyle: 'held_item'
   }
 ];

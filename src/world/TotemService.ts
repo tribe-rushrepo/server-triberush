@@ -25,7 +25,11 @@ export class TotemService {
       cow: 0,
       chicken: 0,
       duck: 0,
-      sheep: 0
+      sheep: 0,
+      wolf: 0,
+      lion: 0,
+      sparrow: 0,
+      crow: 0
     };
   }
 

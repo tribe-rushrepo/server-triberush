@@ -7,7 +7,8 @@ import { startBrokenTotemCollapseCore } from './TotemLifecycleHandler.js';
 export function handleSwingCore(
   ctx: WorldRoomContext,
   playerId: string,
-  angle?: number
+  angle?: number,
+  clayRollOverride?: number
 ): {
   ok: boolean;
   swingHand?: 0 | 1;
@@ -151,6 +152,12 @@ export function handleSwingCore(
         const dropTotal = bestRock.dropCount || 3;
         for (let d = 0; d < dropTotal; d++) {
           ctx.spawnGroundDrop(dropItem, 1, bestRock.x, bestRock.y);
+        }
+        const clayRoll =
+          typeof clayRollOverride === 'number' ? clayRollOverride : Math.random();
+        if (clayRoll < CONFIG.ROCK_CLAY_DROP_CHANCE) {
+          const clayCount = 3 + Math.floor(Math.random() * 2); // 3-4 Clay drops (~50%)
+          ctx.spawnGroundDrop('clay', clayCount, bestRock.x, bestRock.y);
         }
       }
 
@@ -311,15 +318,23 @@ export function handleSwingCore(
 
   // 5. Siege Damage against Walls, Multi-Tile Structures & Tribe Totems (Outsiders ONLY!)
   const siegeDmg =
-    itemDef.id === 'wooden_axe'
-      ? 22
-      : itemDef.id === 'wooden_pickaxe'
-        ? 16
-        : itemDef.id === 'wooden_sword'
-          ? 12
-          : itemDef.id === 'wooden_spear'
-            ? 8
-            : 10;
+    itemDef.id === 'stone_axe'
+      ? 30
+      : itemDef.id === 'wooden_axe'
+        ? 22
+        : itemDef.id === 'stone_pickaxe'
+          ? 22
+          : itemDef.id === 'wooden_pickaxe'
+            ? 16
+            : itemDef.id === 'stone_sword'
+              ? 16
+              : itemDef.id === 'wooden_sword'
+                ? 12
+                : itemDef.id === 'stone_spear'
+                  ? 11
+                  : itemDef.id === 'wooden_spear'
+                    ? 8
+                    : 10;
 
   let hitStructureEntity = false;
   const wallMaxReach = stats.reach + 16;
@@ -351,7 +366,7 @@ export function handleSwingCore(
       ctx.placedWalls.delete(wall.id);
       ctx.world.removeBoxCollider('wall', wall.id, wall.x, wall.y, halfW, halfH);
       ctx.spawnGroundDrop('wood', 3, wall.x, wall.y);
-      ctx.syncStandingBaseAutosave(wall.ownerId, now);
+      ctx.syncStandingBaseAutosave(wall.tribeId || wall.ownerId, now);
       ctx.markWorldStateDirty();
     }
     const wallPayload = {
@@ -393,11 +408,15 @@ export function handleSwingCore(
         } else if (s.kind === 'watchtower') {
           ctx.spawnGroundDrop('wood', 8, s.x, s.y);
           ctx.spawnGroundDrop('stone', 4, s.x, s.y);
+        } else if (s.kind === 'cooking_pot') {
+          ctx.spawnGroundDrop('clay', 5, s.x, s.y);
+          ctx.spawnGroundDrop('stone', 2, s.x, s.y);
+          ctx.spawnGroundDrop('coal', 2, s.x, s.y);
         } else {
           ctx.spawnGroundDrop('coal', 4, s.x, s.y);
           ctx.spawnGroundDrop('wood', 2, s.x, s.y);
         }
-        ctx.syncStandingBaseAutosave(s.ownerId, now);
+        ctx.syncStandingBaseAutosave(s.tribeId || s.ownerId, now);
         ctx.markWorldStateDirty();
       }
       const structPayload = {
@@ -428,8 +447,8 @@ export function handleSwingCore(
       const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
       if (dot < 0.3) continue;
 
-      if (!totem.tribeId && totem.dormantExpiresAt && now < totem.dormantExpiresAt) {
-        blockedReason = 'This Tribe Totem is unbreakable while its Host is away.';
+      if (totem.dormantExpiresAt && now < totem.dormantExpiresAt) {
+        blockedReason = 'This Tribe Totem is unbreakable while all Tribe members are offline.';
         ctx.emitPlayerEvent(player.id, {
           type: 'ACTION_NOTICE',
           message: blockedReason,

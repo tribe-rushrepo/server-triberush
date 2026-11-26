@@ -90,5 +90,58 @@ export const FOOD_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     iconKey: 'raw_mutton',
     handStyle: 'held_item',
     food: { healAmount: 3, hungerAmount: 7 }
+  },
+  {
+    id: 'cooked_pork',
+    name: 'Cooked Pork',
+    category: 'Food',
+    maxStack: 32,
+    iconKey: 'cooked_pork',
+    handStyle: 'held_item',
+    food: { healAmount: 12, hungerAmount: 20 }
+  },
+  {
+    id: 'cooked_beef',
+    name: 'Cooked Beef',
+    category: 'Food',
+    maxStack: 32,
+    iconKey: 'cooked_beef',
+    handStyle: 'held_item',
+    food: { healAmount: 16, hungerAmount: 26 }
+  },
+  {
+    id: 'cooked_chicken',
+    name: 'Cooked Chicken',
+    category: 'Food',
+    maxStack: 32,
+    iconKey: 'cooked_chicken',
+    handStyle: 'held_item',
+    food: { healAmount: 8, hungerAmount: 16 }
+  },
+  {
+    id: 'cooked_duck',
+    name: 'Cooked Duck',
+    category: 'Food',
+    maxStack: 32,
+    iconKey: 'cooked_duck',
+    handStyle: 'held_item',
+    food: { healAmount: 10, hungerAmount: 18 }
+  },
+  {
+    id: 'cooked_mutton',
+    name: 'Cooked Mutton',
+    category: 'Food',
+    maxStack: 32,
+    iconKey: 'cooked_mutton',
+    handStyle: 'held_item',
+    food: { healAmount: 13, hungerAmount: 22 }
   }
 ];
+
+export const RAW_TO_COOKED_MEAT: Readonly<Record<string, string>> = {
+  raw_pork: 'cooked_pork',
+  raw_beef: 'cooked_beef',
+  raw_chicken: 'cooked_chicken',
+  raw_duck: 'cooked_duck',
+  raw_mutton: 'cooked_mutton'
+};

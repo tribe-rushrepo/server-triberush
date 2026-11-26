@@ -107,7 +107,8 @@ export interface WorldRoomContext {
     originX: number,
     originY: number,
     targetX?: number,
-    targetY?: number
+    targetY?: number,
+    droppedByPlayer?: boolean
   ): WorldGroundDrop;
   registerStructureColliders(s: WorldPlacedStructure): void;
   removeStructureEntity(s: WorldPlacedStructure): void;

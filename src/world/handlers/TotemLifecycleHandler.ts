@@ -26,6 +26,18 @@ function circleIntersectsSquare(
   return dx * dx + dy * dy < radius * radius;
 }
 
+export function syncTribeBlueprintToOnlineMembers(
+  ctx: WorldRoomContext,
+  tribeId: string | null | undefined
+): void {
+  if (!tribeId) return;
+  for (const p of ctx.playersById.values()) {
+    if (p.tribeId === tribeId) {
+      ctx.syncPlayerInventory(p);
+    }
+  }
+}
+
 export function findActiveCollapseZoneForPlayer(
   ctx: WorldRoomContext,
   player: ActiveWorldPlayer,
@@ -33,7 +45,7 @@ export function findActiveCollapseZoneForPlayer(
 ): BrokenTotemCollapseZone | null {
   for (const z of ctx.brokenTotemZones.values()) {
     if (now >= z.expiresAt) continue;
-    if (z.ownerId === player.id || (player.tribeId && z.tribeId === player.tribeId)) {
+    if ((player.tribeId && z.tribeId === player.tribeId) || (!player.tribeId && z.ownerId === player.id)) {
       return z;
     }
   }
@@ -45,14 +57,19 @@ export function getBlueprintSummaryForPlayerCore(
   player: ActiveWorldPlayer,
   now = Date.now()
 ): BlueprintSlotSummary {
+  const vaultKey = player.tribeId || player.id;
+  const canBuildOrLoad = Boolean(player.tribeId && ctx.tribeManager.hasBuildPermission(player));
   const hasStandingOrDormantTotem = Boolean(
-    ctx.totemService.findTotemForOwner(player.id, ctx.placedTotems.values()) ||
-      ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values())
+    (player.tribeId &&
+      ctx.totemService.findTotemForTribe(player.tribeId, ctx.placedTotems.values())) ||
+      ctx.totemService.findTotemForOwner(player.id, ctx.placedTotems.values())
   );
   const hasTotemItemInInv = ctx.countPlayerItem(player, 'tribe_totem') > 0;
   const hasActiveCollapseZone = Boolean(findActiveCollapseZoneForPlayer(ctx, player, now));
 
   return ctx.blueprintService.getSummary(player, now, {
+    vaultKey,
+    canBuildOrLoad,
     hasStandingOrDormantTotem,
     hasTotemItemInInv,
     hasActiveCollapseZone
@@ -61,18 +78,26 @@ export function getBlueprintSummaryForPlayerCore(
 
 export function syncStandingBaseAutosaveCore(
   ctx: WorldRoomContext,
-  ownerId: string | null | undefined,
+  keyOrOwnerId: string | null | undefined,
   now = Date.now()
 ): void {
-  if (!ownerId) return;
-  const totem = ctx.totemService.findTotemForOwner(ownerId, ctx.placedTotems.values());
+  if (!keyOrOwnerId) return;
+  let totem = ctx.totemService.findTotemForTribe(keyOrOwnerId, ctx.placedTotems.values());
+  if (!totem) {
+    const p = ctx.playersById.get(keyOrOwnerId);
+    if (p?.tribeId) {
+      totem = ctx.totemService.findTotemForTribe(p.tribeId, ctx.placedTotems.values());
+    }
+  }
+  if (!totem) {
+    totem = ctx.totemService.findTotemForOwner(keyOrOwnerId, ctx.placedTotems.values());
+  }
   if (!totem) return;
 
-  const isDormant = Boolean(!totem.tribeId && totem.dormantOwnerId === ownerId);
+  const vaultKey = totem.tribeId || totem.dormantOwnerId || totem.ownerId;
   const matchOwnerOrTribe = (entOwnerId: string, entTribeId: string | null | undefined): boolean => {
-    if (totem.tribeId) return entTribeId === totem.tribeId;
-    if (isDormant) return !entTribeId && entOwnerId === ownerId;
-    return entOwnerId === ownerId;
+    if (totem!.tribeId) return entTribeId === totem!.tribeId;
+    return !entTribeId && entOwnerId === vaultKey;
   };
 
   const walls: WorldPlacedWall[] = [];
@@ -104,7 +129,7 @@ export function syncStandingBaseAutosaveCore(
   }
 
   ctx.blueprintService.saveSlot({
-    ownerId,
+    ownerId: vaultKey,
     totem,
     walls,
     structures,
@@ -113,16 +138,14 @@ export function syncStandingBaseAutosaveCore(
     now
   });
 
-  const onlineOwner = ctx.playersById.get(ownerId);
-  if (onlineOwner) {
-    ctx.syncPlayerInventory(onlineOwner);
+  if (totem.tribeId) {
+    syncTribeBlueprintToOnlineMembers(ctx, totem.tribeId);
+  } else {
+    const onlineOwner = ctx.playersById.get(vaultKey);
+    if (onlineOwner) ctx.syncPlayerInventory(onlineOwner);
   }
 }
 
-/**
- * Checks whether ANY tree, rock, berry/stick bush, fallen log, water/mud body,
- * or existing placed build exists anywhere inside the 20x20 (`cx ± halfPx`, `cy ± halfPx`) territory square.
- */
 export function findTerritoryObstructionCore(
   ctx: WorldRoomContext,
   cx: number,
@@ -132,52 +155,36 @@ export function findTerritoryObstructionCore(
   for (let i = 0; i < ctx.world.trees.length; i++) {
     const t = ctx.world.trees[i];
     if (t.destroyedAt !== null) continue;
-    if (circleIntersectsSquare(t.x, t.y, t.trunkRadius, cx, cy, halfPx)) {
-      return 'trees';
-    }
+    if (circleIntersectsSquare(t.x, t.y, t.trunkRadius, cx, cy, halfPx)) return 'trees';
   }
   for (let i = 0; i < ctx.world.rocks.length; i++) {
     const r = ctx.world.rocks[i];
     if (r.destroyedAt !== null) continue;
-    if (circleIntersectsSquare(r.x, r.y, r.radius, cx, cy, halfPx)) {
-      return 'rocks';
-    }
+    if (circleIntersectsSquare(r.x, r.y, r.radius, cx, cy, halfPx)) return 'rocks';
   }
   for (let i = 0; i < ctx.world.bushes.length; i++) {
     const b = ctx.world.bushes[i];
     if (b.destroyedAt !== null) continue;
-    if (circleIntersectsSquare(b.x, b.y, b.radius, cx, cy, halfPx)) {
-      return 'bushes or resources';
-    }
+    if (circleIntersectsSquare(b.x, b.y, b.radius, cx, cy, halfPx)) return 'bushes or resources';
   }
   for (let i = 0; i < ctx.world.fallenLogs.length; i++) {
     const l = ctx.world.fallenLogs[i];
-    if (circleIntersectsSquare(l.x, l.y, l.coreRadius, cx, cy, halfPx)) {
-      return 'fallen logs';
-    }
+    if (circleIntersectsSquare(l.x, l.y, l.coreRadius, cx, cy, halfPx)) return 'fallen logs';
   }
   for (let i = 0; i < ctx.world.lakes.length; i++) {
     const lk = ctx.world.lakes[i];
-    if (circleIntersectsSquare(lk.x, lk.y, lk.outerRadius, cx, cy, halfPx)) {
-      return 'water';
-    }
+    if (circleIntersectsSquare(lk.x, lk.y, lk.outerRadius, cx, cy, halfPx)) return 'water';
   }
   for (let i = 0; i < ctx.world.ponds.length; i++) {
     const pd = ctx.world.ponds[i];
-    if (circleIntersectsSquare(pd.x, pd.y, pd.radius, cx, cy, halfPx)) {
-      return 'water';
-    }
+    if (circleIntersectsSquare(pd.x, pd.y, pd.radius, cx, cy, halfPx)) return 'water';
   }
   for (let i = 0; i < ctx.world.mudPatches.length; i++) {
     const md = ctx.world.mudPatches[i];
-    if (circleIntersectsSquare(md.x, md.y, md.radius * 0.72, cx, cy, halfPx)) {
-      return 'mud';
-    }
+    if (circleIntersectsSquare(md.x, md.y, md.radius * 0.72, cx, cy, halfPx)) return 'mud';
   }
   for (const w of ctx.placedWalls.values()) {
-    if (Math.abs(w.x - cx) <= halfPx + 8 && Math.abs(w.y - cy) <= halfPx + 8) {
-      return 'existing builds';
-    }
+    if (Math.abs(w.x - cx) <= halfPx + 8 && Math.abs(w.y - cy) <= halfPx + 8) return 'existing builds';
   }
   for (const s of ctx.placedStructures.values()) {
     const sHalfW = (s.tilesW * CONFIG.BUILD_GRID_SIZE) / 2;
@@ -187,54 +194,35 @@ export function findTerritoryObstructionCore(
     }
   }
   for (const c of ctx.placedChests.values()) {
-    if (circleIntersectsSquare(c.x, c.y, c.radius, cx, cy, halfPx)) {
-      return 'existing chests';
-    }
+    if (circleIntersectsSquare(c.x, c.y, c.radius, cx, cy, halfPx)) return 'existing chests';
   }
   for (const t of ctx.placedTotems.values()) {
-    if (circleIntersectsSquare(t.x, t.y, t.radius, cx, cy, halfPx)) {
-      return 'another Totem';
-    }
+    if (circleIntersectsSquare(t.x, t.y, t.radius, cx, cy, halfPx)) return 'another Totem';
   }
   return null;
 }
 
-export function packAndRemoveTribeBaseOnDisbandCore(
+/**
+ * Auto-saves all standing Tribe builds + Chest contents into the Tribe Totem Vault (`tribeId`)
+ * and vanishes them cleanly from the map after 15 minutes with 0 members online.
+ * Preserves the permanent Tribe and its member roster.
+ */
+export function packAndVanishTribeBaseCore(
   ctx: WorldRoomContext,
-  leader: ActiveWorldPlayer,
   tribeId: string,
   now = Date.now()
-): { ok: boolean; hadTotem?: boolean; error?: string } {
-  if (now < leader.combatUntil) {
-    return { ok: false, error: 'Cannot disband Tribe during Combat Mode.' };
-  }
-  for (const p of ctx.playersById.values()) {
-    if (p.tribeId === tribeId && !p.isDead && now < p.combatUntil) {
-      return { ok: false, error: 'Cannot disband Tribe while a Tribe member is in Combat Mode.' };
-    }
-  }
-  const activeCollapse = ctx.brokenTotemZones.get(tribeId);
-  if (activeCollapse && now < activeCollapse.expiresAt) {
-    return {
-      ok: false,
-      error: 'Your Tribe Totem was broken! Place a new Totem inside your 20x20 territory first.'
-    };
-  }
-
+): boolean {
   const totem = ctx.totemService.findTotemForTribe(tribeId, ctx.placedTotems.values());
-  if (!totem) {
-    return { ok: true, hadTotem: false };
-  }
+  if (!totem) return false;
 
-  // Autosave all standing builds & Chest contents into Host's Blueprint Vault before packing
-  syncStandingBaseAutosaveCore(ctx, leader.id, now);
+  syncStandingBaseAutosaveCore(ctx, tribeId, now);
 
   ctx.placedTotems.delete(totem.id);
   ctx.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
 
   const wallIds: number[] = [];
   for (const w of Array.from(ctx.placedWalls.values())) {
-    if (w.tribeId === tribeId || (!w.tribeId && w.ownerId === leader.id)) {
+    if (w.tribeId === tribeId && ctx.totemService.isPointInsideTotem(totem, w.x, w.y, -4)) {
       const halfW = w.orientation === 'h' ? w.length / 2 : w.thickness / 2;
       const halfH = w.orientation === 'h' ? w.thickness / 2 : w.length / 2;
       ctx.placedWalls.delete(w.id);
@@ -242,27 +230,24 @@ export function packAndRemoveTribeBaseOnDisbandCore(
       wallIds.push(w.id);
     }
   }
-
   const structureIds: number[] = [];
   for (const s of Array.from(ctx.placedStructures.values())) {
-    if (s.tribeId === tribeId || (!s.tribeId && s.ownerId === leader.id)) {
+    if (s.tribeId === tribeId && ctx.totemService.isPointInsideTotem(totem, s.x, s.y, -4)) {
       ctx.removeStructureEntity(s);
       structureIds.push(s.id);
     }
   }
-
   const chestIds: number[] = [];
   for (const c of Array.from(ctx.placedChests.values())) {
-    if (c.ownerTribeId === tribeId || (!c.ownerTribeId && c.ownerId === leader.id)) {
+    if (c.ownerTribeId === tribeId && ctx.totemService.isPointInsideTotem(totem, c.x, c.y, -4)) {
       ctx.placedChests.delete(c.id);
       ctx.world.removeSolidCollider('chest', c.id, c.x, c.y, c.radius);
       chestIds.push(c.id);
     }
   }
-
   const torchIds: number[] = [];
   for (const t of Array.from(ctx.placedTorches.values())) {
-    if (t.ownerTribeId === tribeId || (!t.ownerTribeId && t.ownerId === leader.id)) {
+    if (t.ownerTribeId === tribeId && ctx.totemService.isPointInsideTotem(totem, t.x, t.y, -4)) {
       ctx.placedTorches.delete(t.id);
       torchIds.push(t.id);
     }
@@ -276,186 +261,6 @@ export function packAndRemoveTribeBaseOnDisbandCore(
     chestIds,
     torchIds
   });
-  return { ok: true, hadTotem: true };
-}
-
-/**
- * Triggered when a Tribe Host disconnects/leaves WITHOUT clicking the Disband button:
- * - Disbands the Tribe immediately so all members become tribeless (and cannot open Chests).
- * - Keeps the Totem & standing builds on the map for 15 minutes with the Totem 100% UNBREAKABLE.
- */
-export function handleHostLeftWithoutDisbandCore(
-  ctx: WorldRoomContext,
-  hostId: string,
-  tribeId: string,
-  now = Date.now()
-): void {
-  const totem = ctx.totemService.findTotemForTribe(tribeId, ctx.placedTotems.values());
-  const disbanded = ctx.tribeManager.disbandTribeById(tribeId, ctx.playersById);
-
-  if (disbanded) {
-    for (const member of disbanded.affectedPlayers) {
-      ctx.stripSpareTribeTotemItems(member);
-      ctx.syncPlayerInventory(member);
-      ctx.emitRosterEvent({
-        type: 'PLAYER_TRIBE_CHANGED',
-        playerId: member.id,
-        shortId: member.shortId,
-        tribeId: null,
-        tribeTag: null
-      });
-      ctx.emitPlayerEvent(member.id, {
-        type: 'ACTION_NOTICE',
-        message: `Tribe [${disbanded.disbandedTag}] Host left the server — Tribe disbanded and Chests are locked.`
-      });
-    }
-  }
-
-  if (totem) {
-    totem.tribeId = null;
-    totem.ownerId = hostId;
-    totem.dormantOwnerId = hostId;
-    totem.dormantExpiresAt = now + CONFIG.DORMANT_TOTEM_DURATION_MS;
-
-    for (const w of ctx.placedWalls.values()) {
-      if (w.tribeId === tribeId) {
-        w.tribeId = null;
-        w.ownerId = hostId;
-      }
-    }
-    for (const s of ctx.placedStructures.values()) {
-      if (s.tribeId === tribeId) {
-        s.tribeId = null;
-        s.ownerId = hostId;
-      }
-    }
-    for (const c of ctx.placedChests.values()) {
-      if (c.ownerTribeId === tribeId) {
-        c.ownerTribeId = null;
-        c.ownerId = hostId;
-        ctx.emitRosterEvent({
-          type: 'CHEST_PLACED',
-          chest: {
-            id: c.id,
-            x: c.x,
-            y: c.y,
-            radius: c.radius,
-            ownerId: c.ownerId,
-            ownerTribeId: null
-          }
-        });
-      }
-    }
-    for (const t of ctx.placedTorches.values()) {
-      if (t.ownerTribeId === tribeId) {
-        t.ownerTribeId = null;
-        t.ownerId = hostId;
-      }
-    }
-
-    syncStandingBaseAutosaveCore(ctx, hostId, now);
-    ctx.emitRosterEvent({
-      type: 'TOTEM_UPDATED',
-      totem: ctx.totemService.serializeTotem(totem)
-    });
-  }
-
-  const collapse = ctx.brokenTotemZones.get(tribeId);
-  if (collapse) {
-    ctx.brokenTotemZones.delete(tribeId);
-    ctx.brokenTotemZones.set(`owner:${hostId}`, collapse);
-    ctx.emitRosterEvent({
-      type: 'TOTEM_COLLAPSE_SYNC',
-      zones: Array.from(ctx.brokenTotemZones.values())
-    });
-  }
-
-  ctx.broadcastTribeSync();
-}
-
-export function reclaimDormantTotemForNewTribeCore(
-  ctx: WorldRoomContext,
-  leader: ActiveWorldPlayer,
-  tribeId: string,
-  tribeTag: string,
-  tribeName: string,
-  now = Date.now()
-): boolean {
-  let targetTotem: WorldPlacedTotem | null = null;
-  for (const t of ctx.placedTotems.values()) {
-    if (
-      !t.tribeId &&
-      (t.dormantOwnerId === leader.id || t.ownerId === leader.id) &&
-      (!t.dormantExpiresAt || now < t.dormantExpiresAt)
-    ) {
-      targetTotem = t;
-      break;
-    }
-  }
-  if (!targetTotem) return false;
-
-  targetTotem.tribeId = tribeId;
-  targetTotem.tribeTag = tribeTag;
-  targetTotem.tribeName = tribeName;
-  targetTotem.ownerId = leader.id;
-  targetTotem.dormantOwnerId = null;
-  targetTotem.dormantExpiresAt = null;
-
-  const reclaimedWalls: WorldPlacedWall[] = [];
-  for (const w of ctx.placedWalls.values()) {
-    if (!w.tribeId && w.ownerId === leader.id && ctx.totemService.isPointInsideTotem(targetTotem, w.x, w.y, -4)) {
-      w.tribeId = tribeId;
-      reclaimedWalls.push(w);
-    }
-  }
-
-  const reclaimedStructures: WorldPlacedStructure[] = [];
-  for (const s of ctx.placedStructures.values()) {
-    if (!s.tribeId && s.ownerId === leader.id && ctx.totemService.isPointInsideTotem(targetTotem, s.x, s.y, -4)) {
-      s.tribeId = tribeId;
-      reclaimedStructures.push(s);
-    }
-  }
-
-  const reclaimedChests: Array<{
-    id: number;
-    x: number;
-    y: number;
-    radius: number;
-    ownerId: string;
-    ownerTribeId: string | null;
-  }> = [];
-  for (const c of ctx.placedChests.values()) {
-    if (!c.ownerTribeId && c.ownerId === leader.id && ctx.totemService.isPointInsideTotem(targetTotem, c.x, c.y, -4)) {
-      c.ownerTribeId = tribeId;
-      reclaimedChests.push({
-        id: c.id,
-        x: c.x,
-        y: c.y,
-        radius: c.radius,
-        ownerId: c.ownerId,
-        ownerTribeId: c.ownerTribeId
-      });
-    }
-  }
-
-  const reclaimedTorches: WorldPlacedTorch[] = [];
-  for (const t of ctx.placedTorches.values()) {
-    if (!t.ownerTribeId && t.ownerId === leader.id && ctx.totemService.isPointInsideTotem(targetTotem, t.x, t.y, -4)) {
-      t.ownerTribeId = tribeId;
-      reclaimedTorches.push(t);
-    }
-  }
-
-  syncStandingBaseAutosaveCore(ctx, leader.id, now);
-  ctx.emitRosterEvent({
-    type: 'BLUEPRINT_BASE_DEPLOYED',
-    totem: ctx.totemService.serializeTotem(targetTotem),
-    walls: reclaimedWalls,
-    structures: reclaimedStructures,
-    chests: reclaimedChests,
-    torches: reclaimedTorches
-  });
   return true;
 }
 
@@ -465,6 +270,7 @@ export function startBrokenTotemCollapseCore(
   now = Date.now()
 ): void {
   const zoneKey = totem.tribeId || `owner:${totem.ownerId}`;
+  const vaultKey = totem.tribeId || totem.ownerId;
   const zone: BrokenTotemCollapseZone = {
     id: totem.id,
     tribeId: totem.tribeId || '',
@@ -475,7 +281,7 @@ export function startBrokenTotemCollapseCore(
     sizeTiles: totem.sizeTiles,
     expiresAt: now + CONFIG.BROKEN_TOTEM_COLLAPSE_MS
   };
-  ctx.blueprintService.clearSlot(totem.ownerId);
+  ctx.blueprintService.clearSlot(vaultKey);
   ctx.brokenTotemZones.set(zoneKey, zone);
 
   ctx.emitRosterEvent({
@@ -483,14 +289,26 @@ export function startBrokenTotemCollapseCore(
     zones: Array.from(ctx.brokenTotemZones.values())
   });
 
-  const owner = ctx.playersById.get(totem.ownerId);
-  if (owner) {
-    ctx.syncPlayerInventory(owner);
-    ctx.emitPlayerEvent(owner.id, {
-      type: 'ACTION_NOTICE',
-      message:
-        'Your Tribe Totem was broken! Place a new Totem inside your 20x20 territory within 3:00 or all builds and Chests will be destroyed!'
-    });
+  if (totem.tribeId) {
+    for (const p of ctx.playersById.values()) {
+      if (p.tribeId !== totem.tribeId) continue;
+      ctx.syncPlayerInventory(p);
+      ctx.emitPlayerEvent(p.id, {
+        type: 'ACTION_NOTICE',
+        message:
+          'Your Tribe Totem was broken! Chief, High Chief, or Chieftain must place a replacement Totem inside your 20x20 territory within 3:00!'
+      });
+    }
+  } else {
+    const owner = ctx.playersById.get(totem.ownerId);
+    if (owner) {
+      ctx.syncPlayerInventory(owner);
+      ctx.emitPlayerEvent(owner.id, {
+        type: 'ACTION_NOTICE',
+        message:
+          'Your Tribe Totem was broken! Place a new Totem inside your 20x20 territory within 3:00 or all builds and Chests will be destroyed!'
+      });
+    }
   }
 }
 
@@ -500,59 +318,41 @@ export function stepDormantTotemsAndCollapseZonesCore(
 ): boolean {
   let changed = false;
 
-  // 1. 15-Minute Unbreakable Dormant Totem Expiry -> vanish builds from map while keeping surviving autosave
+  // 1. 15-Minute All-Members-Offline Unbreakable Totem Countdown
   for (const totem of Array.from(ctx.placedTotems.values())) {
-    if (!totem.tribeId && totem.dormantExpiresAt && now >= totem.dormantExpiresAt) {
-      const ownerId = totem.dormantOwnerId || totem.ownerId;
-      syncStandingBaseAutosaveCore(ctx, ownerId, now);
+    if (!totem.dormantExpiresAt) continue;
 
-      ctx.placedTotems.delete(totem.id);
-      ctx.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
-
-      const wallIds: number[] = [];
-      for (const w of Array.from(ctx.placedWalls.values())) {
-        if (!w.tribeId && w.ownerId === ownerId && ctx.totemService.isPointInsideTotem(totem, w.x, w.y, -4)) {
-          const halfW = w.orientation === 'h' ? w.length / 2 : w.thickness / 2;
-          const halfH = w.orientation === 'h' ? w.thickness / 2 : w.length / 2;
-          ctx.placedWalls.delete(w.id);
-          ctx.world.removeBoxCollider('wall', w.id, w.x, w.y, halfW, halfH);
-          wallIds.push(w.id);
-        }
-      }
-      const structureIds: number[] = [];
-      for (const s of Array.from(ctx.placedStructures.values())) {
-        if (!s.tribeId && s.ownerId === ownerId && ctx.totemService.isPointInsideTotem(totem, s.x, s.y, -4)) {
-          ctx.removeStructureEntity(s);
-          structureIds.push(s.id);
-        }
-      }
-      const chestIds: number[] = [];
-      for (const c of Array.from(ctx.placedChests.values())) {
-        if (!c.ownerTribeId && c.ownerId === ownerId && ctx.totemService.isPointInsideTotem(totem, c.x, c.y, -4)) {
-          ctx.placedChests.delete(c.id);
-          ctx.world.removeSolidCollider('chest', c.id, c.x, c.y, c.radius);
-          chestIds.push(c.id);
-        }
-      }
-      const torchIds: number[] = [];
-      for (const t of Array.from(ctx.placedTorches.values())) {
-        if (!t.ownerTribeId && t.ownerId === ownerId && ctx.totemService.isPointInsideTotem(totem, t.x, t.y, -4)) {
-          ctx.placedTorches.delete(t.id);
-          torchIds.push(t.id);
-        }
-      }
-
+    if (totem.tribeId && !ctx.tribeManager.isAllMembersOffline(totem.tribeId, ctx.playersById)) {
+      totem.dormantExpiresAt = null;
+      totem.dormantOwnerId = null;
       ctx.emitRosterEvent({
-        type: 'BLUEPRINT_BASE_PACKED',
-        totemId: totem.id,
-        wallIds,
-        structureIds,
-        chestIds,
-        torchIds
+        type: 'TOTEM_UPDATED',
+        totem: ctx.totemService.serializeTotem(totem)
       });
-      const onlineOwner = ctx.playersById.get(ownerId);
-      if (onlineOwner) ctx.syncPlayerInventory(onlineOwner);
       changed = true;
+      continue;
+    }
+
+    if (now >= totem.dormantExpiresAt) {
+      if (totem.tribeId) {
+        if (packAndVanishTribeBaseCore(ctx, totem.tribeId, now)) {
+          changed = true;
+        }
+      } else {
+        const ownerId = totem.dormantOwnerId || totem.ownerId;
+        syncStandingBaseAutosaveCore(ctx, ownerId, now);
+        ctx.placedTotems.delete(totem.id);
+        ctx.world.removeSolidCollider('totem', totem.id, totem.x, totem.y, totem.radius);
+        ctx.emitRosterEvent({
+          type: 'BLUEPRINT_BASE_PACKED',
+          totemId: totem.id,
+          wallIds: [],
+          structureIds: [],
+          chestIds: [],
+          torchIds: []
+        });
+        changed = true;
+      }
     }
   }
 
@@ -593,7 +393,7 @@ export function stepDormantTotemsAndCollapseZonesCore(
     }
     for (const c of Array.from(ctx.placedChests.values())) {
       if (belongs(c.ownerId, c.ownerTribeId) && inZone(c.x, c.y)) {
-        c.slots.fill(null); // Permanently destroy all items inside the Chest!
+        c.slots.fill(null);
         ctx.placedChests.delete(c.id);
         ctx.world.removeSolidCollider('chest', c.id, c.x, c.y, c.radius);
         ctx.emitRosterEvent({ type: 'CHEST_REMOVED', id: c.id });
@@ -606,14 +406,25 @@ export function stepDormantTotemsAndCollapseZonesCore(
       }
     }
 
-    ctx.blueprintService.clearSlot(zone.ownerId);
-    const onlineOwner = ctx.playersById.get(zone.ownerId);
-    if (onlineOwner) {
-      ctx.syncPlayerInventory(onlineOwner);
-      ctx.emitPlayerEvent(onlineOwner.id, {
-        type: 'ACTION_NOTICE',
-        message: '3:00 expired without a replacement Totem — all territory builds and Chests were destroyed!'
-      });
+    ctx.blueprintService.clearSlot(zone.tribeId || zone.ownerId);
+    if (zone.tribeId) {
+      for (const p of ctx.playersById.values()) {
+        if (p.tribeId !== zone.tribeId) continue;
+        ctx.syncPlayerInventory(p);
+        ctx.emitPlayerEvent(p.id, {
+          type: 'ACTION_NOTICE',
+          message: '3:00 expired without a replacement Totem — all territory builds and Chests were destroyed!'
+        });
+      }
+    } else {
+      const onlineOwner = ctx.playersById.get(zone.ownerId);
+      if (onlineOwner) {
+        ctx.syncPlayerInventory(onlineOwner);
+        ctx.emitPlayerEvent(onlineOwner.id, {
+          type: 'ACTION_NOTICE',
+          message: '3:00 expired without a replacement Totem — all territory builds and Chests were destroyed!'
+        });
+      }
     }
   }
 

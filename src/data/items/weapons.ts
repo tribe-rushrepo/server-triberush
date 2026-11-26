@@ -50,5 +50,61 @@ export const WEAPON_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
       outputCount: 1,
       station: 'hand'
     }
+  },
+  {
+    id: 'stone_spear',
+    name: 'Stone Spear',
+    category: 'Weapons',
+    maxStack: 1,
+    iconKey: 'stone-spear',
+    handStyle: 'spear_thrust',
+    trailTheme: 'spear',
+    toolTier: 2,
+    combat: {
+      cooldownMs: 400,
+      durationMs: 300,
+      reach: 158,
+      treeDmg: 0,
+      bushDmg: 15,
+      rockDmg: 0,
+      combatDmg: 18,
+      knockback: 410
+    },
+    recipe: {
+      costs: [
+        { itemId: 'wood', count: 12 },
+        { itemId: 'stone', count: 6 }
+      ],
+      outputCount: 1,
+      station: 'hand'
+    }
+  },
+  {
+    id: 'stone_sword',
+    name: 'Stone Sword',
+    category: 'Weapons',
+    maxStack: 1,
+    iconKey: 'stone-sword',
+    handStyle: 'slash',
+    trailTheme: 'blade',
+    toolTier: 2,
+    combat: {
+      cooldownMs: 365,
+      durationMs: 270,
+      reach: 104,
+      treeDmg: 0,
+      bushDmg: 18,
+      rockDmg: 0,
+      combatDmg: 23,
+      knockback: 330
+    },
+    recipe: {
+      costs: [
+        { itemId: 'wood', count: 12 },
+        { itemId: 'stone', count: 9 }
+      ],
+      outputCount: 1,
+      station: 'hand'
+    }
   }
 ];

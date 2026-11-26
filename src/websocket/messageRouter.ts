@@ -168,6 +168,15 @@ export async function dispatchClientMessage(
     case 'LEAVE_WORLD': {
       worldRoom.removePlayer(playerId, { explicitLeave: true });
       ctx.sendJsonToPlayer(playerId, { type: 'WORLD_LEFT' });
+      if (msg.closeSocket) {
+        setImmediate(() => {
+          try {
+            ctx.socket.close(1000, 'Left world');
+          } catch {
+            // Ignore socket close error
+          }
+        });
+      }
       return;
     }
     case 'INPUT_STATE': {
@@ -275,6 +284,22 @@ export async function dispatchClientMessage(
       );
       return;
     }
+    case 'FEED_STRUCTURE': {
+      sendNoticeIfError(ctx, worldRoom.handleFeedStructure(playerId, msg.structureId));
+      return;
+    }
+    case 'COOK_MEAT': {
+      sendNoticeIfError(
+        ctx,
+        worldRoom.handleCookMeat(
+          playerId,
+          msg.structureId,
+          msg.rawItemId,
+          Boolean(msg.cookAll)
+        )
+      );
+      return;
+    }
     case 'BLUEPRINT_REMOVE_ENTITY': {
       sendNoticeIfError(
         ctx,
@@ -323,6 +348,10 @@ export async function dispatchClientMessage(
       );
       return;
     }
+    case 'TRIBE_RENAME': {
+      sendNoticeIfError(ctx, worldRoom.handleRenameTribe(playerId, msg.name, msg.tag));
+      return;
+    }
     case 'TRIBE_SET_VISIBILITY': {
       sendNoticeIfError(ctx, worldRoom.handleSetTribeVisibility(playerId, msg.visibility));
       return;
@@ -331,6 +360,13 @@ export async function dispatchClientMessage(
       sendNoticeIfError(
         ctx,
         worldRoom.handleRespondTribeRequest(playerId, msg.targetPlayerId, msg.accept)
+      );
+      return;
+    }
+    case 'TRIBE_RESPOND_LEAVE': {
+      sendNoticeIfError(
+        ctx,
+        worldRoom.handleRespondTribeLeave(playerId, msg.targetPlayerId, msg.accept)
       );
       return;
     }
@@ -355,6 +391,10 @@ export async function dispatchClientMessage(
         ctx,
         worldRoom.handleSetTribeBuildPermission(playerId, msg.targetPlayerId, msg.allowed)
       );
+      return;
+    }
+    case 'TRIBE_SET_ROLES': {
+      sendNoticeIfError(ctx, worldRoom.handleSetTribeMemberRoles(playerId, msg.updates));
       return;
     }
     case 'CHAT_MESSAGE': {

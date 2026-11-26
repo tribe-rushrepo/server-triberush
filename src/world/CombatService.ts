@@ -52,6 +52,48 @@ export class CombatService {
     }
   }
 
+  public applyWildlifeAttackDamage(
+    predator: { x: number; y: number; kind: string },
+    victim: ActiveWorldPlayer,
+    damage: number,
+    causeText: string,
+    callbacks: CombatCallbacks
+  ): void {
+    const now = Date.now();
+    if (victim.isDead || now < victim.spawnProtectedUntil) return;
+    victim.hp = Math.max(0, victim.hp - damage);
+    victim.lastDamagedAt = now;
+    victim.combatUntil = now + CONFIG.COMBAT_MODE_MS;
+
+    const dx = victim.x - predator.x;
+    const dy = victim.y - predator.y;
+    const dist = Math.hypot(dx, dy);
+    const nx = dist > 0.001 ? dx / dist : 0;
+    const ny = dist > 0.001 ? dy / dist : -1;
+    const kbSpeed = damage >= 25 ? 360 : 230;
+    victim.kbVx = nx * kbSpeed;
+    victim.kbVy = ny * kbSpeed;
+
+    callbacks.onBroadcastProximityEvent(victim.x, victim.y, {
+      type: 'PLAYER_HIT',
+      targetShortId: victim.shortId,
+      attackerShortId: 0,
+      damage,
+      hp: victim.hp,
+      maxHp: victim.maxHp,
+      dirX: Number(nx.toFixed(3)),
+      dirY: Number(ny.toFixed(3)),
+      weaponId: predator.kind,
+      targetCombatRemainingMs: Math.max(0, victim.combatUntil - now)
+    });
+
+    if (victim.hp <= 0) {
+      this.handlePlayerDeath(victim, null, causeText, callbacks);
+    } else {
+      callbacks.onSyncInventory(victim);
+    }
+  }
+
   public resolveMeleePvpHits(
     attacker: ActiveWorldPlayer,
     weaponId: string,
@@ -87,7 +129,7 @@ export class CombatService {
       const nx = dist > 0.001 ? dx / dist : dirX;
       const ny = dist > 0.001 ? dy / dist : dirY;
       const dot = nx * dirX + ny * dirY;
-      const isSpear = weaponId === 'wooden_spear';
+      const isSpear = weaponId === 'wooden_spear' || weaponId === 'stone_spear';
       const proj = dx * dirX + dy * dirY;
       const perpDist = Math.abs(dx * -dirY + dy * dirX);
       const inSpearCorridor =

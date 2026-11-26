@@ -1,5 +1,5 @@
 import { BUILDABLE_ITEMS } from './buildables.js';
-import { FOOD_ITEMS } from './food.js';
+import { FOOD_ITEMS, RAW_TO_COOKED_MEAT } from './food.js';
 import { GEAR_ITEMS } from './gear.js';
 import { RESOURCE_ITEMS } from './resources.js';
 import { TOOL_ITEMS } from './tools.js';
@@ -7,6 +7,7 @@ import type { ClientCatalogItem, ItemDefinition } from './types.js';
 import { WEAPON_ITEMS } from './weapons.js';
 
 export * from './types.js';
+export { RAW_TO_COOKED_MEAT };
 
 /**
  * Default bare-hands profile used whenever the player's active hotbar slot is empty (null).

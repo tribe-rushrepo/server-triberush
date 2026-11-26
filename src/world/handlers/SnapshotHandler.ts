@@ -492,7 +492,17 @@ export function broadcastWatchtowerRadars(ctx: WorldRoomContext): void {
   }
 }
 
-const ANIMAL_CODE_TO_KIND: readonly AnimalKind[] = ['pig', 'cow', 'chicken', 'duck', 'sheep'];
+const ANIMAL_CODE_TO_KIND: readonly AnimalKind[] = [
+  'pig',
+  'cow',
+  'chicken',
+  'duck',
+  'sheep',
+  'wolf',
+  'lion',
+  'sparrow',
+  'crow'
+];
 
 export function encodePlayerBinarySnapshot(
   serverTick: number,
@@ -608,6 +618,7 @@ export function decodeBinarySnapshotToJson(frame: Buffer): Record<string, unknow
     for (let i = 0; i < maxReadable; i++) {
       const off = 4 + i * 16;
       const flags = frame.readUInt8(off + 14);
+      const carriedItemNetId = frame.readUInt8(off + 15);
       animals.push({
         id: frame.readUInt16LE(off),
         kind: ANIMAL_CODE_TO_KIND[frame.readUInt8(off + 2)] || 'pig',
@@ -616,7 +627,12 @@ export function decodeBinarySnapshotToJson(frame: Buffer): Record<string, unknow
         angle: Math.round(((frame.readInt16LE(off + 11) / 32767) * Math.PI) * 1000) / 1000,
         hpPct: frame.readUInt8(off + 13),
         isFleeing: (flags & 1) === 1,
-        isMoving: ((flags >> 1) & 1) === 1
+        isMoving: ((flags >> 1) & 1) === 1,
+        isAirborne: ((flags >> 2) & 1) === 1,
+        isAggro: ((flags >> 3) & 1) === 1,
+        isSneaking: ((flags >> 4) & 1) === 1,
+        isAttacking: ((flags >> 5) & 1) === 1,
+        ...(carriedItemNetId > 0 ? { carriedItemNetId } : {})
       });
     }
     return { type: 'JSON_ANIMAL_SNAPSHOT', serverTick, animals };

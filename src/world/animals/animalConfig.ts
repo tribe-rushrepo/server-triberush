@@ -1,9 +1,11 @@
+import { getItemNetId } from '../../data/items/index.js';
 import {
   ANIMAL_KIND_TO_CODE,
   type ActiveWorldPlayer,
   type AnimalKind,
   type ItemId,
-  type WorldAnimalEntity
+  type WorldAnimalEntity,
+  type WorldGroundDrop
 } from '../../models/types.js';
 
 /**
@@ -93,6 +95,50 @@ export const ANIMAL_SPECIES: Record<AnimalKind, AnimalSpeciesSpec> = {
     meatMin: 2,
     meatMax: 3,
     leatherChance: 0
+  },
+  wolf: {
+    kind: 'wolf',
+    maxHp: 85,
+    radius: 22,
+    roamSpeed: 95,
+    fleeSpeed: 242,
+    meatItem: '',
+    meatMin: 0,
+    meatMax: 0,
+    leatherChance: 0.5
+  },
+  lion: {
+    kind: 'lion',
+    maxHp: 135,
+    radius: 26,
+    roamSpeed: 105,
+    fleeSpeed: 242,
+    meatItem: '',
+    meatMin: 0,
+    meatMax: 0,
+    leatherChance: 0
+  },
+  sparrow: {
+    kind: 'sparrow',
+    maxHp: 22,
+    radius: 14,
+    roamSpeed: 72,
+    fleeSpeed: 195,
+    meatItem: '',
+    meatMin: 0,
+    meatMax: 0,
+    leatherChance: 0
+  },
+  crow: {
+    kind: 'crow',
+    maxHp: 32,
+    radius: 16,
+    roamSpeed: 76,
+    fleeSpeed: 202,
+    meatItem: '',
+    meatMin: 0,
+    meatMax: 0,
+    leatherChance: 0
   }
 };
 
@@ -100,6 +146,24 @@ export interface AnimalCombatCallbacks {
   onSpawnDrop: (itemId: ItemId, count: number, originX: number, originY: number) => void;
   onBroadcastProximityEvent: (x: number, y: number, payload: Record<string, unknown>) => void;
   onAnimalKilled?: (killer: ActiveWorldPlayer, kind: AnimalKind) => void;
+}
+
+export interface AnimalStepCallbacks {
+  onPredatorAttackPlayer: (
+    predator: WorldAnimalEntity,
+    victim: ActiveWorldPlayer,
+    damage: number,
+    causeText: string,
+    isSneakAttack: boolean
+  ) => void;
+  onCrowStealDrop: (crow: WorldAnimalEntity, drop: WorldGroundDrop) => void;
+  onCrowDropStolenItem: (
+    crow: WorldAnimalEntity,
+    itemId: ItemId,
+    count: number,
+    x: number,
+    y: number
+  ) => void;
 }
 
 export function encodeBinaryAnimalSnapshotBuffer(
@@ -131,7 +195,18 @@ export function encodeBinaryAnimalSnapshotBuffer(
       : Math.max(1, Math.min(100, Math.round((a.hp / a.maxHp) * 100)));
     const isFleeing = now < a.fleeUntil ? 1 : 0;
     const isMovingBit = a.isMoving ? 1 : 0;
-    const flags = isFleeing | (isMovingBit << 1);
+    const isAirborneBit = a.isAirborne ? 1 : 0;
+    const isAggroBit = a.aggroTargetId ? 1 : 0;
+    const isSneakingBit = a.lionSneakReady && !a.lionSpotted ? 1 : 0;
+    const isAttackingBit = a.attackAnimUntil && now < a.attackAnimUntil ? 1 : 0;
+    const flags =
+      isFleeing |
+      (isMovingBit << 1) |
+      (isAirborneBit << 2) |
+      (isAggroBit << 3) |
+      (isSneakingBit << 4) |
+      (isAttackingBit << 5);
+    const carriedNetId = a.carriedItemId ? getItemNetId(a.carriedItemId) & 0xff : 0;
 
     buf.writeUInt16LE(a.id & 0xffff, offset);
     buf.writeUInt8(ANIMAL_KIND_TO_CODE[a.kind], offset + 2);
@@ -140,7 +215,7 @@ export function encodeBinaryAnimalSnapshotBuffer(
     buf.writeInt16LE(angleQuantized, offset + 11);
     buf.writeUInt8(hpPct, offset + 13);
     buf.writeUInt8(flags, offset + 14);
-    buf.writeUInt8(0, offset + 15);
+    buf.writeUInt8(carriedNetId, offset + 15);
   }
 
   return buf;

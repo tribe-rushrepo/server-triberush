@@ -22,6 +22,7 @@ export interface BlueprintSlotSummary {
   hutCount: number;
   watchtowerCount: number;
   campfireCount: number;
+  cookingPotCount?: number;
   chestCount: number;
   torchCount: number;
   savedAt: number;
@@ -41,6 +42,7 @@ const ALLOWED_STORED_BUILD_IDS = new Set<string>([
   'tribe_totem',
   'wooden_wall',
   'campfire',
+  'cooking_pot',
   'wooden_chest',
   'torch',
   'hut',
@@ -75,6 +77,59 @@ export class BlueprintService {
         storedBuilds: BlueprintStoredBuilds
       ) => void)
     | null = null;
+  public onMarkTribeVaultDirty: (() => void) | null = null;
+
+  private notifyVaultChanged(vaultKey: string): void {
+    this.persistToDisk();
+    if (vaultKey.startsWith('trb_') || vaultKey.startsWith('tribe-')) {
+      this.onMarkTribeVaultDirty?.();
+      return;
+    }
+    this.onPersistOwnerState?.(
+      vaultKey,
+      this.slotsByOwnerId.get(vaultKey) || null,
+      this.getLastDeployTimestamp(vaultKey),
+      this.getStoredBuilds(vaultKey)
+    );
+  }
+
+  /**
+   * One-time automatic migration: moves any pre-Phase-14 personal Host `blueprint_save`
+   * + `storedBuilds` (keyed by `ownerId`) directly into the Tribe's Totem Vault (`tribeId`),
+   * then wipes the personal Host key so it can never duplicate.
+   */
+  public migrateLegacyOwnerToTribe(ownerId: string, tribeId: string): boolean {
+    if (!ownerId || !tribeId || ownerId === tribeId) return false;
+    const legacySlot = this.slotsByOwnerId.get(ownerId) || null;
+    const legacyBuilds = this.storedBuildsByOwnerId.get(ownerId);
+    const hasLegacyBuilds = Boolean(legacyBuilds && Object.keys(legacyBuilds).length > 0);
+    if (!legacySlot && !hasLegacyBuilds) return false;
+
+    if (legacySlot && !this.slotsByOwnerId.has(tribeId)) {
+      this.slotsByOwnerId.set(tribeId, {
+        ...legacySlot,
+        tribeId
+      });
+    }
+    if (hasLegacyBuilds && legacyBuilds) {
+      const target = this.storedBuildsByOwnerId.get(tribeId) || {};
+      for (const [itemId, count] of Object.entries(legacyBuilds)) {
+        if (!ALLOWED_STORED_BUILD_IDS.has(itemId) || count <= 0) continue;
+        target[itemId] = Math.min(200, (target[itemId] || 0) + Math.floor(count));
+      }
+      if (Object.keys(target).length > 0) {
+        this.storedBuildsByOwnerId.set(tribeId, target);
+      }
+    }
+
+    this.slotsByOwnerId.delete(ownerId);
+    this.storedBuildsByOwnerId.delete(ownerId);
+    this.lastDeployAtByOwnerId.delete(ownerId);
+    this.persistToDisk();
+    this.onPersistOwnerState?.(ownerId, null, 0, {});
+    this.onMarkTribeVaultDirty?.();
+    return true;
+  }
 
   constructor(storageFilePath: string | null = null) {
     this.storageFilePath = storageFilePath;
@@ -132,13 +187,7 @@ export class BlueprintService {
     const nextCount = Math.min(200, (current[itemId] || 0) + Math.floor(delta));
     current[itemId] = nextCount;
     this.storedBuildsByOwnerId.set(ownerId, current);
-    this.persistToDisk();
-    this.onPersistOwnerState?.(
-      ownerId,
-      this.slotsByOwnerId.get(ownerId) || null,
-      this.getLastDeployTimestamp(ownerId),
-      this.getStoredBuilds(ownerId)
-    );
+    this.notifyVaultChanged(ownerId);
     return nextCount;
   }
 
@@ -152,13 +201,7 @@ export class BlueprintService {
     if (Object.keys(current).length === 0) {
       this.storedBuildsByOwnerId.delete(ownerId);
     }
-    this.persistToDisk();
-    this.onPersistOwnerState?.(
-      ownerId,
-      this.slotsByOwnerId.get(ownerId) || null,
-      this.getLastDeployTimestamp(ownerId),
-      this.getStoredBuilds(ownerId)
-    );
+    this.notifyVaultChanged(ownerId);
     return true;
   }
 
@@ -286,13 +329,7 @@ export class BlueprintService {
 
   public recordDeployTimestamp(ownerId: string, now = Date.now()): void {
     this.lastDeployAtByOwnerId.set(ownerId, now);
-    this.persistToDisk();
-    this.onPersistOwnerState?.(
-      ownerId,
-      this.slotsByOwnerId.get(ownerId) || null,
-      now,
-      this.getStoredBuilds(ownerId)
-    );
+    this.notifyVaultChanged(ownerId);
   }
 
   public clearAll(): void {
@@ -304,13 +341,7 @@ export class BlueprintService {
 
   public clearSlot(ownerId: string): void {
     if (this.slotsByOwnerId.delete(ownerId)) {
-      this.persistToDisk();
-      this.onPersistOwnerState?.(
-        ownerId,
-        null,
-        this.getLastDeployTimestamp(ownerId),
-        this.getStoredBuilds(ownerId)
-      );
+      this.notifyVaultChanged(ownerId);
     }
   }
 
@@ -318,24 +349,28 @@ export class BlueprintService {
     player: ActiveWorldPlayer,
     now = Date.now(),
     opts?: {
+      vaultKey?: string;
+      canBuildOrLoad?: boolean;
       hasStandingOrDormantTotem?: boolean;
       hasTotemItemInInv?: boolean;
       hasActiveCollapseZone?: boolean;
     }
   ): BlueprintSlotSummary {
-    const slot = this.slotsByOwnerId.get(player.id);
-    const cooldownRem = this.getDeployCooldownRemainingMs(player.id, now);
-    const storedBuilds = this.getStoredBuilds(player.id);
+    const key = opts?.vaultKey || player.tribeId || player.id;
+    const slot = this.slotsByOwnerId.get(key);
+    const cooldownRem = this.getDeployCooldownRemainingMs(key, now);
+    const storedBuilds = player.tribeId ? this.getStoredBuilds(player.tribeId) : this.getStoredBuilds(player.id);
     const hasStanding = Boolean(opts?.hasStandingOrDormantTotem);
     const hasInvTotem = Boolean(opts?.hasTotemItemInInv);
     const hasCollapse = Boolean(opts?.hasActiveCollapseZone);
+    const canBuild = opts?.canBuildOrLoad !== false;
 
     const totemAvailableToCraft = hasCollapse
-      ? !hasStanding && !hasInvTotem && !(storedBuilds.tribe_totem > 0)
-      : !slot && !hasStanding && !hasInvTotem && !(storedBuilds.tribe_totem > 0);
+      ? canBuild && !hasStanding && !hasInvTotem && !(storedBuilds.tribe_totem > 0)
+      : canBuild && !slot && !hasStanding && !hasInvTotem && !(storedBuilds.tribe_totem > 0);
 
     const canLoadBaseNow = Boolean(
-      slot && !hasStanding && !player.hasLoadedBaseThisSession && !hasCollapse
+      canBuild && slot && !hasStanding && !hasCollapse
     );
 
     if (!slot) {
@@ -347,6 +382,7 @@ export class BlueprintService {
         hutCount: 0,
         watchtowerCount: 0,
         campfireCount: 0,
+        cookingPotCount: 0,
         chestCount: 0,
         torchCount: 0,
         savedAt: 0,
@@ -360,10 +396,12 @@ export class BlueprintService {
     let hutCount = 0;
     let watchtowerCount = 0;
     let campfireCount = 0;
+    let cookingPotCount = 0;
     for (const s of slot.structures) {
       if (s.kind === 'hut') hutCount++;
       else if (s.kind === 'watchtower') watchtowerCount++;
       else if (s.kind === 'campfire') campfireCount++;
+      else if (s.kind === 'cooking_pot') cookingPotCount++;
     }
 
     return {
@@ -374,6 +412,7 @@ export class BlueprintService {
       hutCount,
       watchtowerCount,
       campfireCount,
+      cookingPotCount,
       chestCount: slot.chests.length,
       torchCount: slot.torches.length,
       savedAt: slot.savedAt,
@@ -514,6 +553,7 @@ export class BlueprintService {
     const anchorY = typeof totem.claimY === 'number' ? totem.claimY : totem.y;
     const slot: SavedBaseBlueprintSlot = {
       ownerId,
+      ...(totem.tribeId ? { tribeId: totem.tribeId } : {}),
       totemLevel: 1,
       sizeTiles: CONFIG.TOTEM_SIZE_TILES,
       totemDx: totem.x - anchorX,
@@ -549,13 +589,7 @@ export class BlueprintService {
       savedAt: now
     };
     this.slotsByOwnerId.set(ownerId, slot);
-    this.persistToDisk();
-    this.onPersistOwnerState?.(
-      ownerId,
-      slot,
-      this.getLastDeployTimestamp(ownerId),
-      this.getStoredBuilds(ownerId)
-    );
+    this.notifyVaultChanged(ownerId);
     return slot;
   }
 
@@ -566,13 +600,7 @@ export class BlueprintService {
     const slot = this.slotsByOwnerId.get(ownerId) || null;
     if (slot) {
       this.slotsByOwnerId.delete(ownerId);
-      this.persistToDisk();
-      this.onPersistOwnerState?.(
-        ownerId,
-        null,
-        this.getLastDeployTimestamp(ownerId),
-        this.getStoredBuilds(ownerId)
-      );
+      this.notifyVaultChanged(ownerId);
     }
     return slot;
   }

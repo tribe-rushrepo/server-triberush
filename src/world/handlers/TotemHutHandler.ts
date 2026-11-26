@@ -4,6 +4,7 @@ import type {
   WorldPlacedStructure,
   WorldPlacedTotem
 } from '../../models/types.js';
+import { packAndVanishTribeBaseCore } from './TotemLifecycleHandler.js';
 import type { WorldRoomContext } from './roomContext.js';
 
 export function checkPlayerShelterCore(
@@ -13,13 +14,14 @@ export function checkPlayerShelterCore(
 ): { nearCampfire: boolean; insideHut: boolean } {
   let nearCampfire = false;
   let insideHut = false;
+  const now = Date.now();
   const cfRadSq = CONFIG.CAMPFIRE_HEAL_RADIUS * CONFIG.CAMPFIRE_HEAL_RADIUS;
   const hutRadSq = 92 * 92;
   for (const s of ctx.placedStructures.values()) {
     const dx = s.x - x;
     const dy = s.y - y;
     const dSq = dx * dx + dy * dy;
-    if (s.kind === 'campfire' && dSq <= cfRadSq) {
+    if (s.kind === 'campfire' && s.litUntil && now < s.litUntil && dSq <= cfRadSq) {
       nearCampfire = true;
     } else if (s.kind === 'hut' && dSq <= hutRadSq) {
       insideHut = true;
@@ -44,7 +46,7 @@ export function registerStructureCollidersCore(
       halfW: 52,
       halfH: 52
     });
-  } else if (s.kind === 'campfire') {
+  } else if (s.kind === 'campfire' || s.kind === 'cooking_pot') {
     ctx.world.addSolidCollider({
       kind: 'structure',
       id: s.id,
@@ -67,7 +69,7 @@ export function removeStructureEntityCore(
     }
   } else if (s.kind === 'watchtower') {
     ctx.world.removeBoxCollider('structure', s.id, s.x, s.y, 52, 52);
-  } else if (s.kind === 'campfire') {
+  } else if (s.kind === 'campfire' || s.kind === 'cooking_pot') {
     ctx.world.removeSolidCollider('structure', s.id, s.x, s.y, 38);
   }
 }
@@ -222,15 +224,13 @@ export function sweepExpiredOfflineBasesCore(
   let changed = false;
   const expiredTribeIds = ctx.tribeManager.collectExpiredOfflineTribes(
     ctx.playersById,
-    graceMs,
+    CONFIG.DORMANT_TOTEM_DURATION_MS,
     now
   );
-  if (expiredTribeIds.length > 0) {
-    changed = true;
-    for (let i = 0; i < expiredTribeIds.length; i++) {
-      purgeUnpackedBuildsForTribeCore(ctx, expiredTribeIds[i]);
+  for (let i = 0; i < expiredTribeIds.length; i++) {
+    if (packAndVanishTribeBaseCore(ctx, expiredTribeIds[i], now)) {
+      changed = true;
     }
-    ctx.broadcastTribeSync();
   }
 
   for (const [ownerId, offlineSince] of Array.from(offlineSoloOwners.entries())) {
@@ -303,7 +303,7 @@ export function handleRemoveTotemCore(
 ): { ok: boolean; error?: string } {
   return {
     ok: false,
-    error: 'Tribe Totem cannot be removed once placed. Disband the Tribe to pack all builds.'
+    error: 'Tribe Totem cannot be removed once placed.'
   };
 }
 

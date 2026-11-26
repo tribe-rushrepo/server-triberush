@@ -125,22 +125,28 @@ export function spawnInitialWildlifeEntities(
   const sectorSpan = (world.size - pad * 2) / sectorsPerAxis;
 
   const trySpawnMeadowAnimal = (
-    kind: 'cow' | 'chicken' | 'sheep',
+    kind: 'cow' | 'chicken' | 'sheep' | 'wolf' | 'lion' | 'sparrow' | 'crow',
     minX: number,
     minY: number,
     spanX: number,
     spanY: number
-  ) => {
+  ): WorldAnimalEntity | null => {
     const spec = ANIMAL_SPECIES[kind];
     for (let tries = 0; tries < 12; tries++) {
       const cx = minX + rng() * spanX;
       const cy = minY + rng() * spanY;
       if (world.overlapsWaterOrMud(cx, cy, spec.radius + 26)) continue;
       if (world.overlapsAnySolid(cx, cy, spec.radius + 14)) continue;
-      createAnimal(kind, cx, cy, cx, cy, 980, rng);
-      return true;
+      const ent = createAnimal(kind, cx, cy, cx, cy, 1100, rng);
+      if (kind === 'wolf') {
+        ent.isHiddenByCycle = true; // Wolves emerge strictly at Nighttime!
+      } else if (kind === 'sparrow' || kind === 'crow') {
+        ent.isAirborne = rng() < 0.45;
+        ent.birdPhaseUntil = Date.now() + 2500 + Math.floor(rng() * 4500);
+      }
+      return ent;
     }
-    return false;
+    return null;
   };
 
   for (let gy = 0; gy < sectorsPerAxis; gy++) {
@@ -156,18 +162,34 @@ export function spawnInitialWildlifeEntities(
       if (rng() < 0.4) {
         trySpawnMeadowAnimal('sheep', minX, minY, sectorSpan, sectorSpan);
       }
+      if (rng() < 0.24) {
+        trySpawnMeadowAnimal('wolf', minX, minY, sectorSpan, sectorSpan);
+      }
+      if (rng() < 0.18) {
+        trySpawnMeadowAnimal('lion', minX, minY, sectorSpan, sectorSpan);
+      }
+      if (rng() < 0.36) {
+        trySpawnMeadowAnimal('sparrow', minX, minY, sectorSpan, sectorSpan);
+      }
+      if (rng() < 0.28) {
+        trySpawnMeadowAnimal('crow', minX, minY, sectorSpan, sectorSpan);
+      }
     }
   }
 
-  // Seed starter meadow wildlife around Spawn Center
+  // Seed starter meadow wildlife + birds + outer predators around Spawn Center
   const center = world.size / 2;
-  const starterKinds: Array<'cow' | 'chicken' | 'sheep'> = [
+  const starterKinds: Array<'cow' | 'chicken' | 'sheep' | 'sparrow' | 'crow'> = [
     'cow',
     'cow',
     'chicken',
     'chicken',
     'sheep',
-    'sheep'
+    'sheep',
+    'sparrow',
+    'sparrow',
+    'crow',
+    'crow'
   ];
   for (let i = 0; i < starterKinds.length; i++) {
     const kind = starterKinds[i];
@@ -179,7 +201,28 @@ export function spawnInitialWildlifeEntities(
       const cy = center + Math.sin(a) * d;
       if (world.overlapsWaterOrMud(cx, cy, spec.radius + 26)) continue;
       if (world.overlapsAnySolid(cx, cy, spec.radius + 14)) continue;
-      createAnimal(kind, cx, cy, cx, cy, 900, rng);
+      const ent = createAnimal(kind, cx, cy, cx, cy, 900, rng);
+      if (kind === 'sparrow' || kind === 'crow') {
+        ent.isAirborne = i % 2 === 0;
+        ent.birdPhaseUntil = Date.now() + 3000 + Math.floor(rng() * 4000);
+      }
+      break;
+    }
+  }
+
+  const starterPredators: Array<'wolf' | 'lion'> = ['wolf', 'wolf', 'lion', 'lion'];
+  for (let i = 0; i < starterPredators.length; i++) {
+    const kind = starterPredators[i];
+    const spec = ANIMAL_SPECIES[kind];
+    for (let tries = 0; tries < 14; tries++) {
+      const a = rng() * Math.PI * 2;
+      const d = 1050 + rng() * 850;
+      const cx = center + Math.cos(a) * d;
+      const cy = center + Math.sin(a) * d;
+      if (world.overlapsWaterOrMud(cx, cy, spec.radius + 26)) continue;
+      if (world.overlapsAnySolid(cx, cy, spec.radius + 14)) continue;
+      const ent = createAnimal(kind, cx, cy, cx, cy, 1200, rng);
+      if (kind === 'wolf') ent.isHiddenByCycle = true;
       break;
     }
   }

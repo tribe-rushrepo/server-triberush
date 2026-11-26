@@ -22,13 +22,26 @@ export const MARBLE_PALETTE_ORDER: readonly MarblePaletteId[] = [
 export type RockSizeTier = 'S' | 'M' | 'L';
 export type TreeKind = 0 | 1 | 2 | 3 | 4;
 export type BushKind = 0 | 1 | 2 | 3 | 4;
-export type AnimalKind = 'pig' | 'cow' | 'chicken' | 'duck' | 'sheep';
+export type AnimalKind =
+  | 'pig'
+  | 'cow'
+  | 'chicken'
+  | 'duck'
+  | 'sheep'
+  | 'wolf'
+  | 'lion'
+  | 'sparrow'
+  | 'crow';
 export const ANIMAL_KIND_TO_CODE: Record<AnimalKind, number> = {
   pig: 0,
   cow: 1,
   chicken: 2,
   duck: 3,
-  sheep: 4
+  sheep: 4,
+  wolf: 5,
+  lion: 6,
+  sparrow: 7,
+  crow: 8
 };
 export type ItemId = string;
 
@@ -60,6 +73,21 @@ export interface WorldAnimalEntity {
   isDead: boolean;
   respawnAt: number | null;
   lastDamagedAt: number;
+  // Phase 13 Predator & Bird state
+  isHiddenByCycle?: boolean;
+  isAirborne?: boolean;
+  birdPhaseUntil?: number;
+  aggroTargetId?: string | null;
+  lionSneakReady?: boolean;
+  lionSpotted?: boolean;
+  nextAttackAt?: number;
+  attackAnimUntil?: number;
+  targetDropId?: number | null;
+  carriedItemId?: ItemId | null;
+  carriedItemCount?: number;
+  dropOffX?: number;
+  dropOffY?: number;
+  stealCooldownUntil?: number;
 }
 
 export interface InventorySlotItem {
@@ -187,6 +215,7 @@ export interface WorldGroundDrop {
   originX: number;
   originY: number;
   spawnedAt: number;
+  droppedByPlayer?: boolean;
 }
 
 export interface WorldPlacedChest {
@@ -210,7 +239,7 @@ export interface WorldPlacedTorch {
 }
 
 export type WallOrientation = 'h' | 'v';
-export type StructureKind = 'hut' | 'watchtower' | 'campfire';
+export type StructureKind = 'hut' | 'watchtower' | 'campfire' | 'cooking_pot';
 export type RotationQuarter = 0 | 1 | 2 | 3;
 
 export interface WorldPlacedWall {
@@ -226,6 +255,8 @@ export interface WorldPlacedWall {
   tribeId: string | null;
   createdAt: number;
   lastDamagedAt: number;
+  litUntil?: number;
+  lastCookAt?: number;
 }
 
 export interface WorldPlacedStructure {
@@ -242,6 +273,8 @@ export interface WorldPlacedStructure {
   tribeId: string | null;
   createdAt: number;
   lastDamagedAt: number;
+  litUntil?: number;
+  lastCookAt?: number;
 }
 
 export type TotemHuntCounts = Partial<Record<AnimalKind, number>>;
@@ -323,6 +356,7 @@ export type BlueprintTargetKind = 'wall' | 'structure' | 'chest' | 'torch' | 'to
 
 export interface SavedBaseBlueprintSlot {
   ownerId: string;
+  tribeId?: string;
   totemLevel: number;
   sizeTiles: number;
   totemDx?: number;
@@ -337,7 +371,33 @@ export interface SavedBaseBlueprintSlot {
 
 export type TribeVisibility = 'public' | 'private';
 
+export type TribeRole =
+  | 'high_chief'
+  | 'chief'
+  | 'chieftain'
+  | 'council'
+  | 'elder'
+  | 'member';
+
+export interface TribeMemberRecord {
+  playerId: string;
+  username: string;
+  role: TribeRole;
+  colorIndex: number;
+  joinedAt: number;
+  lastSeenAt: number;
+  online?: boolean;
+  shortId?: number;
+  leaveRequestedAt?: number | null;
+}
+
 export interface TribeJoinRequest {
+  playerId: string;
+  username: string;
+  requestedAt: number;
+}
+
+export interface TribeLeaveRequest {
   playerId: string;
   username: string;
   requestedAt: number;
@@ -355,7 +415,11 @@ export interface TribeSummary {
   memberIds: string[];
   memberShortIds: number[];
   builderIds: string[];
+  members: TribeMemberRecord[];
   pendingRequests?: TribeJoinRequest[];
+  pendingLeaveRequests?: TribeLeaveRequest[];
+  renameCooldownUntil?: number;
+  visibilityCooldownUntil?: number;
 }
 
 export type DayPhaseName = 'DAYTIME' | 'SUNSET' | 'NIGHTTIME' | 'SUNRISE';

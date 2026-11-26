@@ -6,7 +6,8 @@ export const JoinWorldSchema = z.object({
 });
 
 export const LeaveWorldSchema = z.object({
-  type: z.literal('LEAVE_WORLD')
+  type: z.literal('LEAVE_WORLD'),
+  closeSocket: z.boolean().optional()
 });
 
 export const InputStateSchema = z.object({
@@ -104,6 +105,7 @@ export const BlueprintPlaceBuildSchema = z.object({
     'tribe_totem',
     'wooden_wall',
     'campfire',
+    'cooking_pot',
     'wooden_chest',
     'torch',
     'hut',
@@ -113,6 +115,18 @@ export const BlueprintPlaceBuildSchema = z.object({
   targetY: z.number(),
   orientation: z.enum(['h', 'v']).optional(),
   rotationQuarter: z.number().int().min(0).max(3).optional()
+});
+
+export const FeedStructureSchema = z.object({
+  type: z.literal('FEED_STRUCTURE'),
+  structureId: z.number().int().positive()
+});
+
+export const CookMeatSchema = z.object({
+  type: z.literal('COOK_MEAT'),
+  structureId: z.number().int().positive(),
+  rawItemId: z.enum(['raw_pork', 'raw_beef', 'raw_chicken', 'raw_duck', 'raw_mutton']),
+  cookAll: z.boolean().optional()
 });
 
 export const BlueprintRemoveEntitySchema = z.object({
@@ -154,8 +168,14 @@ export const RespawnSchema = z.object({
 export const CreateTribeSchema = z.object({
   type: z.literal('TRIBE_CREATE'),
   name: z.string().trim().min(2).max(20),
-  tag: z.string().trim().min(2).max(4),
+  tag: z.string().trim().length(4),
   visibility: z.enum(['public', 'private']).optional()
+});
+
+export const RenameTribeSchema = z.object({
+  type: z.literal('TRIBE_RENAME'),
+  name: z.string().trim().min(2).max(20),
+  tag: z.string().trim().length(4)
 });
 
 export const SetTribeVisibilitySchema = z.object({
@@ -169,9 +189,15 @@ export const RespondTribeRequestSchema = z.object({
   accept: z.boolean()
 });
 
+export const RespondTribeLeaveSchema = z.object({
+  type: z.literal('TRIBE_RESPOND_LEAVE'),
+  targetPlayerId: z.string().trim().min(1).max(128),
+  accept: z.boolean()
+});
+
 export const JoinTribeSchema = z.object({
   type: z.literal('TRIBE_JOIN'),
-  tribeId: z.string().trim().min(1).max(32)
+  tribeId: z.string().trim().min(1).max(64)
 });
 
 export const LeaveTribeSchema = z.object({
@@ -191,6 +217,19 @@ export const SetTribeBuildPermissionSchema = z.object({
   type: z.literal('TRIBE_SET_BUILD_PERMISSION'),
   targetPlayerId: z.string().trim().min(1).max(128),
   allowed: z.boolean()
+});
+
+export const SetTribeMemberRolesSchema = z.object({
+  type: z.literal('TRIBE_SET_ROLES'),
+  updates: z
+    .array(
+      z.object({
+        targetPlayerId: z.string().trim().min(1).max(128),
+        role: z.enum(['high_chief', 'chieftain', 'council', 'elder', 'member'])
+      })
+    )
+    .min(1)
+    .max(15)
 });
 
 export const ChatMessageSchema = z.object({
@@ -224,6 +263,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SaveBlueprintBuildSchema,
   LoadBlueprintBuildSchema,
   BlueprintPlaceBuildSchema,
+  FeedStructureSchema,
+  CookMeatSchema,
   BlueprintRemoveEntitySchema,
   BlueprintRotateEntitySchema,
   BlueprintMoveEntitySchema,
@@ -231,13 +272,16 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   OpenChestSchema,
   RespawnSchema,
   CreateTribeSchema,
+  RenameTribeSchema,
   SetTribeVisibilitySchema,
   RespondTribeRequestSchema,
+  RespondTribeLeaveSchema,
   JoinTribeSchema,
   LeaveTribeSchema,
   DisbandTribeSchema,
   KickTribeMemberSchema,
   SetTribeBuildPermissionSchema,
+  SetTribeMemberRolesSchema,
   ChatMessageSchema,
   PingSchema,
   UseJsonSnapshotsSchema

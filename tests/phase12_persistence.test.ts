@@ -60,9 +60,10 @@ describe('Phase 12: Full Supabase World, Standing Base, Chest, Tribe & Position 
 
     const tribeRes = roomA.handleCreateTribe(host.id, 'Iron Oak', 'IRON', 'private');
     assert.strictEqual(tribeRes.ok, true);
-    assert.strictEqual(host.tribeId, 'tribe-1');
+    const tribeId = tribeRes.tribe!.id;
+    assert.strictEqual(host.tribeId, tribeId);
 
-    const joinReq = roomA.handleJoinTribe(ally.id, 'tribe-1');
+    const joinReq = roomA.handleJoinTribe(ally.id, tribeId);
     assert.strictEqual(joinReq.ok, true);
     assert.strictEqual(joinReq.pending, true);
     assert.strictEqual(roomA.handleRespondTribeRequest(host.id, ally.id, true).ok, true);
@@ -193,9 +194,9 @@ describe('Phase 12: Full Supabase World, Standing Base, Chest, Tribe & Position 
     assert.strictEqual(rejoinedHost.inventory[8]?.itemId, 'wooden_pickaxe');
     assert.strictEqual(rejoinedHost.inventory[9]?.count, 19);
     assert.strictEqual(rejoinedHost.homeHutId, hutId);
-    assert.strictEqual(rejoinedHost.tribeId, 'tribe-1');
+    assert.strictEqual(rejoinedHost.tribeId, tribeId);
     assert.strictEqual(rejoinedHost.tribeTag, 'IRON');
-    assert.strictEqual(roomB.tribeManager.isTribeLeader(rejoinedHost.id, 'tribe-1'), true);
+    assert.strictEqual(roomB.tribeManager.isTribeLeader(rejoinedHost.id, tribeId), true);
 
     const loadedAlly = await saveSvc.loadPlayerSave(ally.id);
     const rejoinedAlly = roomB.joinPlayer(
@@ -204,7 +205,7 @@ describe('Phase 12: Full Supabase World, Standing Base, Chest, Tribe & Position 
       loadedAlly?.inventory ? decodeCompactInventory(loadedAlly.inventory) : null,
       loadedAlly?.playerState
     ).player!;
-    assert.strictEqual(rejoinedAlly.tribeId, 'tribe-1');
+    assert.strictEqual(rejoinedAlly.tribeId, tribeId);
     assert.strictEqual(roomB.tribeManager.hasBuildPermission(rejoinedAlly), true);
     assert.strictEqual(roomB.handleOpenChest(rejoinedAlly.id, chestId).ok, true);
 
@@ -218,7 +219,7 @@ describe('Phase 12: Full Supabase World, Standing Base, Chest, Tribe & Position 
     assert.ok(nextWall.wall!.id > wallRes.wall!.id);
   });
 
-  it('should disband Tribe when Host leaves without clicking Disband, lock Chests from tribeless players, keep Totem unbreakable for 15 minutes, sync raider destruction, and enforce 3-minute broken-totem collapse', () => {
+  it('should keep Tribe intact when Chief disconnects while a member stays online, start 15m unbreakable Totem timer only when 0 members remain online, sync raider wall destruction, and enforce 3-minute broken-totem collapse', () => {
     const room = new WorldRoom(20261126);
     const spot = findClearTotemSpot(room);
     const host = room.joinPlayer(makeProfile('grace-1', 'GraceLeader')).player!;
@@ -228,8 +229,10 @@ describe('Phase 12: Full Supabase World, Standing Base, Chest, Tribe & Position 
     member.spawnProtectedUntil = 0;
     raider.spawnProtectedUntil = 0;
 
-    room.handleCreateTribe(host.id, 'Grace Clan', 'GRC', 'public');
-    room.handleJoinTribe(member.id, 'tribe-1');
+    const created = room.handleCreateTribe(host.id, 'Grace Clan', 'GRCE', 'public');
+    assert.strictEqual(created.ok, true);
+    const tribeId = created.tribe!.id;
+    assert.strictEqual(room.handleJoinTribe(member.id, tribeId).ok, true);
 
     host.x = spot.x - 64;
     host.y = spot.y;
@@ -248,38 +251,42 @@ describe('Phase 12: Full Supabase World, Standing Base, Chest, Tribe & Position 
     assert.strictEqual(chestRes.ok, true);
     chestRes.chest!.slots[0] = { itemId: 'coal', count: 12 };
 
-    // Active Tribe member CAN open the Chest while Tribe exists
+    // 1. Chief disconnects while Member stays online -> Tribe stays intact & Totem is NOT dormant!
+    room.removePlayer(host.id, { explicitLeave: true });
+    assert.strictEqual(room.tribeManager.getTribeCount(), 1);
+    assert.strictEqual(member.tribeId, tribeId);
     member.x = chestRes.chest!.x;
     member.y = chestRes.chest!.y + 24;
     assert.strictEqual(room.handleOpenChest(member.id, chestRes.chest!.id).ok, true);
 
-    // 1. Host leaves game WITHOUT clicking Disband -> Tribe immediately disbands, members become tribeless!
-    const leaveTs = Date.now();
-    room.removePlayer(host.id, { explicitLeave: true });
-    assert.strictEqual(room.tribeManager.getTribeCount(), 0);
-    assert.strictEqual(member.tribeId, null, 'Members must immediately become tribeless when Host leaves');
+    const activeTotem = room.placedTotems.get(totemRes.totem!.id)!;
+    assert.ok(!activeTotem.dormantExpiresAt, 'Totem must stay active while >= 1 member is online');
 
-    // Tribeless players are NEVER allowed to open Chests!
-    const tribelessOpen = room.handleOpenChest(member.id, chestRes.chest!.id);
+    // Tribeless raider is NEVER allowed to open Chests!
+    raider.x = chestRes.chest!.x;
+    raider.y = chestRes.chest!.y + 24;
+    const tribelessOpen = room.handleOpenChest(raider.id, chestRes.chest!.id);
     assert.strictEqual(tribelessOpen.ok, false);
     assert.match(tribelessOpen.error || '', /Tribeless players cannot open Chests/i);
 
-    // Totem remains on map for 15 minutes and is 100% UNBREAKABLE while Host is offline!
-    const dormantTotem = room.placedTotems.get(totemRes.totem!.id)!;
-    assert.strictEqual(dormantTotem.tribeId, null);
-    assert.strictEqual(dormantTotem.dormantOwnerId, host.id);
-    assert.ok(dormantTotem.dormantExpiresAt && dormantTotem.dormantExpiresAt >= leaveTs + CONFIG.DORMANT_TOTEM_DURATION_MS - 1000);
+    // 2. Last online Member also disconnects (0 members online) -> 15-minute unbreakable Totem timer starts!
+    const leaveTs = Date.now();
+    room.removePlayer(member.id, { explicitLeave: true });
+    assert.ok(
+      activeTotem.dormantExpiresAt &&
+        activeTotem.dormantExpiresAt >= leaveTs + CONFIG.DORMANT_TOTEM_DURATION_MS - 1000
+    );
 
-    const totemHpBefore = dormantTotem.hp;
-    raider.x = dormantTotem.x - 36;
-    raider.y = dormantTotem.y;
+    const totemHpBefore = activeTotem.hp;
+    raider.x = activeTotem.x - 36;
+    raider.y = activeTotem.y;
     raider.inventory[0] = { itemId: 'wooden_sword', count: 1 };
     raider.activeSlot = 0;
     raider.lastSwingAt = 0;
     room.handleSwing(raider.id, 0);
-    assert.strictEqual(dormantTotem.hp, totemHpBefore, 'Dormant 15-minute Totem must be 100% unbreakable');
+    assert.strictEqual(activeTotem.hp, totemHpBefore, '15-minute all-offline Totem must be 100% unbreakable');
 
-    // Raider destroying a Wall during the 15-minute window MUST remove that Wall from Host's autosaved slot!
+    // Raider destroying a Wall during the 15-minute window removes that Wall from Tribe's autosaved slot!
     const targetWall = room.placedWalls.get(wallRes.wall!.id)!;
     targetWall.hp = 5;
     raider.x = targetWall.x;
@@ -288,43 +295,40 @@ describe('Phase 12: Full Supabase World, Standing Base, Chest, Tribe & Position 
     room.handleSwing(raider.id, -Math.PI / 2);
     assert.strictEqual(room.placedWalls.size, 0);
     assert.strictEqual(
-      room.blueprintService.getSlot(host.id)?.walls.length,
+      room.blueprintService.getSlot(tribeId)?.walls.length,
       0,
-      'Wall destroyed by raider while Host is offline must also be lost in Host autosaved Blueprint'
+      'Wall destroyed by raider must also be removed from Tribe autosaved Vault'
     );
 
-    // 2. Host rejoins before 15 minutes and creates a new Tribe -> reclaims the dormant Totem & surviving Chest!
+    // 3. Chief rejoins before 15 minutes -> cancels dormant timer immediately!
     const rejoinedHost = room.joinPlayer(makeProfile(host.id, host.username)).player!;
     rejoinedHost.spawnProtectedUntil = 0;
-    const reclaimTribe = room.handleCreateTribe(rejoinedHost.id, 'Reclaimed Clan', 'RCL', 'public');
-    assert.strictEqual(reclaimTribe.ok, true);
-    assert.strictEqual(dormantTotem.tribeId, reclaimTribe.tribe!.id);
-    assert.strictEqual(dormantTotem.dormantExpiresAt, null);
+    assert.strictEqual(rejoinedHost.tribeId, tribeId);
+    assert.strictEqual(activeTotem.dormantExpiresAt, null);
     rejoinedHost.x = chestRes.chest!.x;
     rejoinedHost.y = chestRes.chest!.y + 24;
     assert.strictEqual(room.handleOpenChest(rejoinedHost.id, chestRes.chest!.id).ok, true);
 
-    // 3. Raiders break the active Totem -> Host gets 3 minutes to place a new Totem inside 20x20, else ALL builds + Chests + Chest items destroy!
+    // 4. Raiders break the active Totem -> 3 minutes to place a new Totem inside 20x20, else ALL builds + Chests destroy!
     rejoinedHost.x = spot.x + 64;
     rejoinedHost.y = spot.y - 64;
     rejoinedHost.inventory[0] = { itemId: 'wooden_wall', count: 1 };
     rejoinedHost.activeSlot = 0;
     assert.strictEqual(room.handleUseOrPlaceItem(rejoinedHost.id, spot.x + 64, spot.y - 128, 'h').ok, true);
 
-    dormantTotem.hp = 5;
-    raider.x = dormantTotem.x - 36;
-    raider.y = dormantTotem.y;
+    activeTotem.hp = 5;
+    raider.x = activeTotem.x - 36;
+    raider.y = activeTotem.y;
     raider.lastSwingAt = 0;
     room.handleSwing(raider.id, 0);
     assert.strictEqual(room.placedTotems.size, 0, 'Active Totem must break at 0 HP');
     assert.strictEqual(room.brokenTotemZones.size, 1, 'Breaking Totem must start 3-minute collapse timer');
 
-    // Past 3 minutes without placing a replacement Totem -> walls, Chest, Chest items, AND saved Blueprint slot are permanently destroyed!
     const breakTs = Date.now();
     room.sweepOfflineBases(breakTs + CONFIG.BROKEN_TOTEM_COLLAPSE_MS + 1000);
     assert.strictEqual(room.brokenTotemZones.size, 0);
     assert.strictEqual(room.placedWalls.size, 0);
     assert.strictEqual(room.placedChests.size, 0);
-    assert.strictEqual(room.blueprintService.getSlot(host.id), null);
+    assert.strictEqual(room.blueprintService.getSlot(tribeId), null);
   });
 });
