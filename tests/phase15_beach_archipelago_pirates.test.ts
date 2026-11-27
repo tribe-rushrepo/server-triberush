@@ -226,22 +226,32 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     // Move captain next to port ladder and board via INTERACT_BOAT ('ladder')
     const ladders = room.pirateBoatService.canPlaceBoatAt;
     assert.ok(ladders);
+    // Trying to click/use the Ship Wheel BEFORE climbing onto the deck must be strictly rejected!
+    const prematureWheel = room.handleInteractBoat(captain.id, boat.id, 'wheel');
+    assert.equal(prematureWheel.ok, false, 'Must not allow sailing before climbing onto the boat deck');
+
+    // Move captain near port boarding ladder (-56, -114) and climb aboard ('ladder')
     const cos = Math.cos(boat.angle);
     const sin = Math.sin(boat.angle);
-    captain.x = boat.x + -28 * cos - -56 * sin;
-    captain.y = boat.y + -28 * sin + -56 * cos;
+    captain.x = boat.x + -56 * cos - -114 * sin;
+    captain.y = boat.y + -56 * sin + -114 * cos;
     const boardRes = room.handleInteractBoat(captain.id, boat.id, 'ladder');
     assert.equal(boardRes.ok, true, boardRes.error);
     assert.equal(captain.aboardBoatId, boat.id);
 
-    // Walk on deck near stern wheel (-88, 0) and take the helm ('wheel')
-    captain.boatLocalX = -88;
+    // Walk on deck near stern wheel (-188, 0) and take the helm ('wheel')
+    captain.boatLocalX = -188;
     captain.boatLocalY = 0;
-    captain.x = boat.x + -88 * cos;
-    captain.y = boat.y + -88 * sin;
+    captain.x = boat.x + -188 * cos;
+    captain.y = boat.y + -188 * sin;
     const wheelRes = room.handleInteractBoat(captain.id, boat.id, 'wheel');
     assert.equal(wheelRes.ok, true, wheelRes.error);
     assert.equal(boat.helmPlayerId, captain.id);
+
+    // Verify 20Hz boat serialization includes deck passenger local coordinates for zero-jitter rendering
+    const serialized = room.pirateBoatService.serializeBoat(boat, room.playersById);
+    assert.equal(serialized.passengers.length, 1);
+    assert.equal(serialized.passengers[0].shortId, captain.shortId);
 
     // Sail forward + turn rudder with WASD -> boat advances & wheelAngle spins!
     const startBoatX = boat.x;
@@ -254,10 +264,26 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     assert.notEqual(boat.x, startBoatX, 'Pirate boat should sail across seawater');
     assert.notEqual(boat.wheelAngle, startWheel, 'Ship wheel must spin when steering with A/D');
 
-    // Verify 50,000 HP 5x5 Two-Door Dock Hut placement on shoreline inside a 30x30 Tribe Totem!
+    // Verify Pirate Boat storage is blocked during Combat Mode and succeeds out of combat!
     captain.aboardBoatId = null;
     boat.helmPlayerId = null;
     boat.helmShortId = 0;
+    captain.x = shoreX;
+    captain.y = shoreY;
+    boat.x = shoreX + 180;
+    boat.y = shoreY;
+    captain.combatUntil = Date.now() + 10000;
+    const blockedStore = room.handleInteractBoat(captain.id, boat.id, 'store');
+    assert.equal(blockedStore.ok, false, 'Storing Pirate Ship must fail during Combat Mode');
+
+    captain.combatUntil = 0;
+    const okStore = room.handleInteractBoat(captain.id, boat.id, 'store');
+    assert.equal(okStore.ok, true, okStore.error);
+    assert.equal(room.placedBoats.has(boat.id), false, 'Stored boat should be removed from sea');
+    assert.ok(
+      captain.inventory.some((sl) => sl?.itemId === 'pirate_boat' && sl.count >= 1),
+      'Storing Pirate Ship out of combat returns pirate_boat item'
+    );
     captain.x = shoreX - 384;
     captain.y = shoreY;
     assert.equal(room.handleCreateTribe(captain.id, 'Corsair Fleet', 'SAIL', 'public').ok, true);

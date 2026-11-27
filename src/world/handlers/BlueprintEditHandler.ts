@@ -12,6 +12,7 @@ import type {
   WorldPlacedWall
 } from '../../models/types.js';
 import { placeBuildableEntityCore } from './BuildingHandler.js';
+import { classifyArchipelagoPoint } from '../terrain/islandArchipelago.js';
 import { syncTribeBlueprintToOnlineMembers } from './TotemLifecycleHandler.js';
 import { snapGridLine, snapTileCenter, type WorldRoomContext } from './roomContext.js';
 
@@ -239,6 +240,39 @@ export function handleBlueprintRemoveEntityCore(
     entityX = torch.x;
     entityY = torch.y;
     label = 'Torch';
+  } else if (targetKind === 'boat') {
+    const boat = ctx.placedBoats.get(targetId);
+    if (!boat) return { ok: false, error: 'Pirate Ship not found.' };
+    const canManageBoat = boat.tribeId
+      ? ctx.canTribeManageEntity(player, boat.ownerId, boat.tribeId)
+      : boat.ownerId === player.id;
+    if (!canManageBoat) {
+      return {
+        ok: false,
+        error: 'Only the ship owner or Tribe builders can store this Pirate Ship.'
+      };
+    }
+    if (Date.now() - boat.lastDamagedAt < CONFIG.COMBAT_MODE_MS) {
+      return { ok: false, error: 'Cannot store Pirate Ship while it is taking damage in combat.' };
+    }
+    for (const p of ctx.playersById.values()) {
+      if (p.aboardBoatId === boat.id && !p.isDead) {
+        const info = classifyArchipelagoPoint(p.x, p.y, ctx.world.size);
+        if (!ctx.world.isPointOnWalkablePier(p.x, p.y) && info.blocksFoot) {
+          return {
+            ok: false,
+            error: 'Sail closer to shallow water, a beach, or a Coastal Dock before storing the ship.'
+          };
+        }
+      }
+    }
+    ctx.placedBoats.delete(boat.id);
+    ctx.pirateBoatService.ejectAllPassengersFromDestroyedBoat(boat, ctx.world, ctx.playersById);
+    ctx.emitRosterEvent({ type: 'BOAT_REMOVED', id: boat.id });
+    mappedItemId = 'pirate_boat';
+    entityX = boat.x;
+    entityY = boat.y;
+    label = 'Pirate Boat';
   } else if (targetKind === 'totem') {
     return {
       ok: false,

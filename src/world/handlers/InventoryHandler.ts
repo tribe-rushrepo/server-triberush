@@ -162,7 +162,10 @@ export function handlePickupOrHarvestCore(
       world: ctx.world,
       playersById: ctx.playersById,
       onBoatUpdated: (b) =>
-        ctx.emitRosterEvent({ type: 'BOAT_UPDATED', boat: ctx.pirateBoatService.serializeBoat(b) }),
+        ctx.emitRosterEvent({
+          type: 'BOAT_UPDATED',
+          boat: ctx.pirateBoatService.serializeBoat(b, ctx.playersById)
+        }),
       onPlayerNotice: (message) => ctx.emitPlayerEvent(player.id, { type: 'ACTION_NOTICE', message })
     });
     if (boatAct.handled) {
@@ -252,7 +255,10 @@ export function handlePickupOrHarvestCore(
     world: ctx.world,
     playersById: ctx.playersById,
     onBoatUpdated: (b) =>
-      ctx.emitRosterEvent({ type: 'BOAT_UPDATED', boat: ctx.pirateBoatService.serializeBoat(b) }),
+      ctx.emitRosterEvent({
+        type: 'BOAT_UPDATED',
+        boat: ctx.pirateBoatService.serializeBoat(b, ctx.playersById)
+      }),
     onPlayerNotice: (message) => ctx.emitPlayerEvent(player.id, { type: 'ACTION_NOTICE', message })
   });
   if (boatBoard.handled) {

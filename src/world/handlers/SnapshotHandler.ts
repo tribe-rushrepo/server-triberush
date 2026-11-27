@@ -164,7 +164,9 @@ export function buildDynamicWorldStateSnapshot(ctx: WorldRoomContext) {
     totems: Array.from(ctx.placedTotems.values()).map((t) => ctx.totemService.serializeTotem(t)),
     collapseZones: Array.from(ctx.brokenTotemZones.values()),
     structures: Array.from(ctx.placedStructures.values()),
-    boats: Array.from(ctx.placedBoats.values()).map((b) => ctx.pirateBoatService.serializeBoat(b)),
+    boats: Array.from(ctx.placedBoats.values()).map((b) =>
+      ctx.pirateBoatService.serializeBoat(b, ctx.playersById)
+    ),
     leaderboard: ctx.getLeaderboardEntries(),
     tribes: ctx.getTribeSummaries()
   };

@@ -158,7 +158,7 @@ export function placeBuildableEntityCore(
     ctx.syncPlayerInventory(player);
     ctx.emitRosterEvent({
       type: 'BOAT_PLACED',
-      boat: ctx.pirateBoatService.serializeBoat(boat)
+      boat: ctx.pirateBoatService.serializeBoat(boat, ctx.playersById)
     });
     return { ok: true, action: 'boat_placed', boat };
   }

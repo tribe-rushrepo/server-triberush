@@ -498,7 +498,7 @@ export function handleSwingCore(
       if (boat.ownerId === player.id || (player.tribeId && boat.tribeId === player.tribeId)) {
         continue;
       }
-      const maxB = stats.reach + 118;
+      const maxB = stats.reach + 225;
       const dx = boat.x - player.x;
       const dy = boat.y - player.y;
       if (Math.abs(dx) > maxB || Math.abs(dy) > maxB) continue;

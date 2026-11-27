@@ -122,7 +122,7 @@ export const BlueprintPlaceBuildSchema = z.object({
 export const InteractBoatSchema = z.object({
   type: z.literal('INTERACT_BOAT'),
   boatId: z.number().int().positive(),
-  action: z.enum(['ladder', 'wheel'])
+  action: z.enum(['ladder', 'wheel', 'store'])
 });
 
 export const FeedStructureSchema = z.object({
@@ -146,7 +146,7 @@ export const CookMeatSchema = z.object({
 
 export const BlueprintRemoveEntitySchema = z.object({
   type: z.literal('BLUEPRINT_REMOVE_ENTITY'),
-  targetKind: z.enum(['wall', 'structure', 'chest', 'torch', 'totem']),
+  targetKind: z.enum(['wall', 'structure', 'chest', 'torch', 'totem', 'boat']),
   targetId: z.number().int().positive()
 });
 

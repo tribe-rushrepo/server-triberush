@@ -432,7 +432,6 @@ export function stepPlayersAndWorldCore(
       if (p.pendingInputSeq !== undefined) {
         p.lastProcessedInputSeq = p.pendingInputSeq;
       }
-      ctx.spatialGrid.insert(p);
       continue;
     }
 
@@ -512,10 +511,15 @@ export function stepPlayersAndWorldCore(
     boats: ctx.placedBoats,
     playersById: ctx.playersById
   });
-  if (activeBoats.length > 0 && serverTick % 2 === 0) {
+  for (const p of ctx.playersById.values()) {
+    if (p.aboardBoatId && !p.isDead) {
+      ctx.spatialGrid.insert(p);
+    }
+  }
+  if (activeBoats.length > 0) {
     ctx.emitRosterEvent({
       type: 'BOATS_SYNC',
-      boats: activeBoats.map((b) => ctx.pirateBoatService.serializeBoat(b))
+      boats: activeBoats.map((b) => ctx.pirateBoatService.serializeBoat(b, ctx.playersById))
     });
   }
 

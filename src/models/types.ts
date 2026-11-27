@@ -385,7 +385,7 @@ export interface SavedBlueprintChestItem {
 }
 
 export type BlueprintStoredBuilds = Record<string, number>;
-export type BlueprintTargetKind = 'wall' | 'structure' | 'chest' | 'torch' | 'totem';
+export type BlueprintTargetKind = 'wall' | 'structure' | 'chest' | 'torch' | 'totem' | 'boat';
 
 export interface SavedBaseBlueprintSlot {
   ownerId: string;
