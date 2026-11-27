@@ -56,7 +56,12 @@ function advanceShoreAnimal(
   const resolved = world.resolvePlayerPosition(candX, candY, a.radius);
   if (world.size >= 50000) {
     const info = classifyArchipelagoPoint(resolved.x, resolved.y, world.size);
-    if (info.radialRatio > SHALLOW_SEA_MAX_RATIO - 0.004) {
+    if (info.isSeawater || info.radialRatio > 0.985) {
+      const inlandAng = Math.atan2(a.homeY - a.y, a.homeX - a.x);
+      a.fleeDirX = Math.cos(inlandAng);
+      a.fleeDirY = Math.sin(inlandAng);
+      a.wanderTargetX = a.homeX;
+      a.wanderTargetY = a.homeY;
       return false;
     }
   }
@@ -87,8 +92,8 @@ function pickBeachWaypoint(
     const ty = Math.max(200, Math.min(world.size - 200, a.y + Math.sin(ang) * step));
     if (world.size >= 50000) {
       const info = classifyArchipelagoPoint(tx, ty, world.size);
-      if (info.blocksFoot) continue;
-      if ((a.kind === 'crab' || a.kind === 'starfish' || a.kind === 'sandpiper') && !info.isSandy && info.zone !== 'shallow_sea') {
+      if (info.isSeawater || info.radialRatio > 0.982) continue;
+      if ((a.kind === 'crab' || a.kind === 'starfish' || a.kind === 'sandpiper') && !info.isSandy) {
         continue;
       }
     }
@@ -133,8 +138,14 @@ export function stepBeachWildlifeEntity(params: {
         a.birdPhaseUntil = now + 6000 + Math.floor(Math.random() * 3000);
         a.wanderWaitUntil = now + 1400;
         const safeLand = world.resolvePlayerPosition(a.x, a.y, a.radius);
-        a.x = safeLand.x;
-        a.y = safeLand.y;
+        const landCheck = classifyArchipelagoPoint(safeLand.x, safeLand.y, world.size);
+        if (world.size >= 50000 && (landCheck.isSeawater || landCheck.radialRatio > 0.985)) {
+          a.x = a.homeX;
+          a.y = a.homeY;
+        } else {
+          a.x = safeLand.x;
+          a.y = safeLand.y;
+        }
         callbacks?.onCrowDropStolenItem(a, itemId, count, a.x, a.y);
         return true;
       }
@@ -150,7 +161,7 @@ export function stepBeachWildlifeEntity(params: {
         const candX = a.x + nx * SEAGULL_GETAWAY_FLY_SPEED * dt;
         const candY = a.y + ny * SEAGULL_GETAWAY_FLY_SPEED * dt;
         const info = classifyArchipelagoPoint(candX, candY, world.size);
-        if (world.size < 50000 || !info.blocksFoot) {
+        if (world.size < 50000 || (!info.isSeawater && info.radialRatio <= 0.985)) {
           a.x = candX;
           a.y = candY;
           a.angle = Math.atan2(ny, nx);
@@ -214,7 +225,7 @@ export function stepBeachWildlifeEntity(params: {
               const candX = Math.max(240, Math.min(world.size - 240, a.x + Math.cos(ang) * 760));
               const candY = Math.max(240, Math.min(world.size - 240, a.y + Math.sin(ang) * 760));
               const info = classifyArchipelagoPoint(candX, candY, world.size);
-              if (!info.blocksFoot && !world.overlapsAnySolid(candX, candY, 26)) {
+              if (!info.isSeawater && info.radialRatio <= 0.98 && !world.overlapsAnySolid(candX, candY, 26)) {
                 destX = candX;
                 destY = candY;
                 break;
@@ -269,7 +280,8 @@ export function stepBeachWildlifeEntity(params: {
       const landInfo = classifyArchipelagoPoint(a.x, a.y, world.size);
       if (
         now >= a.birdPhaseUntil &&
-        !landInfo.blocksFoot &&
+        !landInfo.isSeawater &&
+        landInfo.radialRatio <= 0.982 &&
         !world.overlapsAnySolid(a.x, a.y, 20)
       ) {
         a.isAirborne = false;

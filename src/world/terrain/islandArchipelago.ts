@@ -234,15 +234,19 @@ export function getNormalizedIslandRadialRatio(
 ): number {
   const dx = x - isl.cx;
   const dy = y - isl.cy;
-  // Fast bounding-box reject (max lobe modulation <= 1.38, mid_sea <= 1.15 -> 1.62)
+  // Fast bounding-box & radial-squared reject (skips atan2 + 4 harmonics for 90% of islands)
   if (Math.abs(dx) > isl.rx * 1.62 || Math.abs(dy) > isl.ry * 1.62) {
     return 999;
   }
   const nx = dx / isl.rx;
   const ny = dy / isl.ry;
+  const distSq = nx * nx + ny * ny;
+  if (distSq > 2.65) {
+    return 999;
+  }
   const angle = Math.atan2(ny, nx);
   const mod = getIslandModulation(isl, angle);
-  return Math.hypot(nx, ny) / Math.max(0.35, mod);
+  return Math.sqrt(distSq) / Math.max(0.35, mod);
 }
 
 export interface ArchipelagoPointInfo {
@@ -358,6 +362,22 @@ export function classifyArchipelagoPoint(
     isSeawater: false,
     isSandy: false
   };
+}
+
+/**
+ * Returns true strictly when (x, y) lies inside green island grass turf
+ * (never on sandy beaches and never in shallow/deep seawater).
+ */
+export function isStrictLandGrassPoint(
+  x: number,
+  y: number,
+  worldSize: number,
+  marginRatio: number = 0.02
+): boolean {
+  if (worldSize < 50000) return true;
+  const info = classifyArchipelagoPoint(x, y, worldSize);
+  if (!info.island || info.isSeawater || info.isSandy) return false;
+  return info.radialRatio <= info.island.greenRatio - marginRatio;
 }
 
 /**

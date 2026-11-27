@@ -7,7 +7,8 @@ import { WorldPersistenceService } from '../src/services/WorldPersistenceService
 import { WorldRoom } from '../src/world/WorldRoom.js';
 import {
   ARCHIPELAGO_ISLANDS,
-  classifyArchipelagoPoint
+  classifyArchipelagoPoint,
+  getIslandPointAt
 } from '../src/world/terrain/islandArchipelago.js';
 
 const makeAcct = (id: string, username: string): PlayerProfileData => ({
@@ -328,6 +329,39 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     const climbDown = room.handlePickupOrHarvest(captain.id);
     assert.equal(climbDown.ok, true);
     assert.ok(captain.y > wtY + 60, 'Climbing down [F] steps player to foot of Watchtower ladder');
+
+    // Verify strict Land-Grass animal bounds & zero seawater animal intrusion
+    const grassOnlySpecies = new Set(['cow', 'pig', 'sheep', 'chicken', 'wolf', 'lion', 'sparrow', 'crow']);
+    for (const a of room.animalService.animals) {
+      const info = classifyArchipelagoPoint(a.x, a.y, room.world.size);
+      if (grassOnlySpecies.has(a.kind)) {
+        assert.equal(info.isSandy, false, `Land animal ${a.kind} must never spawn on beach sand`);
+        assert.equal(info.isSeawater, false, `Land animal ${a.kind} must never spawn in seawater`);
+      } else if (a.kind !== 'duck') {
+        assert.equal(info.isSeawater, false, `Beach animal ${a.kind} must never spawn in seawater`);
+      }
+    }
+
+    // Force a cow near the grass-to-beach border fleeing toward the beach -> must stay strictly on land grass!
+    const testCow = room.animalService.animals.find((a) => a.kind === 'cow');
+    if (testCow) {
+      const mainIsland = ARCHIPELAGO_ISLANDS[0];
+      const edgeGrass = getIslandPointAt(mainIsland, 0, mainIsland.greenRatio - 0.022);
+      testCow.x = edgeGrass.x;
+      testCow.y = edgeGrass.y;
+      testCow.fleeUntil = Date.now() + 4000;
+      testCow.lastDamagedAt = Date.now() - 500;
+      testCow.fleeDirX = 1;
+      testCow.fleeDirY = 0;
+      captain.x = edgeGrass.x - 120;
+      captain.y = edgeGrass.y;
+      for (let t = 0; t < 20; t++) {
+        room.stepSimulation(0.05);
+      }
+      const afterInfo = classifyArchipelagoPoint(testCow.x, testCow.y, room.world.size);
+      assert.equal(afterInfo.isSandy, false, 'Fleeing cow must deflect before stepping onto beach sand');
+      assert.equal(afterInfo.isSeawater, false, 'Fleeing cow must never enter seawater');
+    }
 
     // Verify +30,000px legacy coordinate migration helper in WorldPersistenceService
     assert.ok(WorldPersistenceService);

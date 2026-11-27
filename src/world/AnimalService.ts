@@ -17,6 +17,7 @@ import {
 import { isBeachWildlifeSpecies, stepBeachWildlifeEntity } from './animals/beachWildlifeAi.js';
 import { stepPredatorOrBirdEntity } from './animals/predatorAndBirdAi.js';
 import { spawnInitialWildlifeEntities } from './animals/animalSpawner.js';
+import { classifyArchipelagoPoint, isStrictLandGrassPoint } from './terrain/islandArchipelago.js';
 
 export {
   ANIMAL_AOI_RADIUS, ANIMAL_FLEE_DURATION_MS, ANIMAL_HEADER_BYTES, ANIMAL_MAX_DUCKS,
@@ -114,33 +115,16 @@ export class AnimalService {
     const spec = ANIMAL_SPECIES[kind];
     const angle = Number(((rng() * 2 - 1) * Math.PI).toFixed(3));
     const entity: WorldAnimalEntity = {
-      id: this.nextAnimalId++,
-      kind,
-      x: Math.round(x),
-      y: Math.round(y),
-      homeX: Math.round(homeX),
-      homeY: Math.round(homeY),
-      homeRadius,
-      homeWaterKind: waterMeta?.waterKind,
-      homeWaterId: waterMeta?.waterId,
-      radius: spec.radius,
-      angle,
-      hp: spec.maxHp,
-      maxHp: spec.maxHp,
-      roamSpeed: spec.roamSpeed,
-      fleeSpeed: spec.fleeSpeed,
-      wanderTargetX: Math.round(x),
-      wanderTargetY: Math.round(y),
+      id: this.nextAnimalId++, kind,
+      x: Math.round(x), y: Math.round(y),
+      homeX: Math.round(homeX), homeY: Math.round(homeY), homeRadius,
+      homeWaterKind: waterMeta?.waterKind, homeWaterId: waterMeta?.waterId,
+      radius: spec.radius, angle, hp: spec.maxHp, maxHp: spec.maxHp,
+      roamSpeed: spec.roamSpeed, fleeSpeed: spec.fleeSpeed,
+      wanderTargetX: Math.round(x), wanderTargetY: Math.round(y),
       wanderWaitUntil: Date.now() + Math.floor(rng() * 2500),
-      fleeUntil: 0,
-      fleeDirX: Math.cos(angle),
-      fleeDirY: Math.sin(angle),
-      kbVx: 0,
-      kbVy: 0,
-      isMoving: false,
-      isDead: false,
-      respawnAt: null,
-      lastDamagedAt: 0
+      fleeUntil: 0, fleeDirX: Math.cos(angle), fleeDirY: Math.sin(angle),
+      kbVx: 0, kbVy: 0, isMoving: false, isDead: false, respawnAt: null, lastDamagedAt: 0
     };
     this.animals.push(entity);
     this.animalsById.set(entity.id, entity);
@@ -230,32 +214,19 @@ export class AnimalService {
       hits += 1;
 
       callbacks.onBroadcastProximityEvent(animal.x, animal.y, {
-        type: 'ANIMAL_HIT',
-        id: animal.id,
-        kind: animal.kind,
-        attackerShortId: attacker.shortId,
-        damage: stats.combatDmg,
-        hp: animal.hp,
-        maxHp: animal.maxHp,
-        x: Math.round(animal.x),
-        y: Math.round(animal.y),
-        dirX: Number(nx.toFixed(3)),
-        dirY: Number(ny.toFixed(3)),
-        weaponId,
-        killed
+        type: 'ANIMAL_HIT', id: animal.id, kind: animal.kind,
+        attackerShortId: attacker.shortId, damage: stats.combatDmg,
+        hp: animal.hp, maxHp: animal.maxHp,
+        x: Math.round(animal.x), y: Math.round(animal.y),
+        dirX: Number(nx.toFixed(3)), dirY: Number(ny.toFixed(3)),
+        weaponId, killed
       });
 
       if (killed) {
-        animal.isDead = true;
-        animal.respawnAt = now + ANIMAL_RESPAWN_MS;
-        animal.fleeUntil = 0;
-        animal.isMoving = false;
-        animal.isAirborne = false;
-        animal.aggroTargetId = null;
-        animal.lionSneakReady = false;
-        animal.lionSpotted = false;
-        animal.kbVx = 0;
-        animal.kbVy = 0;
+        animal.isDead = true; animal.respawnAt = now + ANIMAL_RESPAWN_MS;
+        animal.fleeUntil = 0; animal.isMoving = false; animal.isAirborne = false;
+        animal.aggroTargetId = null; animal.lionSneakReady = false; animal.lionSpotted = false;
+        animal.kbVx = 0; animal.kbVy = 0;
 
         if (animal.carriedItemId && (animal.carriedItemCount || 0) > 0) {
           callbacks.onSpawnDrop(
@@ -518,16 +489,18 @@ export class AnimalService {
           const resolved = this.world.resolvePlayerPosition(candX, candY, a.radius);
           const blocked = Math.hypot(resolved.x - candX, resolved.y - candY) > 1.5;
 
-          let hitsWater = false;
-          for (let li = 0; li < this.world.lakes.length; li++) {
-            const lk = this.world.lakes[li];
-            const dxL = resolved.x - lk.x;
-            const dyL = resolved.y - lk.y;
-            if (Math.abs(dxL) >= lk.outerRadius || Math.abs(dyL) >= lk.outerRadius) continue;
-            if (dxL * dxL + dyL * dyL < lk.outerRadius * lk.outerRadius) {
-              if (this.world.isPointInsideWaterBody(resolved.x, resolved.y, 'lake', lk.id, 0.96)) {
-                hitsWater = true;
-                break;
+          let hitsWater = !isStrictLandGrassPoint(resolved.x, resolved.y, this.world.size, 0.015);
+          if (!hitsWater) {
+            for (let li = 0; li < this.world.lakes.length; li++) {
+              const lk = this.world.lakes[li];
+              const dxL = resolved.x - lk.x;
+              const dyL = resolved.y - lk.y;
+              if (Math.abs(dxL) >= lk.outerRadius || Math.abs(dyL) >= lk.outerRadius) continue;
+              if (dxL * dxL + dyL * dyL < lk.outerRadius * lk.outerRadius) {
+                if (this.world.isPointInsideWaterBody(resolved.x, resolved.y, 'lake', lk.id, 0.96)) {
+                  hitsWater = true;
+                  break;
+                }
               }
             }
           }
@@ -625,11 +598,20 @@ export class AnimalService {
       return;
     }
 
-    const ang = Math.random() * Math.PI * 2;
-    const stepDist = 90 + Math.random() * 220;
     const pad = 160;
-    a.wanderTargetX = Math.max(pad, Math.min(this.world.size - pad, a.x + Math.cos(ang) * stepDist));
-    a.wanderTargetY = Math.max(pad, Math.min(this.world.size - pad, a.y + Math.sin(ang) * stepDist));
+    for (let tries = 0; tries < 8; tries++) {
+      const ang = Math.random() * Math.PI * 2;
+      const stepDist = 90 + Math.random() * 220;
+      const tx = Math.max(pad, Math.min(this.world.size - pad, a.x + Math.cos(ang) * stepDist));
+      const ty = Math.max(pad, Math.min(this.world.size - pad, a.y + Math.sin(ang) * stepDist));
+      if (isStrictLandGrassPoint(tx, ty, this.world.size, 0.02)) {
+        a.wanderTargetX = tx;
+        a.wanderTargetY = ty;
+        return;
+      }
+    }
+    a.wanderTargetX = a.homeX;
+    a.wanderTargetY = a.homeY;
   }
 
   private respawnAnimal(a: WorldAnimalEntity, now: number, dayPhase: DayPhaseName = 'DAYTIME'): void {
@@ -672,10 +654,25 @@ export class AnimalService {
         a.x = a.homeX;
         a.y = a.homeY;
       }
+    } else if (isBeachWildlifeSpecies(a.kind)) {
+      const resolved = this.world.resolvePlayerPosition(candX, candY, a.radius);
+      const info = classifyArchipelagoPoint(resolved.x, resolved.y, this.world.size);
+      if (!info.isSeawater && info.radialRatio <= 0.98) {
+        a.x = resolved.x;
+        a.y = resolved.y;
+      } else {
+        a.x = a.homeX;
+        a.y = a.homeY;
+      }
     } else {
       const resolved = this.world.resolvePlayerPosition(candX, candY, a.radius);
-      a.x = resolved.x;
-      a.y = resolved.y;
+      if (isStrictLandGrassPoint(resolved.x, resolved.y, this.world.size, 0.02)) {
+        a.x = resolved.x;
+        a.y = resolved.y;
+      } else {
+        a.x = a.homeX;
+        a.y = a.homeY;
+      }
     }
     a.wanderTargetX = a.x;
     a.wanderTargetY = a.y;

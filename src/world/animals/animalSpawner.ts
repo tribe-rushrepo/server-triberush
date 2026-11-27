@@ -4,7 +4,8 @@ import {
   ARCHIPELAGO_ISLANDS,
   MAINLAND_LEGACY_OFFSET,
   classifyArchipelagoPoint,
-  getIslandPointAt
+  getIslandPointAt,
+  isStrictLandGrassPoint
 } from '../terrain/islandArchipelago.js';
 import {
   ANIMAL_MAX_DUCKS,
@@ -31,9 +32,10 @@ export function spawnInitialWildlifeEntities(
   const rng = createSeededRng((world.seed ^ 0x517cc1b7) >>> 0);
   const pad = 260;
 
-  // 1. MUDLAND PIGS: 50% spawn rate per Muddy Bog Patch, roaming in herds of 2-3 pigs
+  // 1. MUDLAND PIGS: 50% spawn rate per Muddy Bog Patch, roaming in herds of 2-3 pigs (strictly on land grass)
   for (let i = 0; i < world.mudPatches.length; i++) {
     const mud = world.mudPatches[i];
+    if (!isStrictLandGrassPoint(mud.x, mud.y, world.size, 0.015)) continue;
     if (rng() >= PIG_SPAWN_RATE) continue;
 
     const herdSize = rng() < 0.5 ? 2 : 3;
@@ -46,6 +48,7 @@ export function spawnInitialWildlifeEntities(
         const d = 18 + rng() * (mud.radius + 70);
         const cx = Math.max(pad, Math.min(world.size - pad, mud.x + Math.cos(a) * d));
         const cy = Math.max(pad, Math.min(world.size - pad, mud.y + Math.sin(a) * d));
+        if (!isStrictLandGrassPoint(cx, cy, world.size, 0.025)) continue;
         if (!world.overlapsAnySolid(cx, cy, ANIMAL_SPECIES.pig.radius + 10)) {
           sx = cx;
           sy = cy;
@@ -144,6 +147,7 @@ export function spawnInitialWildlifeEntities(
     for (let tries = 0; tries < 12; tries++) {
       const cx = minX + rng() * spanX;
       const cy = minY + rng() * spanY;
+      if (!isStrictLandGrassPoint(cx, cy, world.size, 0.025)) continue;
       if (world.overlapsWaterOrMud(cx, cy, spec.radius + 26)) continue;
       if (world.overlapsAnySolid(cx, cy, spec.radius + 14)) continue;
       const ent = createAnimal(kind, cx, cy, cx, cy, 1100, rng);
@@ -208,6 +212,7 @@ export function spawnInitialWildlifeEntities(
       const d = 560 + rng() * 680;
       const cx = center + Math.cos(a) * d;
       const cy = center + Math.sin(a) * d;
+      if (!isStrictLandGrassPoint(cx, cy, world.size, 0.025)) continue;
       if (world.overlapsWaterOrMud(cx, cy, spec.radius + 26)) continue;
       if (world.overlapsAnySolid(cx, cy, spec.radius + 14)) continue;
       const ent = createAnimal(kind, cx, cy, cx, cy, 900, rng);
@@ -228,6 +233,7 @@ export function spawnInitialWildlifeEntities(
       const d = 1050 + rng() * 850;
       const cx = center + Math.cos(a) * d;
       const cy = center + Math.sin(a) * d;
+      if (!isStrictLandGrassPoint(cx, cy, world.size, 0.025)) continue;
       if (world.overlapsWaterOrMud(cx, cy, spec.radius + 26)) continue;
       if (world.overlapsAnySolid(cx, cy, spec.radius + 14)) continue;
       const ent = createAnimal(kind, cx, cy, cx, cy, 1200, rng);
@@ -236,16 +242,16 @@ export function spawnInitialWildlifeEntities(
     }
   }
 
-  // 4. PHASE 15 BEACH & ARCHIPELAGO WILDLIFE (Crabs, Slow Starfish, 3-5 Varied-Size Turtle Pods, Urchins, Thief Seagulls, Shore Sandpipers)
+  // 4. PHASE 15 BEACH & ARCHIPELAGO WILDLIFE (Dry beach sand only — strictly out of seawater!)
   if (isArch) {
     const pickSandySpot = (islIdx: number, radius: number): { x: number; y: number } | null => {
       const isl = ARCHIPELAGO_ISLANDS[islIdx];
-      for (let tries = 0; tries < 16; tries++) {
+      for (let tries = 0; tries < 18; tries++) {
         const ang = rng() * Math.PI * 2;
-        const frac = isl.greenRatio + 0.02 + rng() * Math.max(0.03, 0.99 - isl.greenRatio - 0.03);
+        const frac = isl.greenRatio + 0.02 + rng() * Math.max(0.02, 0.96 - isl.greenRatio - 0.025);
         const pt = getIslandPointAt(isl, ang, frac);
         const info = classifyArchipelagoPoint(pt.x, pt.y, world.size);
-        if (!info.isSandy && info.zone !== 'shallow_sea') continue;
+        if (!info.isSandy || info.isSeawater || info.radialRatio > 0.975) continue;
         if (world.overlapsAnySolid(pt.x, pt.y, radius + 12)) continue;
         return pt;
       }
@@ -283,7 +289,8 @@ export function spawnInitialWildlifeEntities(
           const offsetDist = 36 + rng() * 56;
           const tx = podCenter.x + Math.cos(offsetAng) * offsetDist;
           const ty = podCenter.y + Math.sin(offsetAng) * offsetDist;
-          if (classifyArchipelagoPoint(tx, ty, world.size).blocksFoot) continue;
+          const tInfo = classifyArchipelagoPoint(tx, ty, world.size);
+          if (tInfo.isSeawater || tInfo.radialRatio > 0.98) continue;
           if (world.overlapsAnySolid(tx, ty, 32)) continue;
           const turtle = createAnimal('turtle', tx, ty, podCenter.x, podCenter.y, 460, rng);
           const variant = (m % 3) as 0 | 1 | 2;

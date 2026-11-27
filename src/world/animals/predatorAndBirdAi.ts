@@ -6,6 +6,7 @@ import type {
   WorldGroundDrop
 } from '../../models/types.js';
 import type { SeededWorld } from '../SeededWorld.js';
+import { isStrictLandGrassPoint } from '../terrain/islandArchipelago.js';
 import type { AnimalStepCallbacks } from './animalConfig.js';
 
 export const PREDATOR_CHASE_SPEED = 242; // Faster than human walk (215), slower than sprint (335)
@@ -52,6 +53,7 @@ export function isLionSpottedByPlayer(
 }
 
 function pointHitsWater(world: SeededWorld, x: number, y: number): boolean {
+  if (!isStrictLandGrassPoint(x, y, world.size, 0.015)) return true;
   for (let li = 0; li < world.lakes.length; li++) {
     const lk = world.lakes[li];
     if (Math.abs(x - lk.x) >= lk.outerRadius || Math.abs(y - lk.y) >= lk.outerRadius) continue;
@@ -102,14 +104,23 @@ function advanceGroundedAnimal(
 
 function pickRoamWaypoint(world: SeededWorld, a: WorldAnimalEntity, minStep: number, maxStep: number): void {
   const distFromHome = Math.hypot(a.x - a.homeX, a.y - a.homeY);
-  const ang =
-    distFromHome > a.homeRadius
-      ? Math.atan2(a.homeY - a.y, a.homeX - a.x) + (Math.random() - 0.5) * 0.8
-      : Math.random() * Math.PI * 2;
-  const dist = minStep + Math.random() * (maxStep - minStep);
   const pad = 180;
-  a.wanderTargetX = Math.max(pad, Math.min(world.size - pad, a.x + Math.cos(ang) * dist));
-  a.wanderTargetY = Math.max(pad, Math.min(world.size - pad, a.y + Math.sin(ang) * dist));
+  for (let tries = 0; tries < 8; tries++) {
+    const ang =
+      distFromHome > a.homeRadius
+        ? Math.atan2(a.homeY - a.y, a.homeX - a.x) + (Math.random() - 0.5) * 0.8
+        : Math.random() * Math.PI * 2;
+    const dist = minStep + Math.random() * (maxStep - minStep);
+    const tx = Math.max(pad, Math.min(world.size - pad, a.x + Math.cos(ang) * dist));
+    const ty = Math.max(pad, Math.min(world.size - pad, a.y + Math.sin(ang) * dist));
+    if (isStrictLandGrassPoint(tx, ty, world.size, 0.02)) {
+      a.wanderTargetX = tx;
+      a.wanderTargetY = ty;
+      return;
+    }
+  }
+  a.wanderTargetX = a.homeX;
+  a.wanderTargetY = a.homeY;
 }
 
 function findNearestPreyPlayer(
@@ -428,11 +439,19 @@ export function stepPredatorOrBirdEntity(params: {
             const flightDist = 700 + Math.random() * 550;
             const cx = Math.max(pad, Math.min(world.size - pad, a.x + Math.cos(ang) * flightDist));
             const cy = Math.max(pad, Math.min(world.size - pad, a.y + Math.sin(ang) * flightDist));
-            if (!world.overlapsWaterOrMud(cx, cy, 32) && !world.overlapsAnySolid(cx, cy, 24)) {
+            if (
+              isStrictLandGrassPoint(cx, cy, world.size, 0.02) &&
+              !world.overlapsWaterOrMud(cx, cy, 32) &&
+              !world.overlapsAnySolid(cx, cy, 24)
+            ) {
               destX = cx;
               destY = cy;
               break;
             }
+          }
+          if (!isStrictLandGrassPoint(destX, destY, world.size, 0.015)) {
+            destX = a.homeX;
+            destY = a.homeY;
           }
           a.dropOffX = destX;
           a.dropOffY = destY;
@@ -488,6 +507,7 @@ export function stepPredatorOrBirdEntity(params: {
     }
     if (
       now >= a.birdPhaseUntil &&
+      isStrictLandGrassPoint(a.x, a.y, world.size, 0.02) &&
       !world.overlapsWaterOrMud(a.x, a.y, 26) &&
       !world.overlapsAnySolid(a.x, a.y, 20)
     ) {
