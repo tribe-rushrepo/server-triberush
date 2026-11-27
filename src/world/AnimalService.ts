@@ -342,6 +342,12 @@ export class AnimalService {
     const kbDecay = Math.exp(-CONFIG.KNOCKBACK_DAMPING * dt);
     const dayPhase: DayPhaseName = stepCtx?.dayPhase ?? 'DAYTIME';
     const claimedDropIds = new Set<number>();
+    for (let i = 0; i < this.animals.length; i++) {
+      const ca = this.animals[i];
+      if (!ca.isDead && ca.kind === 'crow' && typeof ca.targetDropId === 'number') {
+        claimedDropIds.add(ca.targetDropId);
+      }
+    }
     let anyMoved = false;
     let visibilityChanged = false;
 

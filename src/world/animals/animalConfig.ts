@@ -156,7 +156,7 @@ export interface AnimalStepCallbacks {
     causeText: string,
     isSneakAttack: boolean
   ) => void;
-  onCrowStealDrop: (crow: WorldAnimalEntity, drop: WorldGroundDrop) => void;
+  onCrowStealDrop: (crow: WorldAnimalEntity, drop: WorldGroundDrop) => boolean;
   onCrowDropStolenItem: (
     crow: WorldAnimalEntity,
     itemId: ItemId,

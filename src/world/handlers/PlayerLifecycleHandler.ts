@@ -462,7 +462,9 @@ export function stepPlayersAndWorldCore(
             dropId: drop.id,
             collectorShortId: 0
           });
+          return true;
         }
+        return false;
       },
       onCrowDropStolenItem: (_crow, itemId, count, x, y) => {
         ctx.spawnGroundDrop(itemId, count, x, y, x, y, false);

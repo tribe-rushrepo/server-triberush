@@ -411,10 +411,13 @@ export function stepPredatorOrBirdEntity(params: {
         const dy = targetDrop.y - a.y;
         const dist = Math.hypot(dx, dy);
         if (dist <= 28) {
+          a.targetDropId = null;
+          const stolenOk = callbacks ? callbacks.onCrowStealDrop(a, targetDrop) : false;
+          if (!stolenOk) {
+            return false;
+          }
           a.carriedItemId = targetDrop.itemId;
           a.carriedItemCount = targetDrop.count;
-          a.targetDropId = null;
-          callbacks?.onCrowStealDrop(a, targetDrop);
 
           // Pick a clear forest landing spot 700..1250px away so players can chase & follow it!
           const pad = 260;
