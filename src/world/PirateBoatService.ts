@@ -1,59 +1,62 @@
 import { CONFIG } from '../config/index.js';
 import type { ActiveWorldPlayer, WorldPirateBoat } from '../models/types.js';
 import type { SeededWorld } from './SeededWorld.js';
+import { classifyArchipelagoPoint } from './terrain/islandArchipelago.js';
 import {
-  SHALLOW_SEA_MAX_RATIO,
-  classifyArchipelagoPoint
-} from './terrain/islandArchipelago.js';
+  BOAT_BOW_X,
+  BOAT_DECK_HALF_Y,
+  BOAT_DECK_MAX_X,
+  BOAT_DECK_MIN_X,
+  BOAT_HELM_STAND_X,
+  BOAT_HULL_HALF_BEAM,
+  BOAT_HULL_HALF_LEN,
+  BOAT_LADDER_LOCAL_X,
+  BOAT_LADDER_LOCAL_Y,
+  BOAT_STERN_X,
+  BOAT_WHEEL_LOCAL_X,
+  BOAT_WHEEL_LOCAL_Y,
+  boatLocalToWorld,
+  closestLocalPointOnBoatHull,
+  displacePlayersOverlappingBoat,
+  getBoatDeckHalfWidthAtLocalX,
+  getBoatHullHalfWidthAtLocalX,
+  resolveCircleOutOfSingleBoat,
+  resolvePlayerOutOfBoats,
+  worldToBoatLocal
+} from './pirateBoatCollision.js';
 
-export const BOAT_HULL_HALF_LEN = 290;
-export const BOAT_HULL_HALF_BEAM = 108;
-export const BOAT_DECK_MIN_X = -256;
-export const BOAT_DECK_MAX_X = 236;
-export const BOAT_DECK_HALF_Y = 82;
-export const BOAT_LADDER_LOCAL_X = -56;
-export const BOAT_LADDER_LOCAL_Y = 114;
-export const BOAT_WHEEL_LOCAL_X = -188;
-export const BOAT_WHEEL_LOCAL_Y = 0;
-export const BOAT_HELM_STAND_X = -214;
+export {
+  BOAT_BOW_X,
+  BOAT_DECK_HALF_Y,
+  BOAT_DECK_MAX_X,
+  BOAT_DECK_MIN_X,
+  BOAT_HELM_STAND_X,
+  BOAT_HULL_HALF_BEAM,
+  BOAT_HULL_HALF_LEN,
+  BOAT_LADDER_LOCAL_X,
+  BOAT_LADDER_LOCAL_Y,
+  BOAT_STERN_X,
+  BOAT_WHEEL_LOCAL_X,
+  BOAT_WHEEL_LOCAL_Y,
+  boatLocalToWorld,
+  closestLocalPointOnBoatHull,
+  displacePlayersOverlappingBoat,
+  getBoatDeckHalfWidthAtLocalX,
+  getBoatHullHalfWidthAtLocalX,
+  resolveCircleOutOfSingleBoat,
+  resolvePlayerOutOfBoats,
+  worldToBoatLocal
+};
 
 const BOAT_MAX_FORWARD_SPEED = 310;
 const BOAT_MAX_REVERSE_SPEED = -96;
 const BOAT_FORWARD_ACCEL = 138;
 const BOAT_REVERSE_ACCEL = 112;
 const BOAT_WATER_DRAG = 1.15;
-const BOAT_MAX_TURN_RATE = 0.88; // Realistic heavy naval rudder arc (~50 deg/s)
-const BOAT_RUDDER_ACCEL = 1.65;
+const BOAT_MAX_TURN_RATE = 0.82;
+const BOAT_RUDDER_ACCEL = 1.55;
 const BOAT_RUDDER_DAMPING = 2.8;
-const BOAT_DECK_WALK_SPEED = 185;
-
-export function boatLocalToWorld(
-  boat: Pick<WorldPirateBoat, 'x' | 'y' | 'angle'>,
-  lx: number,
-  ly: number
-): { x: number; y: number } {
-  const cos = Math.cos(boat.angle);
-  const sin = Math.sin(boat.angle);
-  return {
-    x: boat.x + lx * cos - ly * sin,
-    y: boat.y + lx * sin + ly * cos
-  };
-}
-
-export function worldToBoatLocal(
-  boat: Pick<WorldPirateBoat, 'x' | 'y' | 'angle'>,
-  wx: number,
-  wy: number
-): { lx: number; ly: number } {
-  const dx = wx - boat.x;
-  const dy = wy - boat.y;
-  const cos = Math.cos(-boat.angle);
-  const sin = Math.sin(-boat.angle);
-  return {
-    lx: dx * cos - dy * sin,
-    ly: dx * sin + dy * cos
-  };
-}
+const BOAT_DECK_WALK_SPEED = 190;
 
 export function getBoatLadderWorldPoints(
   boat: Pick<WorldPirateBoat, 'x' | 'y' | 'angle'>
@@ -77,7 +80,7 @@ export class PirateBoatService {
     x: number,
     y: number
   ): { ok: boolean; error?: string } {
-    const pad = 340;
+    const pad = 480;
     if (x < pad || x > world.size - pad || y < pad || y > world.size - pad) {
       return { ok: false, error: 'Too close to the edge of the sea.' };
     }
@@ -94,7 +97,7 @@ export class PirateBoatService {
       return { ok: false, error: 'Place the Pirate Boat in the seawater beside the Dock pier.' };
     }
     for (const other of boats) {
-      if (Math.hypot(other.x - x, other.y - y) < 310) {
+      if (Math.hypot(other.x - x, other.y - y) < 420) {
         return { ok: false, error: 'Too close to another Pirate Ship.' };
       }
     }
@@ -194,29 +197,24 @@ export class PirateBoatService {
 
     if (action === 'ladder') {
       const ladders = getBoatLadderWorldPoints(boat);
-      // 1. Disembark if already aboard this boat
+      // 1. Disembark if already on the upper deck of this ship
       if (player.aboardBoatId === boat.id) {
-        const local = {
-          lx: player.boatLocalX ?? 0,
-          ly: player.boatLocalY ?? 0
-        };
-        const distPort = Math.hypot(local.lx - BOAT_LADDER_LOCAL_X, local.ly - -BOAT_LADDER_LOCAL_Y);
-        const distStarboard = Math.hypot(
-          local.lx - BOAT_LADDER_LOCAL_X,
-          local.ly - BOAT_LADDER_LOCAL_Y
-        );
-        if (Math.min(distPort, distStarboard) > 135) {
+        const lx = player.boatLocalX ?? 0;
+        const ly = player.boatLocalY ?? 0;
+        const distPort = Math.hypot(lx - BOAT_LADDER_LOCAL_X, ly - -BOAT_LADDER_LOCAL_Y);
+        const distStarboard = Math.hypot(lx - BOAT_LADDER_LOCAL_X, ly - BOAT_LADDER_LOCAL_Y);
+        if (Math.min(distPort, distStarboard) > 150) {
           return { ok: false, error: 'Walk to the side boarding ladder on deck to climb down.' };
         }
 
         const preferStarboard = distStarboard <= distPort;
         const sides = preferStarboard ? [1, -1] : [-1, 1];
         for (const side of sides) {
-          for (const distOut of [148, 180, 214, 248]) {
+          for (const distOut of [210, 240, 272, 306]) {
             const cand = boatLocalToWorld(boat, BOAT_LADDER_LOCAL_X, side * distOut);
             const onPier = world.isPointOnWalkablePier(cand.x, cand.y);
             const info = classifyArchipelagoPoint(cand.x, cand.y, world.size);
-            if (onPier || !info.blocksFoot) {
+            if (onPier || world.size < 50000 || !info.blocksFoot) {
               if (boat.helmPlayerId === player.id) {
                 boat.helmPlayerId = null;
                 boat.helmShortId = 0;
@@ -224,9 +222,16 @@ export class PirateBoatService {
               player.aboardBoatId = null;
               player.boatLocalX = 0;
               player.boatLocalY = 0;
-              const resolved = world.resolvePlayerPosition(cand.x, cand.y, CONFIG.PLAYER_RADIUS);
-              player.x = resolved.x;
-              player.y = resolved.y;
+              const settled = resolvePlayerOutOfBoats(
+                boats.values(),
+                cand.x,
+                cand.y,
+                null,
+                world,
+                CONFIG.PLAYER_RADIUS
+              );
+              player.x = settled.x;
+              player.y = settled.y;
               onBoatUpdated(boat);
               onPlayerNotice?.('Climbed down the Pirate Ship ladder.');
               return { ok: true, boarded: false, steering: false };
@@ -239,12 +244,12 @@ export class PirateBoatService {
         };
       }
 
-      // 2. Climb up the ladder onto the Pirate Ship deck
+      // 2. Climb up the designated side ladder onto the Pirate Ship upper deck
       const dPort = Math.hypot(player.x - ladders.port.x, player.y - ladders.port.y);
       const dStarboard = Math.hypot(player.x - ladders.starboard.x, player.y - ladders.starboard.y);
       const minLadderDist = Math.min(dPort, dStarboard);
-      if (minLadderDist > 156) {
-        return { ok: false, error: 'Move closer to the Pirate Ship side ladder to climb aboard.' };
+      if (minLadderDist > 140) {
+        return { ok: false, error: 'Walk to the Pirate Ship side ladder to climb onto the upper deck.' };
       }
 
       if (player.aboardBoatId && player.aboardBoatId !== boat.id) {
@@ -254,16 +259,16 @@ export class PirateBoatService {
       const boardStarboard = dStarboard < dPort;
       player.aboardBoatId = boat.id;
       player.boatLocalX = BOAT_LADDER_LOCAL_X;
-      player.boatLocalY = boardStarboard ? 64 : -64;
+      player.boatLocalY = boardStarboard ? 108 : -108;
       const deckPos = boatLocalToWorld(boat, player.boatLocalX, player.boatLocalY);
       player.x = deckPos.x;
       player.y = deckPos.y;
       onBoatUpdated(boat);
-      onPlayerNotice?.('Climbed aboard Pirate Ship! Walk to the stern wheel to sail.');
+      onPlayerNotice?.('Climbed onto the Pirate Ship upper deck! Walk to the stern wheel to sail.');
       return { ok: true, boarded: true, steering: false };
     }
 
-    // Action === 'wheel' — strictly requires having climbed onto the top deck first!
+    // Action === 'wheel' — strictly forbidden unless already on the upper deck of this ship!
     if (player.aboardBoatId !== boat.id) {
       return {
         ok: false,
@@ -271,11 +276,10 @@ export class PirateBoatService {
       };
     }
 
-    // Release helm if already steering
     if (boat.helmPlayerId === player.id) {
       boat.helmPlayerId = null;
       boat.helmShortId = 0;
-      player.boatLocalX = -156;
+      player.boatLocalX = BOAT_WHEEL_LOCAL_X + 36;
       player.boatLocalY = 0;
       onBoatUpdated(boat);
       onPlayerNotice?.('Released the Ship Wheel.');
@@ -286,8 +290,8 @@ export class PirateBoatService {
       (player.boatLocalX ?? 0) - BOAT_WHEEL_LOCAL_X,
       (player.boatLocalY ?? 0) - BOAT_WHEEL_LOCAL_Y
     );
-    if (wheelDist > 118) {
-      return { ok: false, error: 'Walk to the stern Ship Wheel on deck to steer.' };
+    if (wheelDist > 128) {
+      return { ok: false, error: 'Walk to the stern Ship Wheel on the upper deck to steer.' };
     }
 
     if (boat.helmPlayerId && boat.helmPlayerId !== player.id) {
@@ -318,51 +322,12 @@ export class PirateBoatService {
     for (const p of playersById.values()) {
       if (p.aboardBoatId === boat.id && !p.isDead) {
         const info = classifyArchipelagoPoint(p.x, p.y, world.size);
-        if (!world.isPointOnWalkablePier(p.x, p.y) && info.blocksFoot) {
+        if (!world.isPointOnWalkablePier(p.x, p.y) && world.size >= 50000 && info.blocksFoot) {
           return false;
         }
       }
     }
     return true;
-  }
-
-  public handleStoreBoat(params: {
-    player: ActiveWorldPlayer;
-    boat: WorldPirateBoat;
-    canManage: boolean;
-    world: SeededWorld;
-    boats: Map<number, WorldPirateBoat>;
-    playersById: Map<string, ActiveWorldPlayer>;
-    onReturnItemToOwner: () => void;
-    onBoatRemoved: (boatId: number) => void;
-  }): { ok: boolean; stored?: boolean; error?: string } {
-    const { player, boat, canManage, world, boats, playersById, onReturnItemToOwner, onBoatRemoved } = params;
-    if (Date.now() < player.combatUntil) {
-      return { ok: false, error: 'Cannot store Pirate Ship during Combat Mode.' };
-    }
-    if (Date.now() - boat.lastDamagedAt < CONFIG.COMBAT_MODE_MS) {
-      return { ok: false, error: 'Cannot store Pirate Ship while it is taking damage in combat.' };
-    }
-    if (!canManage) {
-      return { ok: false, error: 'Only the ship owner or Tribe builders can store this Pirate Ship.' };
-    }
-    if (boat.helmPlayerId && boat.helmPlayerId !== player.id) {
-      return { ok: false, error: 'Cannot store Pirate Ship while someone else is steering it.' };
-    }
-    if (Math.hypot(player.x - boat.x, player.y - boat.y) > 420 && player.aboardBoatId !== boat.id) {
-      return { ok: false, error: 'Move closer to the Pirate Ship to store it.' };
-    }
-    if (!this.canSafelyDisembarkAllPassengers(boat, world, playersById)) {
-      return {
-        ok: false,
-        error: 'Sail closer to shallow water, a beach, or a Coastal Dock before storing the ship.'
-      };
-    }
-    boats.delete(boat.id);
-    this.ejectAllPassengersFromDestroyedBoat(boat, world, playersById);
-    onBoatRemoved(boat.id);
-    onReturnItemToOwner();
-    return { ok: true, stored: true };
   }
 
   public tryNearestFKeyBoatInteraction(params: {
@@ -394,7 +359,7 @@ export class PirateBoatService {
         (player.boatLocalX ?? 0) - BOAT_LADDER_LOCAL_X,
         (player.boatLocalY ?? 0) - BOAT_LADDER_LOCAL_Y
       );
-      if (aboard.helmPlayerId === player.id || wheelDist <= Math.min(portDist, starDist, 98)) {
+      if (aboard.helmPlayerId === player.id || wheelDist <= Math.min(portDist, starDist, 128)) {
         const res = this.handleInteractBoat({
           player,
           boat: aboard,
@@ -407,7 +372,7 @@ export class PirateBoatService {
         });
         return { handled: true, ok: res.ok, error: res.error };
       }
-      if (Math.min(portDist, starDist) <= 125) {
+      if (Math.min(portDist, starDist) <= 150) {
         const res = this.handleInteractBoat({
           player,
           boat: aboard,
@@ -423,8 +388,9 @@ export class PirateBoatService {
       return { handled: false, ok: false };
     }
 
+    // Not aboard any boat: [F] ONLY climbs a nearby side ladder (never accesses steering wheel!)
     let bestBoat: WorldPirateBoat | null = null;
-    let bestDist = 152;
+    let bestDist = 140;
     for (const b of boats.values()) {
       const ladders = getBoatLadderWorldPoints(b);
       const d = Math.min(
@@ -479,11 +445,10 @@ export class PirateBoatService {
       let throttle = 0;
       let steer = 0;
       if (helmsman) {
-        // W -> moveY < 0 (forward sail +1), S -> moveY > 0 (astern -1), A/D -> moveX (-1/+1 rudder)
         throttle = Math.max(-1, Math.min(1, -helmsman.moveY));
         steer = Math.max(-1, Math.min(1, helmsman.moveX));
         if (Math.abs(throttle) < 0.05 && Math.abs(steer) > 0.15) {
-          throttle = 0.26; // Gentle steerageway creep when turning wheel from rest
+          throttle = 0.26;
         }
       }
 
@@ -514,7 +479,8 @@ export class PirateBoatService {
         }
       }
 
-      const wasMoving = Math.abs(boat.speed) > 0.5 || Math.abs(boat.angularVel) > 0.005 || Boolean(helmsman);
+      const wasMoving =
+        Math.abs(boat.speed) > 0.5 || Math.abs(boat.angularVel) > 0.005 || Boolean(helmsman);
 
       if (boat.angularVel !== 0) {
         boat.angle += boat.angularVel * dt;
@@ -525,11 +491,11 @@ export class PirateBoatService {
       if (boat.speed !== 0) {
         const cos = Math.cos(boat.angle);
         const sin = Math.sin(boat.angle);
-        const candX = Math.max(320, Math.min(world.size - 320, boat.x + cos * boat.speed * dt));
-        const candY = Math.max(320, Math.min(world.size - 320, boat.y + sin * boat.speed * dt));
+        const candX = Math.max(480, Math.min(world.size - 480, boat.x + cos * boat.speed * dt));
+        const candY = Math.max(480, Math.min(world.size - 480, boat.y + sin * boat.speed * dt));
 
-        const probeX = candX + cos * (boat.speed >= 0 ? 225 : -225);
-        const probeY = candY + sin * (boat.speed >= 0 ? 225 : -225);
+        const probeX = candX + cos * (boat.speed >= 0 ? 350 : -340);
+        const probeY = candY + sin * (boat.speed >= 0 ? 350 : -340);
         const centerInfo = classifyArchipelagoPoint(candX, candY, world.size);
         const probeInfo = classifyArchipelagoPoint(probeX, probeY, world.size);
         const hitsDryBeach =
@@ -547,14 +513,14 @@ export class PirateBoatService {
         }
       }
 
-      // Hull-to-hull separation for massive galleons
+      // Hull-to-hull separation for colossal galleons
       for (let j = i + 1; j < boatList.length; j++) {
         const other = boatList[j];
         const dx = boat.x - other.x;
         const dy = boat.y - other.y;
         const d = Math.hypot(dx, dy);
-        if (d > 0.01 && d < 260) {
-          const push = (260 - d) * 0.5;
+        if (d > 0.01 && d < 370) {
+          const push = (370 - d) * 0.5;
           const nx = dx / d;
           const ny = dy / d;
           boat.x += nx * push;
@@ -566,10 +532,12 @@ export class PirateBoatService {
 
       if (wasMoving) {
         activeMovingBoats.push(boat);
+        // Push any wading non-aboard players out of the moving ship's hull!
+        displacePlayersOverlappingBoat(boat, playersById.values(), world, boats.values());
       }
     }
 
-    // Update all passengers aboard Pirate Boats
+    // Update all passengers freely walking on the upper deck (zero interior obstacles!)
     for (const p of playersById.values()) {
       if (!p.aboardBoatId || p.isDead) continue;
       const boat = boats.get(p.aboardBoatId);
@@ -587,14 +555,13 @@ export class PirateBoatService {
         const sinInv = Math.sin(-boat.angle);
         const lvx = (p.moveX * cosInv - p.moveY * sinInv) * BOAT_DECK_WALK_SPEED;
         const lvy = (p.moveX * sinInv + p.moveY * cosInv) * BOAT_DECK_WALK_SPEED;
-        p.boatLocalX = Math.max(
+        const nextLx = Math.max(
           BOAT_DECK_MIN_X,
           Math.min(BOAT_DECK_MAX_X, (p.boatLocalX ?? 0) + lvx * dt)
         );
-        p.boatLocalY = Math.max(
-          -BOAT_DECK_HALF_Y,
-          Math.min(BOAT_DECK_HALF_Y, (p.boatLocalY ?? 0) + lvy * dt)
-        );
+        const maxLy = getBoatDeckHalfWidthAtLocalX(nextLx);
+        p.boatLocalX = nextLx;
+        p.boatLocalY = Math.max(-maxLy, Math.min(maxLy, (p.boatLocalY ?? 0) + lvy * dt));
       }
 
       const wp = boatLocalToWorld(boat, p.boatLocalX ?? 0, p.boatLocalY ?? 0);

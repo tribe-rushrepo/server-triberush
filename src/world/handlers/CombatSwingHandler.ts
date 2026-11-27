@@ -1,6 +1,11 @@
 import { CONFIG } from '../../config/index.js';
 import { BARE_HANDS_DEF, getItemDef } from '../../data/items/index.js';
 import type { ItemId } from '../../models/types.js';
+import {
+  boatLocalToWorld,
+  closestLocalPointOnBoatHull,
+  worldToBoatLocal
+} from '../pirateBoatCollision.js';
 import { BUSH_FRUIT_ITEMS, type WorldRoomContext } from './roomContext.js';
 import { startBrokenTotemCollapseCore } from './TotemLifecycleHandler.js';
 
@@ -498,14 +503,16 @@ export function handleSwingCore(
       if (boat.ownerId === player.id || (player.tribeId && boat.tribeId === player.tribeId)) {
         continue;
       }
-      const maxB = stats.reach + 225;
-      const dx = boat.x - player.x;
-      const dy = boat.y - player.y;
-      if (Math.abs(dx) > maxB || Math.abs(dy) > maxB) continue;
+      if (Math.hypot(boat.x - player.x, boat.y - player.y) > stats.reach + 540) continue;
+      const localP = worldToBoatLocal(boat, player.x, player.y);
+      const cl = closestLocalPointOnBoatHull(localP.lx, localP.ly);
+      const hullWorldPt = boatLocalToWorld(boat, cl.cx, cl.cy);
+      const dx = hullWorldPt.x - player.x;
+      const dy = hullWorldPt.y - player.y;
       const dist = Math.hypot(dx, dy);
-      if (dist > maxB) continue;
+      if (dist > stats.reach + CONFIG.PLAYER_RADIUS + 26) continue;
       const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
-      if (dot < 0.25) continue;
+      if (dist > CONFIG.PLAYER_RADIUS + 20 && dot < 0.18) continue;
 
       boat.hp = Math.max(0, boat.hp - siegeDmg);
       boat.lastDamagedAt = now;
@@ -520,7 +527,7 @@ export function handleSwingCore(
       } else {
         ctx.broadcastProximityEvent(boat.x, boat.y, {
           type: 'BOAT_UPDATED',
-          boat: ctx.pirateBoatService.serializeBoat(boat)
+          boat: ctx.pirateBoatService.serializeBoat(boat, ctx.playersById)
         });
       }
       break;

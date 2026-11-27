@@ -122,7 +122,7 @@ export const BlueprintPlaceBuildSchema = z.object({
 export const InteractBoatSchema = z.object({
   type: z.literal('INTERACT_BOAT'),
   boatId: z.number().int().positive(),
-  action: z.enum(['ladder', 'wheel', 'store'])
+  action: z.enum(['ladder', 'wheel'])
 });
 
 export const FeedStructureSchema = z.object({

@@ -237,12 +237,12 @@ export const BUILDABLE_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     handStyle: 'held_item',
     placeable: {
       kind: 'pirate_boat',
-      maxDistance: 520,
-      radius: 112,
+      maxDistance: 760,
+      radius: 172,
       maxHp: 25000,
       requiresTotem: false,
       waterOnly: true,
-      lightRadius: 460
+      lightRadius: 560
     },
     recipe: {
       costs: [

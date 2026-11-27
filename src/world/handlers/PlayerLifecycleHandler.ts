@@ -12,6 +12,7 @@ import {
   type SavedPlayerWorldState
 } from '../../services/PlayerSaveService.js';
 import { canSeagullStealItem } from '../animals/beachWildlifeAi.js';
+import { resolvePlayerOutOfBoats } from '../pirateBoatCollision.js';
 import { MAINLAND_LEGACY_OFFSET } from '../terrain/islandArchipelago.js';
 import {
   broadcastWatchtowerRadars,
@@ -222,6 +223,33 @@ export function joinPlayerCore(
     stateSource?.tribeId,
     now
   );
+
+  // Builds are strictly forbidden in Inventory & Backpack — migrate any legacy saved builds to Blueprint!
+  const vaultKeyOnJoin = player.tribeId || player.id;
+  for (let idx = 0; idx < player.inventory.length; idx++) {
+    const sl = player.inventory[idx];
+    if (!sl) continue;
+    const def = getItemDef(sl.itemId);
+    if (def?.placeable) {
+      if (def.id !== 'tribe_totem' && sl.count > 0) {
+        ctx.blueprintService.addStoredBuild(vaultKeyOnJoin, def.id, sl.count);
+      }
+      player.inventory[idx] = null;
+      player.inventoryDirty = true;
+    }
+  }
+
+  // Ensure joining player is never standing inside a parked Pirate Ship hull
+  const boatSafeJoin = resolvePlayerOutOfBoats(
+    ctx.placedBoats.values(),
+    player.x,
+    player.y,
+    null,
+    ctx.world,
+    CONFIG.PLAYER_RADIUS
+  );
+  player.x = boatSafeJoin.x;
+  player.y = boatSafeJoin.y;
   if (player.tribeId) {
     if (ctx.tribeManager.isPrimaryChief(player.id, player.tribeId)) {
       ctx.blueprintService.migrateLegacyOwnerToTribe(player.id, player.tribeId);
@@ -455,8 +483,27 @@ export function stepPlayersAndWorldCore(
         p.y + totalVy * dt,
         CONFIG.PLAYER_RADIUS
       );
-      p.x = resolved.x;
-      p.y = resolved.y;
+      const boatResolved = resolvePlayerOutOfBoats(
+        ctx.placedBoats.values(),
+        resolved.x,
+        resolved.y,
+        p.aboardBoatId,
+        ctx.world,
+        CONFIG.PLAYER_RADIUS
+      );
+      p.x = boatResolved.x;
+      p.y = boatResolved.y;
+    } else if (ctx.placedBoats.size > 0) {
+      const boatResolved = resolvePlayerOutOfBoats(
+        ctx.placedBoats.values(),
+        p.x,
+        p.y,
+        p.aboardBoatId,
+        ctx.world,
+        CONFIG.PLAYER_RADIUS
+      );
+      p.x = boatResolved.x;
+      p.y = boatResolved.y;
     }
 
     // Spiny Sea Urchin beach contact hazard

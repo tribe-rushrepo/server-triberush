@@ -5,6 +5,7 @@ import type {
   WorldPlacedChest, WorldPlacedStructure, WorldPlacedTorch, WorldPlacedTotem, WorldPlacedWall
 } from '../../models/types.js';
 import { classifyArchipelagoPoint } from '../terrain/islandArchipelago.js';
+import { displacePlayersOverlappingBoat } from '../pirateBoatCollision.js';
 import { snapGridLine, snapTileCenter, type WorldRoomContext } from './roomContext.js';
 import { findActiveCollapseZoneForPlayer } from './TotemLifecycleHandler.js';
 
@@ -153,6 +154,7 @@ export function placeBuildableEntityCore(
       lastDamagedAt: 0
     };
     ctx.placedBoats.set(boat.id, boat);
+    displacePlayersOverlappingBoat(boat, ctx.playersById.values(), ctx.world, ctx.placedBoats.values());
     player.structuresBuilt += 1;
     player.score += 120;
     ctx.syncPlayerInventory(player);

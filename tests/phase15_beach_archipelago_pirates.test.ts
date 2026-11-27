@@ -203,7 +203,7 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     }
     captain.x = shoreX - 96;
     captain.y = shoreY;
-    const seaTargetX = shoreX + 120;
+    const seaTargetX = shoreX + 360;
     const seaTargetY = shoreY;
     assert.equal(classifyArchipelagoPoint(seaTargetX, seaTargetY, room.world.size).isSeawater, true);
 
@@ -213,8 +213,13 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     const landFail = room.handleBlueprintPlaceBuild(captain.id, 'pirate_boat', mainCx + 80, mainCy);
     assert.equal(landFail.ok, false);
 
-    // Place Pirate Boat directly on seawater without a Tribe or Totem!
-    captain.x = shoreX - 96;
+    // Place a bystander right at seaTargetX in shallow water to verify accidental load/placement push-out!
+    const wader = room.joinPlayer(makeAcct('wader-1', 'DeckBlockerTest')).player!;
+    wader.x = seaTargetX;
+    wader.y = seaTargetY;
+
+    // Place Colossal Pirate Boat directly on seawater without a Tribe or Totem!
+    captain.x = shoreX - 64;
     captain.y = shoreY;
     const boatPlace = room.handleBlueprintPlaceBuild(captain.id, 'pirate_boat', seaTargetX, seaTargetY);
     assert.equal(boatPlace.ok, true, boatPlace.error);
@@ -223,27 +228,72 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     assert.equal(boat.hp, 25000);
     assert.equal(boat.maxHp, 25000);
 
-    // Move captain next to port ladder and board via INTERACT_BOAT ('ladder')
-    const ladders = room.pirateBoatService.canPlaceBoatAt;
-    assert.ok(ladders);
-    // Trying to click/use the Ship Wheel BEFORE climbing onto the deck must be strictly rejected!
+    // Accidental ship placement on top of `wader` MUST immediately push `wader` outside the 950x344 hull!
+    assert.ok(
+      Math.hypot(wader.x - boat.x, wader.y - boat.y) >= 170,
+      'Placing/loading Pirate Ship onto a player must accurately push them outside the hull'
+    );
+
+    // Verify 360-degree hull collision blocking (Port, Starboard, Bow/Front, Stern/Back) in walkable shallow water!
+    boat.x = shoreX + 260;
+    boat.y = shoreY;
+    boat.angle = Math.PI / 2; // Parallel to shoreline so all 4 hull sides sit in walkable shallow water
+
+    // 1) Starboard side (West of ship: x = boat.x - 210, walking +X into hull)
+    wader.x = boat.x - 210;
+    wader.y = boat.y;
+    room.handleInputState(wader.id, 1, 0, 0, true);
+    for (let t = 0; t < 8; t++) room.stepSimulation(0.05);
+    assert.ok(wader.x <= boat.x - 195, `Starboard hull must block walking through ship (got dx=${wader.x - boat.x})`);
+
+    // 2) Port side (East of ship: x = boat.x + 210, walking -X into hull)
+    wader.x = boat.x + 210;
+    wader.y = boat.y;
+    room.handleInputState(wader.id, -1, 0, Math.PI, true);
+    for (let t = 0; t < 8; t++) room.stepSimulation(0.05);
+    assert.ok(wader.x >= boat.x + 195, `Port hull must block walking through ship (got dx=${wader.x - boat.x})`);
+
+    // 3) Stern / Back (North of ship: y = boat.y - 490, walking +Y into stern transom at -450)
+    wader.x = boat.x;
+    wader.y = boat.y - 490;
+    room.handleInputState(wader.id, 0, 1, Math.PI / 2, true);
+    for (let t = 0; t < 8; t++) room.stepSimulation(0.05);
+    assert.ok(wader.y <= boat.y - 473, `Stern hull must block walking through back of ship (got dy=${wader.y - boat.y})`);
+
+    // 4) Bow / Front (South of ship: y = boat.y + 540, walking -Y into bow stem at +500)
+    wader.x = boat.x;
+    wader.y = boat.y + 540;
+    room.handleInputState(wader.id, 0, -1, -Math.PI / 2, true);
+    for (let t = 0; t < 8; t++) room.stepSimulation(0.05);
+    assert.ok(wader.y >= boat.y + 523, `Bow hull must block walking through front of ship (got dy=${wader.y - boat.y})`);
+    room.handleInputState(wader.id, 0, 0, 0, false);
+    boat.angle = 0;
+    boat.x = seaTargetX;
+    boat.y = seaTargetY;
+
+    // Trying to click/use the Ship Wheel BEFORE climbing the ladder onto the deck must be strictly rejected!
     const prematureWheel = room.handleInteractBoat(captain.id, boat.id, 'wheel');
     assert.equal(prematureWheel.ok, false, 'Must not allow sailing before climbing onto the boat deck');
 
-    // Move captain near port boarding ladder (-56, -114) and climb aboard ('ladder')
+    // Move captain near port boarding ladder (-84, -182) and climb aboard ('ladder')
     const cos = Math.cos(boat.angle);
     const sin = Math.sin(boat.angle);
-    captain.x = boat.x + -56 * cos - -114 * sin;
-    captain.y = boat.y + -56 * sin + -114 * cos;
+    captain.x = boat.x + -84 * cos - -196 * sin;
+    captain.y = boat.y + -84 * sin + -196 * cos;
     const boardRes = room.handleInteractBoat(captain.id, boat.id, 'ladder');
     assert.equal(boardRes.ok, true, boardRes.error);
     assert.equal(captain.aboardBoatId, boat.id);
 
-    // Walk on deck near stern wheel (-188, 0) and take the helm ('wheel')
-    captain.boatLocalX = -188;
+    // Once on the upper deck, player must move freely across the deck without getting stuck on invisible barriers!
+    room.handleInputState(captain.id, 1, 0, 0, false);
+    for (let t = 0; t < 15; t++) room.stepSimulation(0.05);
+    assert.ok((captain.boatLocalX ?? 0) > 40, 'Player on upper deck must walk forward freely across the ship');
+
+    // Walk on deck near stern wheel (-296, 0) and take the helm ('wheel')
+    captain.boatLocalX = -296;
     captain.boatLocalY = 0;
-    captain.x = boat.x + -188 * cos;
-    captain.y = boat.y + -188 * sin;
+    captain.x = boat.x + -296 * cos;
+    captain.y = boat.y + -296 * sin;
     const wheelRes = room.handleInteractBoat(captain.id, boat.id, 'wheel');
     assert.equal(wheelRes.ok, true, wheelRes.error);
     assert.equal(boat.helmPlayerId, captain.id);
@@ -264,26 +314,49 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     assert.notEqual(boat.x, startBoatX, 'Pirate boat should sail across seawater');
     assert.notEqual(boat.wheelAngle, startWheel, 'Ship wheel must spin when steering with A/D');
 
-    // Verify Pirate Boat storage is blocked during Combat Mode and succeeds out of combat!
+    // Verify Pirate Boat storage uses Blueprint ONLY (never Inventory/Backpack!) and blocks during Combat Mode!
     captain.aboardBoatId = null;
     boat.helmPlayerId = null;
     boat.helmShortId = 0;
     captain.x = shoreX;
     captain.y = shoreY;
-    boat.x = shoreX + 180;
+    boat.x = shoreX + 340;
     boat.y = shoreY;
     captain.combatUntil = Date.now() + 10000;
-    const blockedStore = room.handleInteractBoat(captain.id, boat.id, 'store');
-    assert.equal(blockedStore.ok, false, 'Storing Pirate Ship must fail during Combat Mode');
+    const blockedStore = room.handleBlueprintRemoveEntity(captain.id, 'boat', boat.id);
+    assert.equal(blockedStore.ok, false, 'Storing Pirate Ship via Blueprint must fail during Combat Mode');
 
     captain.combatUntil = 0;
-    const okStore = room.handleInteractBoat(captain.id, boat.id, 'store');
+    const okStore = room.handleBlueprintRemoveEntity(captain.id, 'boat', boat.id);
     assert.equal(okStore.ok, true, okStore.error);
     assert.equal(room.placedBoats.has(boat.id), false, 'Stored boat should be removed from sea');
-    assert.ok(
-      captain.inventory.some((sl) => sl?.itemId === 'pirate_boat' && sl.count >= 1),
-      'Storing Pirate Ship out of combat returns pirate_boat item'
+    assert.equal(
+      room.blueprintService.getStoredBuildCount(captain.id, 'pirate_boat'),
+      1,
+      'Stored Pirate Ship must go into Blueprint Stored Builds'
     );
+    assert.equal(
+      captain.inventory.some((sl) => sl?.itemId === 'pirate_boat'),
+      false,
+      'Builds must NEVER be stored in player Inventory or Backpack'
+    );
+
+    // Verify legacy saved build in restoredInventory is automatically migrated out of Inventory/Backpack into Blueprint on join!
+    const legacyJoin = room.joinPlayer(makeAcct('legacy-builder-1', 'LegacyPack'), 0, {
+      hasBackpack: true,
+      unlockedSlots: 32,
+      inventory: [
+        { itemId: 'pirate_boat', count: 1 },
+        { itemId: 'wooden_wall', count: 3 },
+        { itemId: 'wood', count: 10 },
+        ...Array(29).fill(null)
+      ]
+    }).player!;
+    assert.equal(legacyJoin.inventory[0], null, 'pirate_boat must be stripped from Inventory on join');
+    assert.equal(legacyJoin.inventory[1], null, 'wooden_wall must be stripped from Inventory on join');
+    assert.equal(legacyJoin.inventory[2]?.itemId, 'wood', 'Normal items stay in Inventory');
+    assert.equal(room.blueprintService.getStoredBuildCount(legacyJoin.id, 'pirate_boat'), 1);
+    assert.equal(room.blueprintService.getStoredBuildCount(legacyJoin.id, 'wooden_wall'), 3);
     captain.x = shoreX - 384;
     captain.y = shoreY;
     assert.equal(room.handleCreateTribe(captain.id, 'Corsair Fleet', 'SAIL', 'public').ok, true);

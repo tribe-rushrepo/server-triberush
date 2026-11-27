@@ -527,37 +527,11 @@ export class WorldRoom {
   public handleBlueprintMoveEntity(playerId: string, targetKind: BlueprintTargetKind, targetId: number, targetX: number, targetY: number, orientation?: WallOrientation, rotationQuarter?: RotationQuarter) {
     return this.dirtyIfOk(handleBlueprintMoveEntityCore(this.ctx, playerId, targetKind, targetId, targetX, targetY, orientation, rotationQuarter));
   }
-  public handleInteractBoat(playerId: string, boatId: number, action: 'ladder' | 'wheel' | 'store') {
+  public handleInteractBoat(playerId: string, boatId: number, action: 'ladder' | 'wheel') {
     const player = this.playersById.get(playerId);
     if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
     const boat = this.placedBoats.get(boatId);
     if (!boat) return { ok: false, error: 'Pirate Boat not found.' };
-    if (action === 'store') {
-      const canManage = boat.tribeId
-        ? this.ctx.canTribeManageEntity(player, boat.ownerId, boat.tribeId)
-        : boat.ownerId === player.id;
-      return this.dirtyIfOk(
-        this.pirateBoatService.handleStoreBoat({
-          player,
-          boat,
-          canManage,
-          world: this.world,
-          boats: this.placedBoats,
-          playersById: this.playersById,
-          onBoatRemoved: (id) => this.onBroadcastRosterEvent?.({ type: 'BOAT_REMOVED', id }),
-          onReturnItemToOwner: () => {
-            const leftover = this.ctx.addItemToSlots(player.inventory, player.unlockedSlots, 'pirate_boat', 1);
-            if (leftover > 0) {
-              this.blueprintService.addStoredBuild(player.tribeId || player.id, 'pirate_boat', 1);
-              this.onSendPlayerEvent?.(player.id, { type: 'ACTION_NOTICE', message: 'Inventory full — stored Pirate Boat in Blueprint Vault!' });
-            } else {
-              this.onSendPlayerEvent?.(player.id, { type: 'ACTION_NOTICE', message: 'Stored Pirate Boat in your inventory!' });
-            }
-            this.ctx.syncPlayerInventory(player);
-          }
-        })
-      );
-    }
     return this.dirtyIfOk(
       this.pirateBoatService.handleInteractBoat({
         player,

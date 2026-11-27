@@ -151,7 +151,7 @@ export function encodeCompactInventory(
     if (!slot || slot.count <= 0) continue;
     if (slot.itemId === 'tribe_totem') continue;
     const def = getItemDef(slot.itemId);
-    if (!def) continue;
+    if (!def || def.placeable) continue;
     const clampedCount = Math.min(def.maxStack, Math.floor(slot.count));
     if (clampedCount <= 0) continue;
     tuples.push([i, def.id, clampedCount]);

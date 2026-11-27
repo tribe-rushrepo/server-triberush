@@ -222,6 +222,21 @@ export function handlePickupOrHarvestCore(
     const dist = Math.hypot(drop.x - player.x, drop.y - player.y);
     if (dist > CONFIG.PICKUP_RADIUS) continue;
 
+    const dropDef = getItemDef(drop.itemId);
+    if (dropDef?.placeable) {
+      ctx.groundDrops.delete(drop.id);
+      if (dropDef.id !== 'tribe_totem') {
+        ctx.blueprintService.addStoredBuild(player.tribeId || player.id, dropDef.id, drop.count);
+      }
+      pickedCount += drop.count;
+      ctx.emitRosterEvent({
+        type: 'DROP_COLLECTED',
+        dropId: drop.id,
+        collectorShortId: player.shortId
+      });
+      continue;
+    }
+
     const leftover = ctx.addItemToSlots(
       player.inventory,
       player.unlockedSlots,
@@ -339,6 +354,14 @@ export function handleDropHeldItemCore(
 
   const slotItem = slotArr[targetSlot];
   if (!slotItem) return { ok: false };
+  if (getItemDef(slotItem.itemId)?.placeable) {
+    slotArr[targetSlot] = null;
+    if (slotItem.itemId !== 'tribe_totem') {
+      ctx.blueprintService.addStoredBuild(player.tribeId || player.id, slotItem.itemId, slotItem.count);
+    }
+    ctx.syncPlayerInventory(player);
+    return { ok: false, error: 'Builds belong only inside the Base Blueprint.' };
+  }
 
   let dropCount: number;
   if (isNonStackableItem(slotItem.itemId)) {
@@ -430,6 +453,14 @@ export function handleMoveSlotCore(
   const dstArr = toSource === 'inventory' ? player.inventory : chest!.slots;
   const srcItem = srcArr[fromSlot];
   if (!srcItem) return { ok: false, error: 'Source slot is empty.' };
+  if (getItemDef(srcItem.itemId)?.placeable) {
+    srcArr[fromSlot] = null;
+    if (srcItem.itemId !== 'tribe_totem') {
+      ctx.blueprintService.addStoredBuild(player.tribeId || player.id, srcItem.itemId, srcItem.count);
+    }
+    ctx.syncPlayerInventory(player);
+    return { ok: false, error: 'Builds belong only inside the Base Blueprint, not Inventory or Backpack.' };
+  }
   const dstItem = dstArr[toSlot];
 
   if (
