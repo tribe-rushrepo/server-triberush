@@ -7,7 +7,11 @@ import type {
 import { classifyArchipelagoPoint } from '../terrain/islandArchipelago.js';
 import { displacePlayersOverlappingBoat } from '../pirateBoatCollision.js';
 import { snapGridLine, snapTileCenter, type WorldRoomContext } from './roomContext.js';
-import { findActiveCollapseZoneForPlayer } from './TotemLifecycleHandler.js';
+import {
+  findActiveCollapseZoneForPlayer,
+  getVaultBoatStatus,
+  syncBoatBlueprintForOwner
+} from './TotemLifecycleHandler.js';
 
 export type PlaceBuildableResult = {
   ok: boolean;
@@ -113,14 +117,11 @@ export function placeBuildableEntityCore(
     if (Math.hypot(placeX - player.x, placeY - player.y) > placeCfg.maxDistance + 84) {
       return { ok: false, error: 'Aim closer to nearby seawater to launch the Pirate Boat.' };
     }
-    let ownedBoats = 0;
-    for (const b of ctx.placedBoats.values()) {
-      if (b.ownerId === player.id) ownedBoats += 1;
-    }
-    if (ownedBoats >= CONFIG.MAX_PIRATE_BOATS_PER_PLAYER) {
+    const boatStat = getVaultBoatStatus(ctx, player);
+    if (boatStat.loadedBoatsCount >= CONFIG.MAX_PIRATE_BOATS_PER_TRIBE) {
       return {
         ok: false,
-        error: `Maximum ${CONFIG.MAX_PIRATE_BOATS_PER_PLAYER} Pirate Boats per captain.`
+        error: `Maximum ${CONFIG.MAX_PIRATE_BOATS_PER_TRIBE} Pirate Boats per Tribe.`
       };
     }
     if (ctx.placedBoats.size >= CONFIG.MAX_WORLD_PIRATE_BOATS) {
@@ -157,7 +158,7 @@ export function placeBuildableEntityCore(
     displacePlayersOverlappingBoat(boat, ctx.playersById.values(), ctx.world, ctx.placedBoats.values());
     player.structuresBuilt += 1;
     player.score += 120;
-    ctx.syncPlayerInventory(player);
+    syncBoatBlueprintForOwner(ctx, boat.tribeId, boat.ownerId);
     ctx.emitRosterEvent({
       type: 'BOAT_PLACED',
       boat: ctx.pirateBoatService.serializeBoat(boat, ctx.playersById)

@@ -44,7 +44,9 @@ import {
 } from './handlers/TotemHutHandler.js';
 import {
   getBlueprintSummaryForPlayerCore,
+  handleBlueprintRetrieveBoatCore,
   stepDormantTotemsAndCollapseZonesCore,
+  syncBoatBlueprintForOwner,
   syncStandingBaseAutosaveCore
 } from './handlers/TotemLifecycleHandler.js';
 import {
@@ -521,6 +523,9 @@ export class WorldRoom {
   public handleBlueprintRemoveEntity(playerId: string, targetKind: BlueprintTargetKind, targetId: number) {
     return this.dirtyIfOk(handleBlueprintRemoveEntityCore(this.ctx, playerId, targetKind, targetId));
   }
+  public handleBlueprintRetrieveBoat(playerId: string) {
+    return this.dirtyIfOk(handleBlueprintRetrieveBoatCore(this.ctx, playerId));
+  }
   public handleBlueprintRotateEntity(playerId: string, targetKind: 'wall' | 'structure', targetId: number) {
     return this.dirtyIfOk(handleBlueprintRotateEntityCore(this.ctx, playerId, targetKind, targetId));
   }
@@ -532,7 +537,7 @@ export class WorldRoom {
     if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
     const boat = this.placedBoats.get(boatId);
     if (!boat) return { ok: false, error: 'Pirate Boat not found.' };
-    return this.dirtyIfOk(
+    const res = this.dirtyIfOk(
       this.pirateBoatService.handleInteractBoat({
         player,
         boat,
@@ -548,6 +553,10 @@ export class WorldRoom {
         onPlayerNotice: (message) => this.onSendPlayerEvent?.(player.id, { type: 'ACTION_NOTICE', message })
       })
     );
+    if (res.ok && action === 'ladder') {
+      syncBoatBlueprintForOwner(this.ctx, boat.tribeId, boat.ownerId);
+    }
+    return res;
   }
 
   public handleOpenChest(playerId: string, chestId: number) { return handleOpenChestCore(this.ctx, playerId, chestId); }

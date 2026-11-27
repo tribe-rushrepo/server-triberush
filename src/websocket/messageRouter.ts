@@ -311,6 +311,10 @@ export async function dispatchClientMessage(
       );
       return;
     }
+    case 'BLUEPRINT_RETRIEVE_BOAT': {
+      sendNoticeIfError(ctx, worldRoom.handleBlueprintRetrieveBoat(playerId));
+      return;
+    }
     case 'BLUEPRINT_ROTATE_ENTITY': {
       sendNoticeIfError(
         ctx,

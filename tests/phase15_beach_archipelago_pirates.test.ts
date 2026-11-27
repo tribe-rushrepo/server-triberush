@@ -330,7 +330,16 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     assert.notEqual(boat.x, startBoatX, 'Pirate boat should sail across seawater');
     assert.notEqual(boat.wheelAngle, startWheel, 'Ship wheel must spin when steering with A/D');
 
-    // Verify Pirate Boat storage uses Blueprint ONLY (never Inventory/Backpack!) and blocks during Combat Mode!
+    // Verify Blueprint detects Loaded status, blocks Retrieve while anyone is aboard, and enforces 3-minute Retrieve cooldown!
+    const bpWhileAboard = room.getBlueprintSummaryForPlayer(captain);
+    assert.equal(bpWhileAboard.loadedBoatsCount, 1, 'Blueprint must detect 1 loaded Pirate Boat');
+    assert.equal(bpWhileAboard.occupiedLoadedBoatsCount, 1, 'Blueprint must detect crew aboard');
+    assert.equal(bpWhileAboard.emptyLoadedBoatsCount, 0);
+
+    const retrieveWithCrew = room.handleBlueprintRetrieveBoat(captain.id);
+    assert.equal(retrieveWithCrew.ok, false, 'Must NOT allow retrieving boat while anyone is on board');
+
+    // Clear all players off the boat deck -> Blueprint detects empty loaded boat, Retrieve succeeds & starts 3m cooldown!
     captain.aboardBoatId = null;
     boat.helmPlayerId = null;
     boat.helmShortId = 0;
@@ -338,24 +347,43 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     captain.y = shoreY;
     boat.x = shoreX + 340;
     boat.y = shoreY;
+
+    const bpEmptyBoat = room.getBlueprintSummaryForPlayer(captain);
+    assert.equal(bpEmptyBoat.loadedBoatsCount, 1);
+    assert.equal(bpEmptyBoat.emptyLoadedBoatsCount, 1);
+
     captain.combatUntil = Date.now() + 10000;
-    const blockedStore = room.handleBlueprintRemoveEntity(captain.id, 'boat', boat.id);
-    assert.equal(blockedStore.ok, false, 'Storing Pirate Ship via Blueprint must fail during Combat Mode');
+    assert.equal(room.handleBlueprintRetrieveBoat(captain.id).ok, false, 'Retrieve blocked in Combat Mode');
 
     captain.combatUntil = 0;
-    const okStore = room.handleBlueprintRemoveEntity(captain.id, 'boat', boat.id);
-    assert.equal(okStore.ok, true, okStore.error);
-    assert.equal(room.placedBoats.has(boat.id), false, 'Stored boat should be removed from sea');
+    const okRetrieve = room.handleBlueprintRetrieveBoat(captain.id);
+    assert.equal(okRetrieve.ok, true, okRetrieve.error);
+    assert.equal(room.placedBoats.has(boat.id), false, 'Retrieved boat must be removed from sea');
     assert.equal(
       room.blueprintService.getStoredBuildCount(captain.id, 'pirate_boat'),
       1,
-      'Stored Pirate Ship must go into Blueprint Stored Builds'
+      'Retrieved Pirate Boat must go into Blueprint Stored Builds'
     );
     assert.equal(
       captain.inventory.some((sl) => sl?.itemId === 'pirate_boat'),
       false,
       'Builds must NEVER be stored in player Inventory or Backpack'
     );
+
+    const bpAfterRetrieve = room.getBlueprintSummaryForPlayer(captain);
+    assert.equal(bpAfterRetrieve.loadedBoatsCount, 0, 'Blueprint must detect 0 loaded boats after retrieve');
+    assert.ok(
+      (bpAfterRetrieve.boatRetrieveCooldownRemainingMs || 0) > 175_000,
+      'Retrieve must enforce a 3-minute (180,000ms) cooldown'
+    );
+
+    // Re-deploy the stored boat, then verify Retrieve is blocked during the 3-minute cooldown!
+    const redeployBoat = room.handleBlueprintPlaceBuild(captain.id, 'pirate_boat', shoreX + 360, shoreY);
+    assert.equal(redeployBoat.ok, true, redeployBoat.error);
+    const cdBlocked = room.handleBlueprintRetrieveBoat(captain.id);
+    assert.equal(cdBlocked.ok, false, 'Must block second Retrieve while 3-minute cooldown is active');
+    // Remove test boat before Tribe creation below so Tribe cap test starts clean from 0/3 or 1/3
+    room.placedBoats.clear();
 
     // Verify legacy saved build in restoredInventory is automatically migrated out of Inventory/Backpack into Blueprint on join!
     const legacyJoin = room.joinPlayer(makeAcct('legacy-builder-1', 'LegacyPack'), 0, {
@@ -411,6 +439,29 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     assert.equal(dockRes.structure?.maxHp, 50000);
     assert.equal(dockRes.structure?.tilesW, 5);
     assert.equal(dockRes.structure?.tilesH, 5);
+
+    // Verify strict 3 Pirate Boats per Tribe cap (crafting 1, 2, 3 succeeds; crafting a 4th in the same Tribe is blocked!)
+    const stockBoatMats = () => {
+      captain.inventory[1] = { itemId: 'stone', count: 100 };
+      captain.inventory[2] = { itemId: 'wood', count: 200 };
+      captain.inventory[3] = { itemId: 'coal', count: 30 };
+      captain.inventory[4] = { itemId: 'rope', count: 30 };
+      captain.inventory[5] = { itemId: 'leather', count: 20 };
+    };
+    captain.x = shoreX + 80;
+    captain.y = shoreY - 520;
+    stockBoatMats();
+    assert.equal(room.handleBlueprintPlaceBuild(captain.id, 'pirate_boat', shoreX + 420, shoreY - 520).ok, true, 'Boat 1/3');
+    captain.y = shoreY;
+    stockBoatMats();
+    assert.equal(room.handleBlueprintPlaceBuild(captain.id, 'pirate_boat', shoreX + 420, shoreY).ok, true, 'Boat 2/3');
+    captain.y = shoreY + 520;
+    stockBoatMats();
+    assert.equal(room.handleBlueprintPlaceBuild(captain.id, 'pirate_boat', shoreX + 420, shoreY + 520).ok, true, 'Boat 3/3');
+    captain.y = shoreY + 1040;
+    stockBoatMats();
+    const fourthBoat = room.handleBlueprintPlaceBuild(captain.id, 'pirate_boat', shoreX + 420, shoreY + 1040);
+    assert.equal(fourthBoat.ok, false, 'Must block crafting a 4th Pirate Boat in the same Tribe (3/3 cap)');
 
     // Verify Watchtower is climbable on top (walk-up rear ladder + [F] instant climb/descend + parapet guardrails)
     captain.inventory[1] = { itemId: 'stone', count: 30 };

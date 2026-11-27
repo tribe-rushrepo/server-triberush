@@ -150,6 +150,10 @@ export const BlueprintRemoveEntitySchema = z.object({
   targetId: z.number().int().positive()
 });
 
+export const BlueprintRetrieveBoatSchema = z.object({
+  type: z.literal('BLUEPRINT_RETRIEVE_BOAT')
+});
+
 export const BlueprintRotateEntitySchema = z.object({
   type: z.literal('BLUEPRINT_ROTATE_ENTITY'),
   targetKind: z.enum(['wall', 'structure']),
@@ -282,6 +286,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   FeedStructureSchema,
   CookMeatSchema,
   BlueprintRemoveEntitySchema,
+  BlueprintRetrieveBoatSchema,
   BlueprintRotateEntitySchema,
   BlueprintMoveEntitySchema,
   EquipItemSchema,

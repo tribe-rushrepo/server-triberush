@@ -524,6 +524,11 @@ export function handleSwingCore(
         ctx.spawnGroundDrop('stone', 12, boat.x, boat.y);
         ctx.markWorldStateDirty();
         ctx.emitRosterEvent({ type: 'BOAT_REMOVED', id: boat.id });
+        for (const p of ctx.playersById.values()) {
+          if ((boat.tribeId && p.tribeId === boat.tribeId) || p.id === boat.ownerId) {
+            ctx.syncPlayerInventory(p);
+          }
+        }
       } else {
         ctx.broadcastProximityEvent(boat.x, boat.y, {
           type: 'BOAT_UPDATED',

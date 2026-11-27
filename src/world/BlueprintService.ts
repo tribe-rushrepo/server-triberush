@@ -30,11 +30,17 @@ export interface BlueprintSlotSummary {
   storedBuilds: BlueprintStoredBuilds;
   canLoadBaseNow: boolean;
   totemAvailableToCraft: boolean;
+  loadedBoatsCount?: number;
+  emptyLoadedBoatsCount?: number;
+  occupiedLoadedBoatsCount?: number;
+  boatRetrieveCooldownRemainingMs?: number;
+  maxBoatsPerTribe?: number;
 }
 
 interface PersistedBlueprintPayload {
   slots: Record<string, SavedBaseBlueprintSlot>;
   lastDeployAt: Record<string, number>;
+  lastBoatRetrieveAt?: Record<string, number>;
   storedBuilds?: Record<string, BlueprintStoredBuilds>;
 }
 
@@ -66,6 +72,7 @@ export function sanitizeStoredBuilds(raw: unknown): BlueprintStoredBuilds {
 export class BlueprintService {
   private readonly slotsByOwnerId = new Map<string, SavedBaseBlueprintSlot>();
   private readonly lastDeployAtByOwnerId = new Map<string, number>();
+  private readonly lastBoatRetrieveAtByOwnerId = new Map<string, number>();
   private readonly storedBuildsByOwnerId = new Map<string, BlueprintStoredBuilds>();
   private readonly storageFilePath: string | null;
   private diskWriteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -117,7 +124,8 @@ export class BlueprintService {
       const target = this.storedBuildsByOwnerId.get(tribeId) || {};
       for (const [itemId, count] of Object.entries(legacyBuilds)) {
         if (!ALLOWED_STORED_BUILD_IDS.has(itemId) || count <= 0) continue;
-        target[itemId] = Math.min(200, (target[itemId] || 0) + Math.floor(count));
+        const cap = itemId === 'pirate_boat' ? CONFIG.MAX_PIRATE_BOATS_PER_TRIBE : 200;
+        target[itemId] = Math.min(cap, (target[itemId] || 0) + Math.floor(count));
       }
       if (Object.keys(target).length > 0) {
         this.storedBuildsByOwnerId.set(tribeId, target);
@@ -186,7 +194,8 @@ export class BlueprintService {
   public addStoredBuild(ownerId: string, itemId: string, delta = 1): number {
     if (!ALLOWED_STORED_BUILD_IDS.has(itemId) || delta <= 0) return 0;
     const current = this.storedBuildsByOwnerId.get(ownerId) || {};
-    const nextCount = Math.min(200, (current[itemId] || 0) + Math.floor(delta));
+    const cap = itemId === 'pirate_boat' ? CONFIG.MAX_PIRATE_BOATS_PER_TRIBE : 200;
+    const nextCount = Math.min(cap, (current[itemId] || 0) + Math.floor(delta));
     current[itemId] = nextCount;
     this.storedBuildsByOwnerId.set(ownerId, current);
     this.notifyVaultChanged(ownerId);
@@ -231,6 +240,13 @@ export class BlueprintService {
           }
         }
       }
+      if (parsed.lastBoatRetrieveAt && typeof parsed.lastBoatRetrieveAt === 'object') {
+        for (const [ownerId, ts] of Object.entries(parsed.lastBoatRetrieveAt)) {
+          if (typeof ts === 'number' && Number.isFinite(ts)) {
+            this.lastBoatRetrieveAtByOwnerId.set(ownerId, ts);
+          }
+        }
+      }
       if (parsed.storedBuilds && typeof parsed.storedBuilds === 'object') {
         for (const [ownerId, builds] of Object.entries(parsed.storedBuilds)) {
           const clean = sanitizeStoredBuilds(builds);
@@ -248,6 +264,7 @@ export class BlueprintService {
     const payload: PersistedBlueprintPayload = {
       slots: Object.fromEntries(this.slotsByOwnerId.entries()),
       lastDeployAt: Object.fromEntries(this.lastDeployAtByOwnerId.entries()),
+      lastBoatRetrieveAt: Object.fromEntries(this.lastBoatRetrieveAtByOwnerId.entries()),
       storedBuilds: Object.fromEntries(this.storedBuildsByOwnerId.entries())
     };
     return JSON.stringify(payload);
@@ -334,9 +351,21 @@ export class BlueprintService {
     this.notifyVaultChanged(ownerId);
   }
 
+  public getBoatRetrieveCooldownRemainingMs(ownerId: string, now = Date.now()): number {
+    const last = this.lastBoatRetrieveAtByOwnerId.get(ownerId) || 0;
+    if (last <= 0) return 0;
+    return Math.max(0, last + CONFIG.BOAT_RETRIEVE_COOLDOWN_MS - now);
+  }
+
+  public recordBoatRetrieveTimestamp(ownerId: string, now = Date.now()): void {
+    this.lastBoatRetrieveAtByOwnerId.set(ownerId, now);
+    this.persistToDisk();
+  }
+
   public clearAll(): void {
     this.slotsByOwnerId.clear();
     this.lastDeployAtByOwnerId.clear();
+    this.lastBoatRetrieveAtByOwnerId.clear();
     this.storedBuildsByOwnerId.clear();
     this.persistToDisk();
   }
@@ -356,16 +385,23 @@ export class BlueprintService {
       hasStandingOrDormantTotem?: boolean;
       hasTotemItemInInv?: boolean;
       hasActiveCollapseZone?: boolean;
+      loadedBoatsCount?: number;
+      emptyLoadedBoatsCount?: number;
+      occupiedLoadedBoatsCount?: number;
     }
   ): BlueprintSlotSummary {
     const key = opts?.vaultKey || player.tribeId || player.id;
     const slot = this.slotsByOwnerId.get(key);
     const cooldownRem = this.getDeployCooldownRemainingMs(key, now);
+    const boatRetrieveRem = this.getBoatRetrieveCooldownRemainingMs(key, now);
     const storedBuilds = player.tribeId ? this.getStoredBuilds(player.tribeId) : this.getStoredBuilds(player.id);
     const hasStanding = Boolean(opts?.hasStandingOrDormantTotem);
     const hasInvTotem = Boolean(opts?.hasTotemItemInInv);
     const hasCollapse = Boolean(opts?.hasActiveCollapseZone);
     const canBuild = opts?.canBuildOrLoad !== false;
+    const loadedBoatsCount = opts?.loadedBoatsCount ?? 0;
+    const emptyLoadedBoatsCount = opts?.emptyLoadedBoatsCount ?? 0;
+    const occupiedLoadedBoatsCount = opts?.occupiedLoadedBoatsCount ?? 0;
 
     const totemAvailableToCraft = hasCollapse
       ? canBuild && !hasStanding && !hasInvTotem && !(storedBuilds.tribe_totem > 0)
@@ -391,7 +427,12 @@ export class BlueprintService {
         deployCooldownRemainingMs: cooldownRem,
         storedBuilds,
         canLoadBaseNow: false,
-        totemAvailableToCraft
+        totemAvailableToCraft,
+        loadedBoatsCount,
+        emptyLoadedBoatsCount,
+        occupiedLoadedBoatsCount,
+        boatRetrieveCooldownRemainingMs: boatRetrieveRem,
+        maxBoatsPerTribe: CONFIG.MAX_PIRATE_BOATS_PER_TRIBE
       };
     }
 
@@ -421,7 +462,12 @@ export class BlueprintService {
       deployCooldownRemainingMs: cooldownRem,
       storedBuilds,
       canLoadBaseNow,
-      totemAvailableToCraft
+      totemAvailableToCraft,
+      loadedBoatsCount,
+      emptyLoadedBoatsCount,
+      occupiedLoadedBoatsCount,
+      boatRetrieveCooldownRemainingMs: boatRetrieveRem,
+      maxBoatsPerTribe: CONFIG.MAX_PIRATE_BOATS_PER_TRIBE
     };
   }
 

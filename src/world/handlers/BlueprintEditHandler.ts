@@ -12,8 +12,12 @@ import type {
   WorldPlacedWall
 } from '../../models/types.js';
 import { placeBuildableEntityCore } from './BuildingHandler.js';
-import { classifyArchipelagoPoint } from '../terrain/islandArchipelago.js';
-import { syncTribeBlueprintToOnlineMembers } from './TotemLifecycleHandler.js';
+import {
+  countPlayersAboardBoat,
+  getVaultBoatStatus,
+  syncBoatBlueprintForOwner,
+  syncTribeBlueprintToOnlineMembers
+} from './TotemLifecycleHandler.js';
 import { snapGridLine, snapTileCenter, type WorldRoomContext } from './roomContext.js';
 
 export function handleBlueprintPlaceBuildCore(
@@ -60,6 +64,22 @@ export function handleBlueprintPlaceBuildCore(
   const vaultKey = player.tribeId || player.id;
   const storedCount = ctx.blueprintService.getStoredBuildCount(vaultKey, itemDef.id);
   const useStored = storedCount > 0;
+
+  if (itemDef.id === 'pirate_boat') {
+    const boatStat = getVaultBoatStatus(ctx, player);
+    if (!useStored && boatStat.loadedBoatsCount + storedCount >= CONFIG.MAX_PIRATE_BOATS_PER_TRIBE) {
+      return {
+        ok: false,
+        error: `Maximum ${CONFIG.MAX_PIRATE_BOATS_PER_TRIBE} Pirate Boats can be crafted per Tribe (${CONFIG.MAX_PIRATE_BOATS_PER_TRIBE}/${CONFIG.MAX_PIRATE_BOATS_PER_TRIBE}). Retrieve or use a stored boat instead.`
+      };
+    }
+    if (useStored && boatStat.loadedBoatsCount >= CONFIG.MAX_PIRATE_BOATS_PER_TRIBE) {
+      return {
+        ok: false,
+        error: `All ${CONFIG.MAX_PIRATE_BOATS_PER_TRIBE} Tribe Pirate Boats are already loaded on the sea.`
+      };
+    }
+  }
 
   if (itemDef.id === 'tribe_totem' && !useStored) {
     const bpSummary = ctx.getBlueprintSummaryForPlayer(player);
@@ -244,31 +264,36 @@ export function handleBlueprintRemoveEntityCore(
     const boat = ctx.placedBoats.get(targetId);
     if (!boat) return { ok: false, error: 'Pirate Ship not found.' };
     const canManageBoat = boat.tribeId
-      ? ctx.canTribeManageEntity(player, boat.ownerId, boat.tribeId)
+      ? ctx.canTribeManageEntity(player, boat.ownerId, boat.tribeId) || boat.ownerId === player.id
       : boat.ownerId === player.id;
     if (!canManageBoat) {
       return {
         ok: false,
-        error: 'Only the ship owner or Tribe builders can store this Pirate Ship.'
+        error: 'Only the ship owner or Tribe builders can retrieve this Pirate Ship.'
       };
     }
-    if (Date.now() - boat.lastDamagedAt < CONFIG.COMBAT_MODE_MS) {
-      return { ok: false, error: 'Cannot store Pirate Ship while it is taking damage in combat.' };
+    const nowBoat = Date.now();
+    const vKeyBoat = player.tribeId || player.id;
+    const cdRem = ctx.blueprintService.getBoatRetrieveCooldownRemainingMs(vKeyBoat, nowBoat);
+    if (cdRem > 0) {
+      const remS = Math.ceil(cdRem / 1000);
+      return {
+        ok: false,
+        error: `Boat Retrieve is on cooldown (${Math.floor(remS / 60)}m ${String(remS % 60).padStart(2, '0')}s remaining).`
+      };
     }
-    for (const p of ctx.playersById.values()) {
-      if (p.aboardBoatId === boat.id && !p.isDead) {
-        const info = classifyArchipelagoPoint(p.x, p.y, ctx.world.size);
-        if (!ctx.world.isPointOnWalkablePier(p.x, p.y) && info.blocksFoot) {
-          return {
-            ok: false,
-            error: 'Sail closer to shallow water, a beach, or a Coastal Dock before storing the ship.'
-          };
-        }
-      }
+    if (countPlayersAboardBoat(ctx, boat) > 0) {
+      return {
+        ok: false,
+        error: 'Cannot retrieve Pirate Boat while players are still present on board!'
+      };
+    }
+    if (nowBoat - boat.lastDamagedAt < CONFIG.COMBAT_MODE_MS) {
+      return { ok: false, error: 'Cannot retrieve Pirate Ship while it is taking damage in combat.' };
     }
     ctx.placedBoats.delete(boat.id);
-    ctx.pirateBoatService.ejectAllPassengersFromDestroyedBoat(boat, ctx.world, ctx.playersById);
     ctx.emitRosterEvent({ type: 'BOAT_REMOVED', id: boat.id });
+    ctx.blueprintService.recordBoatRetrieveTimestamp(vKeyBoat, nowBoat);
     mappedItemId = 'pirate_boat';
     entityX = boat.x;
     entityY = boat.y;

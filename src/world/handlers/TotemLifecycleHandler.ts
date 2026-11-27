@@ -2,6 +2,7 @@ import { CONFIG } from '../../config/index.js';
 import type {
   ActiveWorldPlayer,
   BrokenTotemCollapseZone,
+  WorldPirateBoat,
   WorldPlacedChest,
   WorldPlacedStructure,
   WorldPlacedTorch,
@@ -10,6 +11,150 @@ import type {
 } from '../../models/types.js';
 import type { BlueprintSlotSummary } from '../BlueprintService.js';
 import type { WorldRoomContext } from './roomContext.js';
+
+export function countPlayersAboardBoat(
+  ctx: WorldRoomContext,
+  boat: WorldPirateBoat
+): number {
+  let count = 0;
+  for (const p of ctx.playersById.values()) {
+    if (!p.isDead && p.aboardBoatId === boat.id) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+export function getVaultBoatStatus(
+  ctx: WorldRoomContext,
+  player: ActiveWorldPlayer
+): {
+  boats: WorldPirateBoat[];
+  loadedBoatsCount: number;
+  emptyLoadedBoatsCount: number;
+  occupiedLoadedBoatsCount: number;
+} {
+  const boats: WorldPirateBoat[] = [];
+  let emptyLoadedBoatsCount = 0;
+  let occupiedLoadedBoatsCount = 0;
+
+  for (const b of ctx.placedBoats.values()) {
+    if (player.tribeId && !b.tribeId && b.ownerId === player.id) {
+      b.tribeId = player.tribeId;
+    }
+    const matches = player.tribeId
+      ? b.tribeId === player.tribeId
+      : !b.tribeId && b.ownerId === player.id;
+    if (!matches) continue;
+    boats.push(b);
+    if (countPlayersAboardBoat(ctx, b) === 0) {
+      emptyLoadedBoatsCount += 1;
+    } else {
+      occupiedLoadedBoatsCount += 1;
+    }
+  }
+
+  return {
+    boats,
+    loadedBoatsCount: boats.length,
+    emptyLoadedBoatsCount,
+    occupiedLoadedBoatsCount
+  };
+}
+
+export function syncBoatBlueprintForOwner(
+  ctx: WorldRoomContext,
+  tribeId: string | null | undefined,
+  ownerId: string
+): void {
+  if (tribeId) {
+    syncTribeBlueprintToOnlineMembers(ctx, tribeId);
+    return;
+  }
+  const owner = ctx.playersById.get(ownerId);
+  if (owner) ctx.syncPlayerInventory(owner);
+}
+
+export function handleBlueprintRetrieveBoatCore(
+  ctx: WorldRoomContext,
+  playerId: string
+): { ok: boolean; boatId?: number; storedCount?: number; error?: string } {
+  const player = ctx.playersById.get(playerId);
+  if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
+  if (ctx.countPlayerItem(player, 'blueprint') < 1) {
+    return { ok: false, error: 'Hold or carry a Base Blueprint to retrieve your Pirate Boat.' };
+  }
+  const now = Date.now();
+  if (now < player.combatUntil) {
+    return { ok: false, error: 'Cannot retrieve Pirate Boat during Combat Mode.' };
+  }
+
+  const vaultKey = player.tribeId || player.id;
+  const cdRemMs = ctx.blueprintService.getBoatRetrieveCooldownRemainingMs(vaultKey, now);
+  if (cdRemMs > 0) {
+    const totalSec = Math.ceil(cdRemMs / 1000);
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    return {
+      ok: false,
+      error: `Boat Retrieve is on cooldown (${mins}m ${String(secs).padStart(2, '0')}s remaining).`
+    };
+  }
+
+  const boatStat = getVaultBoatStatus(ctx, player);
+  if (boatStat.loadedBoatsCount === 0) {
+    return { ok: false, error: 'No Pirate Boat is currently loaded on the sea.' };
+  }
+
+  const hasTribePerm = player.tribeId ? ctx.tribeManager.hasBuildPermission(player) : true;
+  const permittedBoats = hasTribePerm
+    ? boatStat.boats
+    : boatStat.boats.filter((b) => b.ownerId === player.id);
+  if (permittedBoats.length === 0) {
+    return {
+      ok: false,
+      error: 'Only Chief, High Chief, Chieftains, or the ship builder can retrieve Tribe Pirate Boats.'
+    };
+  }
+
+  const emptyBoats = permittedBoats.filter((b) => countPlayersAboardBoat(ctx, b) === 0);
+  if (emptyBoats.length === 0) {
+    return {
+      ok: false,
+      error: 'Cannot retrieve Pirate Boat while players are still present on board!'
+    };
+  }
+
+  const safeBoats = emptyBoats.filter((b) => now - b.lastDamagedAt >= CONFIG.COMBAT_MODE_MS);
+  if (safeBoats.length === 0) {
+    return { ok: false, error: 'Cannot retrieve Pirate Boat while it is taking damage in combat.' };
+  }
+
+  safeBoats.sort((a, b) => {
+    const aOwn = a.ownerId === player.id ? 0 : 1;
+    const bOwn = b.ownerId === player.id ? 0 : 1;
+    if (aOwn !== bOwn) return aOwn - bOwn;
+    return Math.hypot(a.x - player.x, a.y - player.y) - Math.hypot(b.x - player.x, b.y - player.y);
+  });
+
+  const targetBoat = safeBoats[0];
+  ctx.placedBoats.delete(targetBoat.id);
+  ctx.emitRosterEvent({ type: 'BOAT_REMOVED', id: targetBoat.id });
+
+  const remainingLoaded = boatStat.loadedBoatsCount - 1;
+  const curStored = ctx.blueprintService.getStoredBuildCount(vaultKey, 'pirate_boat');
+  let nextCount = curStored;
+  if (remainingLoaded + curStored < CONFIG.MAX_PIRATE_BOATS_PER_TRIBE) {
+    nextCount = ctx.blueprintService.addStoredBuild(vaultKey, 'pirate_boat', 1);
+  }
+  ctx.blueprintService.recordBoatRetrieveTimestamp(vaultKey, now);
+  syncBoatBlueprintForOwner(ctx, player.tribeId, player.id);
+  ctx.emitPlayerEvent(player.id, {
+    type: 'ACTION_NOTICE',
+    message: `Retrieved Pirate Boat into Blueprint (${nextCount}x stored · 3:00 cooldown)`
+  });
+  return { ok: true, boatId: targetBoat.id, storedCount: nextCount };
+}
 
 function circleIntersectsSquare(
   cx: number,
@@ -66,13 +211,17 @@ export function getBlueprintSummaryForPlayerCore(
   );
   const hasTotemItemInInv = ctx.countPlayerItem(player, 'tribe_totem') > 0;
   const hasActiveCollapseZone = Boolean(findActiveCollapseZoneForPlayer(ctx, player, now));
+  const boatStat = getVaultBoatStatus(ctx, player);
 
   return ctx.blueprintService.getSummary(player, now, {
     vaultKey,
     canBuildOrLoad,
     hasStandingOrDormantTotem,
     hasTotemItemInInv,
-    hasActiveCollapseZone
+    hasActiveCollapseZone,
+    loadedBoatsCount: boatStat.loadedBoatsCount,
+    emptyLoadedBoatsCount: boatStat.emptyLoadedBoatsCount,
+    occupiedLoadedBoatsCount: boatStat.occupiedLoadedBoatsCount
   });
 }
 
