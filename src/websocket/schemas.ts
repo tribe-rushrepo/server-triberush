@@ -109,12 +109,20 @@ export const BlueprintPlaceBuildSchema = z.object({
     'wooden_chest',
     'torch',
     'hut',
-    'watchtower'
+    'watchtower',
+    'dock_hut',
+    'pirate_boat'
   ]),
   targetX: z.number(),
   targetY: z.number(),
   orientation: z.enum(['h', 'v']).optional(),
   rotationQuarter: z.number().int().min(0).max(3).optional()
+});
+
+export const InteractBoatSchema = z.object({
+  type: z.literal('INTERACT_BOAT'),
+  boatId: z.number().int().positive(),
+  action: z.enum(['ladder', 'wheel'])
 });
 
 export const FeedStructureSchema = z.object({
@@ -125,7 +133,14 @@ export const FeedStructureSchema = z.object({
 export const CookMeatSchema = z.object({
   type: z.literal('COOK_MEAT'),
   structureId: z.number().int().positive(),
-  rawItemId: z.enum(['raw_pork', 'raw_beef', 'raw_chicken', 'raw_duck', 'raw_mutton']),
+  rawItemId: z.enum([
+    'raw_pork',
+    'raw_beef',
+    'raw_chicken',
+    'raw_duck',
+    'raw_mutton',
+    'raw_crab'
+  ]),
   cookAll: z.boolean().optional()
 });
 
@@ -263,6 +278,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SaveBlueprintBuildSchema,
   LoadBlueprintBuildSchema,
   BlueprintPlaceBuildSchema,
+  InteractBoatSchema,
   FeedStructureSchema,
   CookMeatSchema,
   BlueprintRemoveEntitySchema,

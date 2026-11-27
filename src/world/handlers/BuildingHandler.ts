@@ -1,35 +1,19 @@
 import { CONFIG } from '../../config/index.js';
 import { getItemDef } from '../../data/items/index.js';
 import type {
-  ActiveWorldPlayer,
-  RotationQuarter,
-  StructureKind,
-  WallOrientation,
-  WorldPlacedChest,
-  WorldPlacedStructure,
-  WorldPlacedTorch,
-  WorldPlacedTotem,
-  WorldPlacedWall
+  ActiveWorldPlayer, RotationQuarter, StructureKind, WallOrientation, WorldPirateBoat,
+  WorldPlacedChest, WorldPlacedStructure, WorldPlacedTorch, WorldPlacedTotem, WorldPlacedWall
 } from '../../models/types.js';
+import { classifyArchipelagoPoint } from '../terrain/islandArchipelago.js';
 import { snapGridLine, snapTileCenter, type WorldRoomContext } from './roomContext.js';
 import { findActiveCollapseZoneForPlayer } from './TotemLifecycleHandler.js';
 
 export type PlaceBuildableResult = {
   ok: boolean;
-  action?:
-    | 'healed'
-    | 'chest_placed'
-    | 'torch_placed'
-    | 'wall_placed'
-    | 'totem_placed'
-    | 'structure_placed';
-  hp?: number;
-  hunger?: number;
-  chest?: WorldPlacedChest;
-  torch?: WorldPlacedTorch;
-  wall?: WorldPlacedWall;
-  totem?: WorldPlacedTotem;
-  structure?: WorldPlacedStructure;
+  action?: 'healed' | 'chest_placed' | 'torch_placed' | 'wall_placed' | 'totem_placed' | 'structure_placed' | 'boat_placed';
+  hp?: number; hunger?: number;
+  chest?: WorldPlacedChest; torch?: WorldPlacedTorch; wall?: WorldPlacedWall;
+  totem?: WorldPlacedTotem; structure?: WorldPlacedStructure; boat?: WorldPirateBoat;
   error?: string;
 };
 
@@ -120,6 +104,64 @@ export function placeBuildableEntityCore(
     typeof targetY === 'number' && Number.isFinite(targetY)
       ? targetY
       : player.y + Math.sin(player.angle) * 72;
+
+  // 0. Placing a Pirate Boat (Seawater ONLY — Shallow or Deep, allowed even outside Tribe Totem territory!)
+  if (placeCfg.kind === 'pirate_boat') {
+    const placeX = Math.round(rawX);
+    const placeY = Math.round(rawY);
+    if (Math.hypot(placeX - player.x, placeY - player.y) > placeCfg.maxDistance + 84) {
+      return { ok: false, error: 'Aim closer to nearby seawater to launch the Pirate Boat.' };
+    }
+    let ownedBoats = 0;
+    for (const b of ctx.placedBoats.values()) {
+      if (b.ownerId === player.id) ownedBoats += 1;
+    }
+    if (ownedBoats >= CONFIG.MAX_PIRATE_BOATS_PER_PLAYER) {
+      return {
+        ok: false,
+        error: `Maximum ${CONFIG.MAX_PIRATE_BOATS_PER_PLAYER} Pirate Boats per captain.`
+      };
+    }
+    if (ctx.placedBoats.size >= CONFIG.MAX_WORLD_PIRATE_BOATS) {
+      return { ok: false, error: 'World Pirate Boat limit reached.' };
+    }
+    const check = ctx.pirateBoatService.canPlaceBoatAt(
+      ctx.world,
+      ctx.placedBoats.values(),
+      placeX,
+      placeY
+    );
+    if (!check.ok) return { ok: false, error: check.error };
+
+    onConsumeCost();
+
+    const boat: WorldPirateBoat = {
+      id: ctx.nextBoatId(),
+      x: placeX,
+      y: placeY,
+      angle: typeof rotationQuarter === 'number' ? ((rotationQuarter & 3) * Math.PI) / 2 : player.angle,
+      wheelAngle: 0,
+      speed: 0,
+      angularVel: 0,
+      hp: placeCfg.maxHp ?? CONFIG.PIRATE_BOAT_MAX_HP,
+      maxHp: placeCfg.maxHp ?? CONFIG.PIRATE_BOAT_MAX_HP,
+      ownerId: player.id,
+      tribeId: player.tribeId,
+      helmPlayerId: null,
+      helmShortId: 0,
+      createdAt: now,
+      lastDamagedAt: 0
+    };
+    ctx.placedBoats.set(boat.id, boat);
+    player.structuresBuilt += 1;
+    player.score += 120;
+    ctx.syncPlayerInventory(player);
+    ctx.emitRosterEvent({
+      type: 'BOAT_PLACED',
+      boat: ctx.pirateBoatService.serializeBoat(boat)
+    });
+    return { ok: true, action: 'boat_placed', boat };
+  }
 
   // 1. Placing a Tribe Totem (Chief, High Chief, or Chieftain)
   if (placeCfg.kind === 'totem') {
@@ -490,22 +532,23 @@ export function placeBuildableEntityCore(
     return { ok: true, action: 'wall_placed', wall };
   }
 
-  // 5. Multi-Tile Structures (Hut, Watchtower, Campfire, Cooking Pot)
+  // 5. Multi-Tile Structures (Hut, Watchtower, Campfire, Cooking Pot, 5x5 Coastal Dock & Hut)
   if (
     placeCfg.kind === 'hut' ||
     placeCfg.kind === 'watchtower' ||
     placeCfg.kind === 'campfire' ||
-    placeCfg.kind === 'cooking_pot'
+    placeCfg.kind === 'cooking_pot' ||
+    placeCfg.kind === 'dock_hut'
   ) {
     const sKind: StructureKind = placeCfg.kind;
-    const tilesW = placeCfg.tilesW ?? (sKind === 'hut' ? 3 : 2);
-    const tilesH = placeCfg.tilesH ?? (sKind === 'hut' ? 3 : 2);
+    const tilesW = placeCfg.tilesW ?? (sKind === 'dock_hut' ? 5 : sKind === 'hut' ? 3 : 2);
+    const tilesH = placeCfg.tilesH ?? (sKind === 'dock_hut' ? 5 : sKind === 'hut' ? 3 : 2);
     const placeX = tilesW % 2 === 1 ? snapTileCenter(rawX) : snapGridLine(rawX);
     const placeY = tilesH % 2 === 1 ? snapTileCenter(rawY) : snapGridLine(rawY);
     const halfW = (tilesW * CONFIG.BUILD_GRID_SIZE) / 2;
     const halfH = (tilesH * CONFIG.BUILD_GRID_SIZE) / 2;
 
-    if (Math.hypot(placeX - player.x, placeY - player.y) > placeCfg.maxDistance + 48) {
+    if (Math.hypot(placeX - player.x, placeY - player.y) > placeCfg.maxDistance + 64) {
       return { ok: false, error: `Place ${itemDef.name} closer to your marble.` };
     }
     if (!ctx.totemService.isRectInsideTotem(tribeTotem, placeX, placeY, halfW - 2, halfH - 2)) {
@@ -513,26 +556,30 @@ export function placeBuildableEntityCore(
     }
 
     const resolvedRot: RotationQuarter =
-      sKind === 'watchtower' && typeof rotationQuarter === 'number'
+      (sKind === 'watchtower' || sKind === 'dock_hut') && typeof rotationQuarter === 'number'
         ? ((Math.floor(rotationQuarter) & 3) as RotationQuarter)
         : 0;
 
     const perPlayerCap =
-      sKind === 'hut'
-        ? CONFIG.MAX_HUTS_PER_PLAYER
-        : sKind === 'watchtower'
-          ? CONFIG.MAX_WATCHTOWERS_PER_PLAYER
-          : sKind === 'cooking_pot'
-            ? CONFIG.MAX_COOKING_POTS_PER_PLAYER
-            : CONFIG.MAX_CAMPFIRES_PER_PLAYER;
+      sKind === 'dock_hut'
+        ? CONFIG.MAX_DOCK_HUTS_PER_PLAYER
+        : sKind === 'hut'
+          ? CONFIG.MAX_HUTS_PER_PLAYER
+          : sKind === 'watchtower'
+            ? CONFIG.MAX_WATCHTOWERS_PER_PLAYER
+            : sKind === 'cooking_pot'
+              ? CONFIG.MAX_COOKING_POTS_PER_PLAYER
+              : CONFIG.MAX_CAMPFIRES_PER_PLAYER;
     const worldCap =
-      sKind === 'hut'
-        ? CONFIG.MAX_WORLD_HUTS
-        : sKind === 'watchtower'
-          ? CONFIG.MAX_WORLD_WATCHTOWERS
-          : sKind === 'cooking_pot'
-            ? CONFIG.MAX_WORLD_COOKING_POTS
-            : CONFIG.MAX_WORLD_CAMPFIRES;
+      sKind === 'dock_hut'
+        ? CONFIG.MAX_WORLD_DOCK_HUTS
+        : sKind === 'hut'
+          ? CONFIG.MAX_WORLD_HUTS
+          : sKind === 'watchtower'
+            ? CONFIG.MAX_WORLD_WATCHTOWERS
+            : sKind === 'cooking_pot'
+              ? CONFIG.MAX_WORLD_COOKING_POTS
+              : CONFIG.MAX_WORLD_CAMPFIRES;
 
     let ownedOfKind = 0;
     let worldOfKind = 0;
@@ -557,25 +604,51 @@ export function placeBuildableEntityCore(
       return { ok: false, error: `World ${itemDef.name} limit reached.` };
     }
 
-    const checkRadius = Math.min(halfW, halfH) - 10;
-    if (ctx.world.overlapsWaterOrMud(placeX, placeY, checkRadius)) {
-      return { ok: false, error: `Cannot build ${itemDef.name} in water or mud.` };
-    }
-    if (ctx.world.overlapsAnySolid(placeX, placeY, checkRadius)) {
-      return { ok: false, error: 'Blocked by trees, rocks, or existing builds.' };
+    if (sKind === 'dock_hut') {
+      const rotAng = (resolvedRot * Math.PI) / 2;
+      const landX = placeX - Math.cos(rotAng) * 90;
+      const landY = placeY - Math.sin(rotAng) * 90;
+      const pierX = placeX + Math.cos(rotAng) * 96;
+      const pierY = placeY + Math.sin(rotAng) * 96;
+      if (ctx.world.size >= 50000) {
+        const landInfo = classifyArchipelagoPoint(landX, landY, ctx.world.size);
+        const pierInfo = classifyArchipelagoPoint(pierX, pierY, ctx.world.size);
+        if (landInfo.isSeawater) {
+          return {
+            ok: false,
+            error: 'Anchor the Coastal Dock House cabin on beach sand or dry shore (rotate with R).'
+          };
+        }
+        if (pierInfo.radialRatio > 1.16) {
+          return { ok: false, error: 'Coastal Dock pier extends too far into deep ocean.' };
+        }
+      }
+      if (ctx.world.overlapsAnySolid(landX, landY, 72) || ctx.world.overlapsAnySolid(pierX, pierY, 54)) {
+        return { ok: false, error: 'Blocked by trees, rocks, or existing builds.' };
+      }
+    } else {
+      const checkRadius = Math.min(halfW, halfH) - 10;
+      if (ctx.world.overlapsWaterOrMud(placeX, placeY, checkRadius)) {
+        return { ok: false, error: `Cannot build ${itemDef.name} in water or mud.` };
+      }
+      if (ctx.world.overlapsAnySolid(placeX, placeY, checkRadius)) {
+        return { ok: false, error: 'Blocked by trees, rocks, or existing builds.' };
+      }
     }
 
     onConsumeCost();
 
     const maxHp =
       placeCfg.maxHp ??
-      (sKind === 'hut'
-        ? CONFIG.HUT_MAX_HP
-        : sKind === 'watchtower'
-          ? CONFIG.WATCHTOWER_MAX_HP
-          : sKind === 'cooking_pot'
-            ? CONFIG.COOKING_POT_MAX_HP
-            : CONFIG.CAMPFIRE_MAX_HP);
+      (sKind === 'dock_hut'
+        ? CONFIG.DOCK_HUT_MAX_HP
+        : sKind === 'hut'
+          ? CONFIG.HUT_MAX_HP
+          : sKind === 'watchtower'
+            ? CONFIG.WATCHTOWER_MAX_HP
+            : sKind === 'cooking_pot'
+              ? CONFIG.COOKING_POT_MAX_HP
+              : CONFIG.CAMPFIRE_MAX_HP);
 
     const structure: WorldPlacedStructure = {
       id: ctx.nextStructureId(),

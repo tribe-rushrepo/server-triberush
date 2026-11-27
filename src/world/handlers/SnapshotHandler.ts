@@ -164,6 +164,7 @@ export function buildDynamicWorldStateSnapshot(ctx: WorldRoomContext) {
     totems: Array.from(ctx.placedTotems.values()).map((t) => ctx.totemService.serializeTotem(t)),
     collapseZones: Array.from(ctx.brokenTotemZones.values()),
     structures: Array.from(ctx.placedStructures.values()),
+    boats: Array.from(ctx.placedBoats.values()).map((b) => ctx.pirateBoatService.serializeBoat(b)),
     leaderboard: ctx.getLeaderboardEntries(),
     tribes: ctx.getTribeSummaries()
   };
@@ -226,7 +227,8 @@ export function buildSavedPlayerWorldState(
     tribeId: p.tribeId,
     hadBuildPermission: p.tribeId ? ctx.tribeManager.hasBuildPermission(p) : false,
     worldSeed: ctx.world.seed,
-    savedAt: now
+    savedAt: now,
+    archipelagoMigrated: true
   };
 }
 
@@ -493,15 +495,8 @@ export function broadcastWatchtowerRadars(ctx: WorldRoomContext): void {
 }
 
 const ANIMAL_CODE_TO_KIND: readonly AnimalKind[] = [
-  'pig',
-  'cow',
-  'chicken',
-  'duck',
-  'sheep',
-  'wolf',
-  'lion',
-  'sparrow',
-  'crow'
+  'pig', 'cow', 'chicken', 'duck', 'sheep', 'wolf', 'lion', 'sparrow', 'crow',
+  'crab', 'starfish', 'turtle', 'urchin', 'seagull', 'sandpiper'
 ];
 
 export function encodePlayerBinarySnapshot(
@@ -632,6 +627,7 @@ export function decodeBinarySnapshotToJson(frame: Buffer): Record<string, unknow
         isAggro: ((flags >> 3) & 1) === 1,
         isSneaking: ((flags >> 4) & 1) === 1,
         isAttacking: ((flags >> 5) & 1) === 1,
+        sizeVariant: ((flags >> 6) & 0x03) as 0 | 1 | 2,
         ...(carriedItemNetId > 0 ? { carriedItemNetId } : {})
       });
     }

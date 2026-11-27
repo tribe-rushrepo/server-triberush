@@ -32,6 +32,7 @@ export interface SavedPlayerWorldState {
   hadBuildPermission: boolean;
   worldSeed: number;
   savedAt: number;
+  archipelagoMigrated?: boolean;
 }
 
 interface BlueprintSaveEnvelope {
@@ -123,7 +124,8 @@ export function sanitizePlayerWorldState(raw: unknown): SavedPlayerWorldState | 
     tribeId: tribeRaw || null,
     hadBuildPermission: Boolean(obj.hadBuildPermission),
     worldSeed: Math.floor(worldSeed),
-    savedAt: Number.isFinite(Number(obj.savedAt)) ? Number(obj.savedAt) : Date.now()
+    savedAt: Number.isFinite(Number(obj.savedAt)) ? Number(obj.savedAt) : Date.now(),
+    archipelagoMigrated: Boolean(obj.archipelagoMigrated)
   };
 }
 

@@ -13,6 +13,7 @@ import type {
   WorldGroundDrop,
   WorldPlacedChest
 } from '../../models/types.js';
+import { getWatchtowerLadderPoints } from '../terrain/islandArchipelago.js';
 import { BUSH_FRUIT_ITEMS, type WorldRoomContext } from './roomContext.js';
 
 export function addItemToSlotsCore(
@@ -150,9 +151,27 @@ export function spawnGroundDropCore(
 export function handlePickupOrHarvestCore(
   ctx: WorldRoomContext,
   playerId: string
-): { ok: boolean; pickedCount: number; harvestedBushId?: number } {
+): { ok: boolean; pickedCount: number; harvestedBushId?: number; boatInteracted?: boolean } {
   const player = ctx.playersById.get(playerId);
   if (!player || player.isDead) return { ok: false, pickedCount: 0 };
+
+  if (player.aboardBoatId) {
+    const boatAct = ctx.pirateBoatService.tryNearestFKeyBoatInteraction({
+      player,
+      boats: ctx.placedBoats,
+      world: ctx.world,
+      playersById: ctx.playersById,
+      onBoatUpdated: (b) =>
+        ctx.emitRosterEvent({ type: 'BOAT_UPDATED', boat: ctx.pirateBoatService.serializeBoat(b) }),
+      onPlayerNotice: (message) => ctx.emitPlayerEvent(player.id, { type: 'ACTION_NOTICE', message })
+    });
+    if (boatAct.handled) {
+      if (!boatAct.ok && boatAct.error) {
+        ctx.emitPlayerEvent(player.id, { type: 'ACTION_NOTICE', message: boatAct.error });
+      }
+      return { ok: boatAct.ok, pickedCount: 0, boatInteracted: boatAct.ok };
+    }
+  }
 
   const now = Date.now();
   let pickedCount = 0;
@@ -171,8 +190,8 @@ export function handlePickupOrHarvestCore(
     }
   }
 
-  if (nearestBush) {
-    const fruitItem = BUSH_FRUIT_ITEMS[nearestBush.kind];
+  const fruitItem = nearestBush ? BUSH_FRUIT_ITEMS[nearestBush.kind] : undefined;
+  if (nearestBush && fruitItem) {
     const leftover = ctx.addItemToSlots(player.inventory, player.unlockedSlots, fruitItem, 1);
     nearestBush.hasFruit = false;
     nearestBush.fruitRegrowAt = now + CONFIG.BUSH_FRUIT_REGROW_MS;
@@ -225,6 +244,46 @@ export function handlePickupOrHarvestCore(
   if (pickedCount > 0 || harvestedBushId !== undefined) {
     ctx.syncPlayerInventory(player);
     return { ok: true, pickedCount, harvestedBushId };
+  }
+
+  const boatBoard = ctx.pirateBoatService.tryNearestFKeyBoatInteraction({
+    player,
+    boats: ctx.placedBoats,
+    world: ctx.world,
+    playersById: ctx.playersById,
+    onBoatUpdated: (b) =>
+      ctx.emitRosterEvent({ type: 'BOAT_UPDATED', boat: ctx.pirateBoatService.serializeBoat(b) }),
+    onPlayerNotice: (message) => ctx.emitPlayerEvent(player.id, { type: 'ACTION_NOTICE', message })
+  });
+  if (boatBoard.handled) {
+    if (!boatBoard.ok && boatBoard.error) {
+      ctx.emitPlayerEvent(player.id, { type: 'ACTION_NOTICE', message: boatBoard.error });
+    }
+    return { ok: boatBoard.ok, pickedCount: 0, boatInteracted: boatBoard.ok };
+  }
+
+  for (const s of ctx.placedStructures.values()) {
+    if (s.kind !== 'watchtower') continue;
+    const pts = getWatchtowerLadderPoints(s.x, s.y, s.rotationQuarter);
+    if (Math.hypot(player.x - s.x, player.y - s.y) <= 44) {
+      const next = ctx.world.resolvePlayerPosition(pts.dismountX, pts.dismountY);
+      player.x = next.x;
+      player.y = next.y;
+      ctx.emitPlayerEvent(player.id, {
+        type: 'ACTION_NOTICE',
+        message: 'Climbed down from Watchtower'
+      });
+      return { ok: true, pickedCount: 0 };
+    }
+    if (Math.hypot(player.x - pts.ladderX, player.y - pts.ladderY) <= 98) {
+      player.x = s.x;
+      player.y = s.y;
+      ctx.emitPlayerEvent(player.id, {
+        type: 'ACTION_NOTICE',
+        message: 'Climbed onto Watchtower'
+      });
+      return { ok: true, pickedCount: 0 };
+    }
   }
 
   return { ok: false, pickedCount: 0 };

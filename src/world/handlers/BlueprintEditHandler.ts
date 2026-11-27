@@ -38,22 +38,25 @@ export function handleBlueprintPlaceBuildCore(
   if (ctx.countPlayerItem(player, 'blueprint') < 1) {
     return { ok: false, error: 'Hold a Base Blueprint to build structures.' };
   }
-  if (!player.tribeId) {
-    return { ok: false, error: 'Create or join a Tribe before building on the Blueprint.' };
-  }
-  if (!ctx.tribeManager.hasBuildPermission(player)) {
-    return {
-      ok: false,
-      error: 'Only the Chief, High Chief, or Chieftains can build on the Blueprint.'
-    };
-  }
-
   const itemDef = getItemDef(itemId);
   if (!itemDef || !itemDef.placeable) {
     return { ok: false, error: 'Invalid buildable item.' };
   }
 
-  const vaultKey = player.tribeId;
+  const requiresTotem = itemDef.placeable.requiresTotem !== false && itemDef.id !== 'tribe_totem';
+  if (requiresTotem || itemDef.id === 'tribe_totem') {
+    if (!player.tribeId) {
+      return { ok: false, error: 'Create or join a Tribe before building on the Blueprint.' };
+    }
+    if (!ctx.tribeManager.hasBuildPermission(player)) {
+      return {
+        ok: false,
+        error: 'Only the Chief, High Chief, or Chieftains can build on the Blueprint.'
+      };
+    }
+  }
+
+  const vaultKey = player.tribeId || player.id;
   const storedCount = ctx.blueprintService.getStoredBuildCount(vaultKey, itemDef.id);
   const useStored = storedCount > 0;
 
@@ -101,7 +104,11 @@ export function handleBlueprintPlaceBuildCore(
   );
 
   if (!res.ok) return { ok: false, error: res.error };
-  syncTribeBlueprintToOnlineMembers(ctx, vaultKey);
+  if (player.tribeId) {
+    syncTribeBlueprintToOnlineMembers(ctx, player.tribeId);
+  } else {
+    ctx.syncPlayerInventory(player);
+  }
   return {
     ok: true,
     usedStored: useStored,
@@ -178,13 +185,15 @@ export function handleBlueprintRemoveEntityCore(
     entityX = s.x;
     entityY = s.y;
     label =
-      s.kind === 'hut'
-        ? 'Circular Hut'
-        : s.kind === 'watchtower'
-          ? 'Wooden Watchtower'
-          : s.kind === 'cooking_pot'
-            ? 'Cooking Pot'
-            : 'Campfire';
+      s.kind === 'dock_hut'
+        ? 'Coastal Dock & Hut'
+        : s.kind === 'hut'
+          ? 'Circular Hut'
+          : s.kind === 'watchtower'
+            ? 'Wooden Watchtower'
+            : s.kind === 'cooking_pot'
+              ? 'Cooking Pot'
+              : 'Campfire';
   } else if (targetKind === 'chest') {
     const chest = ctx.placedChests.get(targetId);
     if (!chest) return { ok: false, error: 'Chest not found.' };
@@ -277,10 +286,11 @@ export function handleBlueprintRotateEntityCore(
         error: 'Only the Tribe Host or members with Build Permission can rotate this structure.'
       };
     }
-    if (s.kind !== 'watchtower') {
-      return { ok: false, error: 'Only Watchtowers and Walls can be rotated.' };
+    if (s.kind !== 'watchtower' && s.kind !== 'dock_hut') {
+      return { ok: false, error: 'Only Watchtowers, Coastal Docks, and Walls can be rotated.' };
     }
     s.rotationQuarter = ((s.rotationQuarter + 1) & 3) as RotationQuarter;
+    ctx.registerStructureColliders(s);
     ctx.emitRosterEvent({ type: 'STRUCTURE_PLACED', structure: s });
     const sTotem = ctx.totemService.findTotemForTribe(s.tribeId ?? player.tribeId, ctx.placedTotems.values());
     ctx.syncStandingBaseAutosave(sTotem?.tribeId || sTotem?.ownerId || s.ownerId);
@@ -473,22 +483,26 @@ export function handleBlueprintMoveEntityCore(
     const prevY = s.y;
     if (s.kind === 'hut') {
       ctx.world.removeHutColliders(s.id, prevX, prevY);
+    } else if (s.kind === 'dock_hut') {
+      ctx.world.removeDockHutColliders(s.id, prevX, prevY);
     } else if (s.kind === 'watchtower') {
-      ctx.world.removeBoxCollider('structure', s.id, prevX, prevY, 52, 52);
+      ctx.world.removeWatchtowerColliders(s.id, prevX, prevY);
     } else {
       ctx.world.removeSolidCollider('structure', s.id, prevX, prevY, 38);
     }
     const checkR = Math.min(halfW, halfH) - 10;
-    if (
-      ctx.world.overlapsWaterOrMud(placeX, placeY, checkR) ||
-      ctx.world.overlapsAnySolid(placeX, placeY, checkR)
-    ) {
+    const blockedMove =
+      s.kind === 'dock_hut'
+        ? ctx.world.overlapsAnySolid(placeX, placeY, 64)
+        : ctx.world.overlapsWaterOrMud(placeX, placeY, checkR) ||
+          ctx.world.overlapsAnySolid(placeX, placeY, checkR);
+    if (blockedMove) {
       ctx.registerStructureColliders(s);
       return { ok: false, error: 'Blocked by trees, rocks, or water.' };
     }
     s.x = placeX;
     s.y = placeY;
-    if (s.kind === 'watchtower' && typeof rotationQuarter === 'number') {
+    if ((s.kind === 'watchtower' || s.kind === 'dock_hut') && typeof rotationQuarter === 'number') {
       s.rotationQuarter = (Math.floor(rotationQuarter) & 3) as RotationQuarter;
     }
     ctx.registerStructureColliders(s);

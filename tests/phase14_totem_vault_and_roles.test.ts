@@ -19,33 +19,33 @@ const makeAcct = (id: string, username: string): PlayerProfileData => ({
 
 function clear20x20ForTest(room: WorldRoom, cx: number, cy: number): void {
   for (const t of room.world.trees) {
-    if (Math.abs(t.x - cx) < 900 && Math.abs(t.y - cy) < 900) t.destroyedAt = 1;
+    if (Math.abs(t.x - cx) < 1150 && Math.abs(t.y - cy) < 1150) t.destroyedAt = 1;
   }
   for (const rk of room.world.rocks) {
-    if (Math.abs(rk.x - cx) < 900 && Math.abs(rk.y - cy) < 900) rk.destroyedAt = 1;
+    if (Math.abs(rk.x - cx) < 1150 && Math.abs(rk.y - cy) < 1150) rk.destroyedAt = 1;
   }
   for (const b of room.world.bushes) {
-    if (Math.abs(b.x - cx) < 900 && Math.abs(b.y - cy) < 900) b.destroyedAt = 1;
+    if (Math.abs(b.x - cx) < 1150 && Math.abs(b.y - cy) < 1150) b.destroyedAt = 1;
   }
   room.world.fallenLogs.splice(
     0,
     room.world.fallenLogs.length,
-    ...room.world.fallenLogs.filter((l) => Math.abs(l.x - cx) >= 900 || Math.abs(l.y - cy) >= 900)
+    ...room.world.fallenLogs.filter((l) => Math.abs(l.x - cx) >= 1150 || Math.abs(l.y - cy) >= 1150)
   );
   room.world.lakes.splice(
     0,
     room.world.lakes.length,
-    ...room.world.lakes.filter((lk) => Math.hypot(lk.x - cx, lk.y - cy) >= 900 + lk.outerRadius)
+    ...room.world.lakes.filter((lk) => Math.hypot(lk.x - cx, lk.y - cy) >= 1150 + lk.outerRadius)
   );
   room.world.ponds.splice(
     0,
     room.world.ponds.length,
-    ...room.world.ponds.filter((pd) => Math.hypot(pd.x - cx, pd.y - cy) >= 900 + pd.radius)
+    ...room.world.ponds.filter((pd) => Math.hypot(pd.x - cx, pd.y - cy) >= 1150 + pd.radius)
   );
   room.world.mudPatches.splice(
     0,
     room.world.mudPatches.length,
-    ...room.world.mudPatches.filter((md) => Math.hypot(md.x - cx, md.y - cy) >= 900 + md.radius)
+    ...room.world.mudPatches.filter((md) => Math.hypot(md.x - cx, md.y - cy) >= 1150 + md.radius)
   );
 }
 

@@ -1,4 +1,5 @@
 import { CONFIG } from '../../config/index.js';
+import { getItemDef } from '../../data/items/index.js';
 import {
   MARBLE_PALETTE_ORDER,
   type ActiveWorldPlayer,
@@ -10,6 +11,8 @@ import {
   type CompactInventorySave,
   type SavedPlayerWorldState
 } from '../../services/PlayerSaveService.js';
+import { canSeagullStealItem } from '../animals/beachWildlifeAi.js';
+import { MAINLAND_LEGACY_OFFSET } from '../terrain/islandArchipelago.js';
 import {
   broadcastWatchtowerRadars,
   buildSavedPlayerWorldState,
@@ -93,6 +96,17 @@ export function joinPlayerCore(
     !resumed && restoredPlayerState && restoredPlayerState.worldSeed === ctx.world.seed
       ? restoredPlayerState
       : null;
+  if (
+    persisted &&
+    !persisted.archipelagoMigrated &&
+    ctx.world.size >= 50000 &&
+    persisted.x < 26000 &&
+    persisted.y < 26000
+  ) {
+    persisted.x += MAINLAND_LEGACY_OFFSET;
+    persisted.y += MAINLAND_LEGACY_OFFSET;
+    persisted.archipelagoMigrated = true;
+  }
   const stateSource = resumed || persisted;
 
   const shortId = hooks.allocateShortId();
@@ -266,6 +280,9 @@ export function removePlayerCore(
   const prevTribeId = existing.tribeId;
   const hadBuildPermission = prevTribeId ? ctx.tribeManager.hasBuildPermission(existing) : false;
 
+  ctx.pirateBoatService.releasePlayerFromBoats(existing, ctx.placedBoats, (b) =>
+    ctx.emitRosterEvent({ type: 'BOAT_UPDATED', boat: ctx.pirateBoatService.serializeBoat(b) })
+  );
   ctx.playersById.delete(playerId);
   ctx.playersByShortId.delete(existing.shortId);
   const clearedPending = ctx.tribeManager.clearPendingRequestsForPlayer(existing.id);
@@ -395,10 +412,23 @@ export function stepPlayersAndWorldCore(
     }
 
     if (p.isDead) {
+      if (p.aboardBoatId) {
+        ctx.pirateBoatService.releasePlayerFromBoats(p, ctx.placedBoats, (b) =>
+          ctx.emitRosterEvent({ type: 'BOAT_UPDATED', boat: ctx.pirateBoatService.serializeBoat(b) })
+        );
+      }
       p.vx = 0;
       p.vy = 0;
       p.kbVx = 0;
       p.kbVy = 0;
+      if (p.pendingInputSeq !== undefined) {
+        p.lastProcessedInputSeq = p.pendingInputSeq;
+      }
+      ctx.spatialGrid.insert(p);
+      continue;
+    }
+
+    if (p.aboardBoatId) {
       if (p.pendingInputSeq !== undefined) {
         p.lastProcessedInputSeq = p.pendingInputSeq;
       }
@@ -430,10 +460,63 @@ export function stepPlayersAndWorldCore(
       p.y = resolved.y;
     }
 
+    // Spiny Sea Urchin beach contact hazard
+    if (
+      now >= p.spawnProtectedUntil &&
+      now - (p.lastUrchinPrickAt || 0) >= CONFIG.URCHIN_PRICK_COOLDOWN_MS
+    ) {
+      const localAnimals = ctx.animalService.queryNearby(p.x, p.y, CONFIG.PLAYER_RADIUS + 20);
+      for (let ui = 0; ui < localAnimals.length; ui++) {
+        const ur = localAnimals[ui];
+        if (ur.kind !== 'urchin' || ur.isDead) continue;
+        const dxU = p.x - ur.x;
+        const dyU = p.y - ur.y;
+        const distU = Math.hypot(dxU, dyU);
+        if (distU <= CONFIG.PLAYER_RADIUS + ur.radius + 4) {
+          p.lastUrchinPrickAt = now;
+          const nxU = distU > 0.01 ? dxU / distU : 1;
+          const nyU = distU > 0.01 ? dyU / distU : 0;
+          p.kbVx = nxU * 165;
+          p.kbVy = nyU * 165;
+          ctx.combatService.applyEnvironmentalDamage(
+            p,
+            CONFIG.URCHIN_PRICK_DAMAGE,
+            'Pricked by a Spiny Sea Urchin',
+            {
+              onSpawnDrop: (itemId, count, ox, oy) => ctx.spawnGroundDrop(itemId, count, ox, oy),
+              onBroadcastProximityEvent: (x, y, payload) =>
+                ctx.broadcastProximityEvent(x, y, payload),
+              onBroadcastGlobalEvent: (payload) => ctx.emitRosterEvent(payload),
+              onSendPlayerEvent: (pid, payload) => ctx.emitPlayerEvent(pid, payload),
+              onSyncInventory: (v) => ctx.syncPlayerInventory(v),
+              onPlayerDied: (victim) => {
+                ctx.clearPlayerInventoryPersistence(victim.id);
+                ctx.clearSessionResume(victim.id);
+              }
+            }
+          );
+          break;
+        }
+      }
+    }
+
     if (p.pendingInputSeq !== undefined) {
       p.lastProcessedInputSeq = p.pendingInputSeq;
     }
     ctx.spatialGrid.insert(p);
+  }
+
+  const activeBoats = ctx.pirateBoatService.stepBoatsAndDeckPassengers({
+    dt,
+    world: ctx.world,
+    boats: ctx.placedBoats,
+    playersById: ctx.playersById
+  });
+  if (activeBoats.length > 0 && serverTick % 2 === 0) {
+    ctx.emitRosterEvent({
+      type: 'BOATS_SYNC',
+      boats: activeBoats.map((b) => ctx.pirateBoatService.serializeBoat(b))
+    });
   }
 
   ctx.animalService.step(dt, now, activePlayersScratch, {
@@ -466,8 +549,33 @@ export function stepPlayersAndWorldCore(
         }
         return false;
       },
-      onCrowDropStolenItem: (_crow, itemId, count, x, y) => {
+      onCrowDropStolenItem: (_bird, itemId, count, x, y) => {
         ctx.spawnGroundDrop(itemId, count, x, y, x, y, false);
+      },
+      onSeagullStealFromPlayer: (_gull, victim) => {
+        const eligibleSlots: number[] = [];
+        for (let s = 0; s < victim.unlockedSlots; s++) {
+          const sl = victim.inventory[s];
+          if (sl && sl.count > 0 && canSeagullStealItem(sl.itemId)) {
+            eligibleSlots.push(s);
+          }
+        }
+        if (eligibleSlots.length === 0) return null;
+        const chosenIdx = eligibleSlots[Math.floor(Math.random() * eligibleSlots.length)];
+        const sl = victim.inventory[chosenIdx];
+        if (!sl) return null;
+        const stolenItemId = sl.itemId;
+        sl.count -= 1;
+        if (sl.count <= 0) victim.inventory[chosenIdx] = null;
+        ctx.syncPlayerInventory(victim);
+        const def = getItemDef(stolenItemId);
+        ctx.emitPlayerEvent(victim.id, {
+          type: 'ACTION_NOTICE',
+          message: `A Seagull snatched 1x ${def ? def.name : stolenItemId}! Chase it for 5 seconds!`,
+          x: Math.round(victim.x),
+          y: Math.round(victim.y)
+        });
+        return { itemId: stolenItemId, count: 1 };
       }
     }
   });

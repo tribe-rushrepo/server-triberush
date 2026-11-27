@@ -10,6 +10,7 @@ import type {
   TribeSummary,
   WorldBushNode,
   WorldGroundDrop,
+  WorldPirateBoat,
   WorldPlacedChest,
   WorldPlacedStructure,
   WorldPlacedTorch,
@@ -21,6 +22,8 @@ import type {
 import type { AnimalService } from '../AnimalService.js';
 import type { BlueprintService, BlueprintSlotSummary } from '../BlueprintService.js';
 import type { CombatService } from '../CombatService.js';
+import type { PirateBoatService } from '../PirateBoatService.js';
+import type { SeashellService } from '../SeashellService.js';
 import type { SeededWorld } from '../SeededWorld.js';
 import type { SpatialGrid } from '../SpatialGrid.js';
 import type { SurvivalService } from '../SurvivalService.js';
@@ -32,7 +35,7 @@ export const SNAPSHOT_HEADER_BYTES = 8;
 export const SNAPSHOT_TRAILER_BYTES = 2;
 export const SNAPSHOT_PLAYER_STRIDE = 18;
 
-export const BUSH_FRUIT_ITEMS: Record<BushKind, ItemId> = {
+export const BUSH_FRUIT_ITEMS: Partial<Record<BushKind, ItemId>> = {
   0: 'berry_red',
   1: 'berry_grape',
   2: 'berry_gold',
@@ -59,6 +62,8 @@ export interface WorldRoomContext {
   readonly animalService: AnimalService;
   readonly totemService: TotemService;
   readonly blueprintService: BlueprintService;
+  readonly pirateBoatService: PirateBoatService;
+  readonly seashellService: SeashellService;
 
   readonly playersById: Map<string, ActiveWorldPlayer>;
   readonly playersByShortId: Map<number, ActiveWorldPlayer>;
@@ -68,6 +73,7 @@ export interface WorldRoomContext {
   readonly placedWalls: Map<number, WorldPlacedWall>;
   readonly placedTotems: Map<number, WorldPlacedTotem>;
   readonly placedStructures: Map<number, WorldPlacedStructure>;
+  readonly placedBoats: Map<number, WorldPirateBoat>;
   readonly brokenTotemZones: Map<string, BrokenTotemCollapseZone>;
   readonly pendingTreeRespawns: Set<WorldTreeNode>;
   readonly pendingRockRespawns: Set<WorldRockNode>;
@@ -79,6 +85,7 @@ export interface WorldRoomContext {
   nextWallId(): number;
   nextTotemId(): number;
   nextStructureId(): number;
+  nextBoatId(): number;
   getServerTick(): number;
 
   emitRosterEvent(payload: Record<string, unknown>): void;

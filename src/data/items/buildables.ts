@@ -201,6 +201,62 @@ export const BUILDABLE_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     }
   },
   {
+    id: 'dock_hut',
+    name: 'Coastal Dock & Hut',
+    category: 'Build',
+    maxStack: 1,
+    iconKey: 'dock_hut',
+    handStyle: 'held_item',
+    placeable: {
+      kind: 'dock_hut',
+      maxDistance: 280,
+      tilesW: 5,
+      tilesH: 5,
+      rotatable: true,
+      maxHp: 50000,
+      requiresTotem: true,
+      shorelineStraddle: true,
+      lightRadius: 380
+    },
+    recipe: {
+      costs: [
+        { itemId: 'wood', count: 80 },
+        { itemId: 'stone', count: 30 },
+        { itemId: 'rope', count: 12 }
+      ],
+      outputCount: 1,
+      station: 'hand'
+    }
+  },
+  {
+    id: 'pirate_boat',
+    name: 'Pirate Boat',
+    category: 'Build',
+    maxStack: 1,
+    iconKey: 'pirate_boat',
+    handStyle: 'held_item',
+    placeable: {
+      kind: 'pirate_boat',
+      maxDistance: 360,
+      radius: 68,
+      maxHp: 25000,
+      requiresTotem: false,
+      waterOnly: true,
+      lightRadius: 340
+    },
+    recipe: {
+      costs: [
+        { itemId: 'stone', count: 100 },
+        { itemId: 'wood', count: 200 },
+        { itemId: 'coal', count: 30 },
+        { itemId: 'rope', count: 30 },
+        { itemId: 'leather', count: 20 }
+      ],
+      outputCount: 1,
+      station: 'hand'
+    }
+  },
+  {
     id: 'blueprint',
     name: 'Base Blueprint',
     category: 'Build',

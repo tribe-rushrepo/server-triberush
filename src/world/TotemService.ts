@@ -29,7 +29,13 @@ export class TotemService {
       wolf: 0,
       lion: 0,
       sparrow: 0,
-      crow: 0
+      crow: 0,
+      crab: 0,
+      starfish: 0,
+      turtle: 0,
+      urchin: 0,
+      seagull: 0,
+      sandpiper: 0
     };
   }
 
@@ -149,7 +155,7 @@ export class TotemService {
     _totem: WorldPlacedTotem,
     _allTotems: Iterable<WorldPlacedTotem>
   ): { ok: boolean; reason?: string; nextLevel?: number; nextSizeTiles?: number } {
-    return { ok: false, reason: 'Tribe Totem territory is fixed at 20x20 squares.' };
+    return { ok: false, reason: 'Tribe Totem territory is fixed at 30x30 squares.' };
   }
 
   public applyUpgrade(totem: WorldPlacedTotem): void {

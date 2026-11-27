@@ -142,6 +142,74 @@ export const ANIMAL_SPECIES: Record<AnimalKind, AnimalSpeciesSpec> = {
     meatMin: 0,
     meatMax: 0,
     leatherChance: 0
+  },
+  crab: {
+    kind: 'crab',
+    maxHp: 55,
+    radius: 17,
+    roamSpeed: 64,
+    fleeSpeed: 148,
+    meatItem: 'raw_crab',
+    meatMin: 1,
+    meatMax: 2,
+    leatherChance: 0
+  },
+  starfish: {
+    kind: 'starfish',
+    maxHp: 25,
+    radius: 16,
+    roamSpeed: 14,
+    fleeSpeed: 22,
+    meatItem: '',
+    meatMin: 0,
+    meatMax: 0,
+    leatherChance: 0
+  },
+  turtle: {
+    kind: 'turtle',
+    maxHp: 160,
+    radius: 26,
+    roamSpeed: 34,
+    fleeSpeed: 68,
+    knockbackResist: 0.65,
+    meatItem: '',
+    meatMin: 0,
+    meatMax: 0,
+    leatherChance: 0
+  },
+  urchin: {
+    kind: 'urchin',
+    maxHp: 20,
+    radius: 14,
+    roamSpeed: 0,
+    fleeSpeed: 0,
+    knockbackResist: 0.95,
+    meatItem: '',
+    meatMin: 0,
+    meatMax: 0,
+    leatherChance: 0
+  },
+  seagull: {
+    kind: 'seagull',
+    maxHp: 36,
+    radius: 17,
+    roamSpeed: 76,
+    fleeSpeed: 210,
+    meatItem: '',
+    meatMin: 0,
+    meatMax: 0,
+    leatherChance: 0
+  },
+  sandpiper: {
+    kind: 'sandpiper',
+    maxHp: 24,
+    radius: 13,
+    roamSpeed: 96,
+    fleeSpeed: 205,
+    meatItem: '',
+    meatMin: 0,
+    meatMax: 0,
+    leatherChance: 0
   }
 };
 
@@ -167,6 +235,10 @@ export interface AnimalStepCallbacks {
     x: number,
     y: number
   ) => void;
+  onSeagullStealFromPlayer?: (
+    seagull: WorldAnimalEntity,
+    victim: ActiveWorldPlayer
+  ) => { itemId: ItemId; count: number } | null;
 }
 
 export function encodeBinaryAnimalSnapshotBuffer(
@@ -202,13 +274,15 @@ export function encodeBinaryAnimalSnapshotBuffer(
     const isAggroBit = a.aggroTargetId ? 1 : 0;
     const isSneakingBit = a.lionSneakReady && !a.lionSpotted ? 1 : 0;
     const isAttackingBit = a.attackAnimUntil && now < a.attackAnimUntil ? 1 : 0;
+    const sizeBits = (a.sizeVariant ?? 0) & 0x03;
     const flags =
       isFleeing |
       (isMovingBit << 1) |
       (isAirborneBit << 2) |
       (isAggroBit << 3) |
       (isSneakingBit << 4) |
-      (isAttackingBit << 5);
+      (isAttackingBit << 5) |
+      (sizeBits << 6);
     const carriedNetId = a.carriedItemId ? getItemNetId(a.carriedItemId) & 0xff : 0;
 
     buf.writeUInt16LE(a.id & 0xffff, offset);

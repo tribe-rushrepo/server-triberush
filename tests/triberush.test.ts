@@ -713,13 +713,13 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.strictEqual(placedTotem.ok, true);
     const totem = placedTotem.totem!;
     assert.strictEqual(totem.level, 1);
-    assert.strictEqual(totem.sizeTiles, 20);
+    assert.strictEqual(totem.sizeTiles, 30);
 
-    // 5. Totem leveling is removed: upgrade attempts must be rejected & size stays fixed at 20x20
+    // 5. Totem leveling is removed: upgrade attempts must be rejected & size stays fixed at 30x30
     const upgradeRejected = room.handleUpgradeTotem('king-1', totem.id);
     assert.strictEqual(upgradeRejected.ok, false);
     assert.strictEqual(totem.level, 1);
-    assert.strictEqual(totem.sizeTiles, 20);
+    assert.strictEqual(totem.sizeTiles, 30);
 
     // 6. Place Pure-Wood Wall (2500 HP), Small Circular Hut (fixed rotation 0), Watchtower (rotatable quarter = 2), Campfire & Chest inside Totem!
     room.handleSelectSlot('king-1', 2);
@@ -751,28 +751,28 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
 
     // 7. Store items inside Wooden Chest — Pure Autosave + Disband-to-Pack MUST preserve all Chest loot!
     const clear20x20ForTest = (r: WorldRoom, cx: number, cy: number) => {
-      for (const t of r.world.trees) if (Math.abs(t.x - cx) < 900 && Math.abs(t.y - cy) < 900) t.destroyedAt = 1;
-      for (const rk of r.world.rocks) if (Math.abs(rk.x - cx) < 900 && Math.abs(rk.y - cy) < 900) rk.destroyedAt = 1;
-      for (const b of r.world.bushes) if (Math.abs(b.x - cx) < 900 && Math.abs(b.y - cy) < 900) b.destroyedAt = 1;
+      for (const t of r.world.trees) if (Math.abs(t.x - cx) < 1150 && Math.abs(t.y - cy) < 1150) t.destroyedAt = 1;
+      for (const rk of r.world.rocks) if (Math.abs(rk.x - cx) < 1150 && Math.abs(rk.y - cy) < 1150) rk.destroyedAt = 1;
+      for (const b of r.world.bushes) if (Math.abs(b.x - cx) < 1150 && Math.abs(b.y - cy) < 1150) b.destroyedAt = 1;
       r.world.fallenLogs.splice(
         0,
         r.world.fallenLogs.length,
-        ...r.world.fallenLogs.filter((l) => Math.abs(l.x - cx) >= 900 || Math.abs(l.y - cy) >= 900)
+        ...r.world.fallenLogs.filter((l) => Math.abs(l.x - cx) >= 1150 || Math.abs(l.y - cy) >= 1150)
       );
       r.world.lakes.splice(
         0,
         r.world.lakes.length,
-        ...r.world.lakes.filter((lk) => Math.hypot(lk.x - cx, lk.y - cy) >= 900 + lk.outerRadius)
+        ...r.world.lakes.filter((lk) => Math.hypot(lk.x - cx, lk.y - cy) >= 1150 + lk.outerRadius)
       );
       r.world.ponds.splice(
         0,
         r.world.ponds.length,
-        ...r.world.ponds.filter((pd) => Math.hypot(pd.x - cx, pd.y - cy) >= 900 + pd.radius)
+        ...r.world.ponds.filter((pd) => Math.hypot(pd.x - cx, pd.y - cy) >= 1150 + pd.radius)
       );
       r.world.mudPatches.splice(
         0,
         r.world.mudPatches.length,
-        ...r.world.mudPatches.filter((md) => Math.hypot(md.x - cx, md.y - cy) >= 900 + md.radius)
+        ...r.world.mudPatches.filter((md) => Math.hypot(md.x - cx, md.y - cy) >= 1150 + md.radius)
       );
     };
     chRes.chest!.slots[0] = { itemId: 'wood', count: 5 };
@@ -811,12 +811,12 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
       persistedRoom.handleSelectSlot('king-persist', 0);
       const pTotemRes = persistedRoom.handleBlueprintPlaceBuild('king-persist', 'tribe_totem', 12800, 12800);
       assert.strictEqual(pTotemRes.ok, true);
-      assert.strictEqual(pTotemRes.totem!.sizeTiles, 20);
+      assert.strictEqual(pTotemRes.totem!.sizeTiles, 30);
       persistedRoom.removePlayer('king-persist', { explicitLeave: true });
       persistedRoom.sweepOfflineBases(Date.now() + CONFIG.DORMANT_TOTEM_DURATION_MS + 1000);
       await persistedRoom.blueprintService.flushPendingDiskWrite();
       const exportedTribes = persistedRoom.tribeManager.exportPersistedState();
-      assert.strictEqual(persistedRoom.blueprintService.getSlot(pTribeId)?.sizeTiles, 20);
+      assert.strictEqual(persistedRoom.blueprintService.getSlot(pTribeId)?.sizeTiles, 30);
 
       const rebootedRoom = new WorldRoom(20261122, tmpBlueprintFile);
       rebootedRoom.tribeManager.importPersistedState(exportedTribes);
@@ -853,7 +853,7 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.strictEqual(room.placedWalls.size, 0);
     assert.strictEqual(room.placedStructures.size, 0);
     assert.strictEqual(room.placedChests.size, 0);
-    assert.strictEqual(room.blueprintService.getSlot(kingTribeId)?.sizeTiles, 20);
+    assert.strictEqual(room.blueprintService.getSlot(kingTribeId)?.sizeTiles, 30);
 
     const rejoinedKing = room.joinPlayer(makeMockExplorer('king-1', 'OakKing')).player!;
     rejoinedKing.spawnProtectedUntil = 0;
@@ -879,7 +879,7 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     assert.strictEqual(room.placedTotems.size, 1);
     const restoredTotem = Array.from(room.placedTotems.values())[0];
     assert.strictEqual(restoredTotem.level, 1);
-    assert.strictEqual(restoredTotem.sizeTiles, 20);
+    assert.strictEqual(restoredTotem.sizeTiles, 30);
     assert.strictEqual(room.placedWalls.size, 1);
     assert.strictEqual(room.placedStructures.size, 3);
     assert.strictEqual(room.placedChests.size, 1);
@@ -921,7 +921,7 @@ describe('3. Phase 5: Random Safe Spawning, 10s Spawn Protection, 15s Combat Mod
     const placed = room.handleBlueprintPlaceBuild('totem-boss', 'tribe_totem', 12800, 12800);
     assert.strictEqual(placed.ok, true);
     const totem = placed.totem!;
-    assert.strictEqual(totem.sizeTiles, 20);
+    assert.strictEqual(totem.sizeTiles, 30);
     assert.strictEqual(
       room.handleBlueprintPlaceBuild('totem-boss', 'wooden_wall', 12864, 12736, 'h').ok,
       true

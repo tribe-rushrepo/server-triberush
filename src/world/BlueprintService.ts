@@ -46,7 +46,9 @@ const ALLOWED_STORED_BUILD_IDS = new Set<string>([
   'wooden_chest',
   'torch',
   'hut',
-  'watchtower'
+  'watchtower',
+  'dock_hut',
+  'pirate_boat'
 ]);
 
 export function sanitizeStoredBuilds(raw: unknown): BlueprintStoredBuilds {

@@ -8,7 +8,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "tsx --test tests/triberush.test.ts tests/phase9.test.ts tests/phase10.test.ts tests/phase11.test.ts tests/phase12_persistence.test.ts tests/phase13_wildlife_cooking_tools.test.ts tests/phase14_totem_vault_and_roles.test.ts"
+    "test": "tsx --test tests/triberush.test.ts tests/phase9.test.ts tests/phase10.test.ts tests/phase11.test.ts tests/phase12_persistence.test.ts tests/phase13_wildlife_cooking_tools.test.ts tests/phase14_totem_vault_and_roles.test.ts tests/phase15_beach_archipelago_pirates.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",

@@ -55,7 +55,7 @@ export function handleLoadBlueprintBuildCore(
   if (findActiveCollapseZoneForPlayer(ctx, player, now)) {
     return {
       ok: false,
-      error: 'Your Tribe Totem was broken! Place a replacement Totem inside your 20x20 territory first.'
+      error: `Your Tribe Totem was broken! Place a replacement Totem inside your ${CONFIG.TOTEM_SIZE_TILES}x${CONFIG.TOTEM_SIZE_TILES} territory first.`
     };
   }
 
@@ -202,16 +202,18 @@ export function handleLoadBlueprintBuildCore(
   }
 
   for (const s of consumed.structures) {
-    const tilesW = s.kind === 'hut' ? 3 : 2;
-    const tilesH = s.kind === 'hut' ? 3 : 2;
+    const tilesW = s.kind === 'dock_hut' ? 5 : s.kind === 'hut' ? 3 : 2;
+    const tilesH = s.kind === 'dock_hut' ? 5 : s.kind === 'hut' ? 3 : 2;
     const maxHp =
-      s.kind === 'hut'
-        ? CONFIG.HUT_MAX_HP
-        : s.kind === 'watchtower'
-          ? CONFIG.WATCHTOWER_MAX_HP
-          : s.kind === 'cooking_pot'
-            ? CONFIG.COOKING_POT_MAX_HP
-            : CONFIG.CAMPFIRE_MAX_HP;
+      s.kind === 'dock_hut'
+        ? CONFIG.DOCK_HUT_MAX_HP
+        : s.kind === 'hut'
+          ? CONFIG.HUT_MAX_HP
+          : s.kind === 'watchtower'
+            ? CONFIG.WATCHTOWER_MAX_HP
+            : s.kind === 'cooking_pot'
+              ? CONFIG.COOKING_POT_MAX_HP
+              : CONFIG.CAMPFIRE_MAX_HP;
     const structure: WorldPlacedStructure = {
       id: ctx.nextStructureId(),
       kind: s.kind,
@@ -219,7 +221,7 @@ export function handleLoadBlueprintBuildCore(
       y: cy + s.dy,
       tilesW,
       tilesH,
-      rotationQuarter: s.kind === 'watchtower' ? s.rotationQuarter : 0,
+      rotationQuarter: s.kind === 'watchtower' || s.kind === 'dock_hut' ? s.rotationQuarter : 0,
       hp: maxHp,
       maxHp,
       ownerId: tribe.leaderId,

@@ -9,42 +9,20 @@ import type {
 } from '../models/types.js';
 import type { SeededWorld } from './SeededWorld.js';
 import {
-  ANIMAL_AOI_RADIUS,
-  ANIMAL_FLEE_DURATION_MS,
-  ANIMAL_GRID_CELL,
-  ANIMAL_HEADER_BYTES,
-  ANIMAL_MAX_DUCKS,
-  ANIMAL_RECORD_STRIDE,
-  ANIMAL_RESPAWN_MS,
-  ANIMAL_SPECIES,
-  ANIMAL_WAKE_RADIUS,
-  BINARY_PACKET_ANIMALS,
-  COW_LEATHER_DROP_CHANCE,
-  DUCK_SPAWN_RATE,
-  PIG_SPAWN_RATE,
-  encodeBinaryAnimalSnapshotBuffer,
-  type AnimalCombatCallbacks,
-  type AnimalSpeciesSpec,
-  type AnimalStepCallbacks
+  ANIMAL_AOI_RADIUS, ANIMAL_FLEE_DURATION_MS, ANIMAL_GRID_CELL, ANIMAL_HEADER_BYTES,
+  ANIMAL_MAX_DUCKS, ANIMAL_RECORD_STRIDE, ANIMAL_RESPAWN_MS, ANIMAL_SPECIES, ANIMAL_WAKE_RADIUS,
+  BINARY_PACKET_ANIMALS, COW_LEATHER_DROP_CHANCE, DUCK_SPAWN_RATE, PIG_SPAWN_RATE,
+  encodeBinaryAnimalSnapshotBuffer, type AnimalCombatCallbacks, type AnimalSpeciesSpec, type AnimalStepCallbacks
 } from './animals/animalConfig.js';
+import { isBeachWildlifeSpecies, stepBeachWildlifeEntity } from './animals/beachWildlifeAi.js';
 import { stepPredatorOrBirdEntity } from './animals/predatorAndBirdAi.js';
 import { spawnInitialWildlifeEntities } from './animals/animalSpawner.js';
 
 export {
-  ANIMAL_AOI_RADIUS,
-  ANIMAL_FLEE_DURATION_MS,
-  ANIMAL_HEADER_BYTES,
-  ANIMAL_MAX_DUCKS,
-  ANIMAL_RECORD_STRIDE,
-  ANIMAL_RESPAWN_MS,
-  ANIMAL_SPECIES,
-  ANIMAL_WAKE_RADIUS,
-  BINARY_PACKET_ANIMALS,
-  COW_LEATHER_DROP_CHANCE,
-  DUCK_SPAWN_RATE,
-  PIG_SPAWN_RATE,
-  type AnimalCombatCallbacks,
-  type AnimalSpeciesSpec
+  ANIMAL_AOI_RADIUS, ANIMAL_FLEE_DURATION_MS, ANIMAL_HEADER_BYTES, ANIMAL_MAX_DUCKS,
+  ANIMAL_RECORD_STRIDE, ANIMAL_RESPAWN_MS, ANIMAL_SPECIES, ANIMAL_WAKE_RADIUS,
+  BINARY_PACKET_ANIMALS, COW_LEATHER_DROP_CHANCE, DUCK_SPAWN_RATE, PIG_SPAWN_RATE,
+  type AnimalCombatCallbacks, type AnimalSpeciesSpec
 };
 
 /**
@@ -195,7 +173,15 @@ export class AnimalService {
     for (let i = 0; i < nearby.length; i++) {
       const animal = nearby[i];
       if (animal.isDead || animal.isHiddenByCycle) continue;
-      if ((animal.kind === 'sparrow' || animal.kind === 'crow') && animal.isAirborne) continue;
+      if (
+        (animal.kind === 'sparrow' ||
+          animal.kind === 'crow' ||
+          animal.kind === 'sandpiper' ||
+          (animal.kind === 'seagull' && !animal.carriedItemId)) &&
+        animal.isAirborne
+      ) {
+        continue;
+      }
       if (now - animal.lastDamagedAt < CONFIG.HIT_IFRAME_MS) continue;
 
       const dx = animal.x - attacker.x;
@@ -317,6 +303,16 @@ export class AnimalService {
             const featherCount = 4 + Math.floor(Math.random() * 3); // 4-6 feathers (80%)
             callbacks.onSpawnDrop('feather', featherCount, animal.x, animal.y);
           }
+        } else if (animal.kind === 'seagull') {
+          if (fRoll < CONFIG.SEAGULL_FEATHER_DROP_CHANCE) {
+            const featherCount = 2 + Math.floor(Math.random() * 5); // 2-6 feathers (50%)
+            callbacks.onSpawnDrop('feather', featherCount, animal.x, animal.y);
+          }
+        } else if (animal.kind === 'sandpiper') {
+          if (fRoll < CONFIG.SANDPIPER_FEATHER_DROP_CHANCE) {
+            const featherCount = 1 + Math.floor(Math.random() * 2); // 1-2 feathers (50%)
+            callbacks.onSpawnDrop('feather', featherCount, animal.x, animal.y);
+          }
         }
 
         callbacks.onAnimalKilled?.(attacker, animal.kind);
@@ -415,6 +411,22 @@ export class AnimalService {
       if (Math.hypot(a.kbVx, a.kbVy) < 4) {
         a.kbVx = 0;
         a.kbVy = 0;
+      }
+
+      if (isBeachWildlifeSpecies(a.kind)) {
+        if (
+          stepBeachWildlifeEntity({
+            world: this.world,
+            animal: a,
+            dt,
+            now,
+            activePlayers,
+            callbacks: stepCtx?.callbacks
+          })
+        ) {
+          anyMoved = true;
+        }
+        continue;
       }
 
       if (isPhase13Species) {
@@ -622,8 +634,9 @@ export class AnimalService {
 
   private respawnAnimal(a: WorldAnimalEntity, now: number, dayPhase: DayPhaseName = 'DAYTIME'): void {
     const spec = ANIMAL_SPECIES[a.kind];
-    a.hp = spec.maxHp;
-    a.maxHp = spec.maxHp;
+    const scale = a.kind === 'turtle' ? (a.sizeVariant === 1 ? 0.72 : a.sizeVariant === 2 ? 1.28 : 1.0) : 1.0;
+    a.maxHp = Math.round(spec.maxHp * scale);
+    a.hp = a.maxHp;
     a.isDead = false;
     a.respawnAt = null;
     a.fleeUntil = 0;
@@ -635,12 +648,13 @@ export class AnimalService {
     a.lionSpotted = false;
     a.carriedItemId = null;
     a.carriedItemCount = 0;
+    a.stealFlightEndAt = 0;
     a.targetDropId = null;
     if (a.kind === 'wolf') {
       a.isHiddenByCycle = dayPhase !== 'NIGHTTIME';
     } else if (a.kind === 'lion') {
       a.isHiddenByCycle = dayPhase !== 'DAYTIME' && dayPhase !== 'SUNRISE';
-    } else if (a.kind === 'sparrow' || a.kind === 'crow') {
+    } else if (a.kind === 'sparrow' || a.kind === 'crow' || a.kind === 'seagull' || a.kind === 'sandpiper') {
       a.isAirborne = false;
       a.birdPhaseUntil = now + 4500 + Math.floor(Math.random() * 3500);
     }

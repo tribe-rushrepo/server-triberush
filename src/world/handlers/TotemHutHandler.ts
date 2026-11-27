@@ -23,7 +23,7 @@ export function checkPlayerShelterCore(
     const dSq = dx * dx + dy * dy;
     if (s.kind === 'campfire' && s.litUntil && now < s.litUntil && dSq <= cfRadSq) {
       nearCampfire = true;
-    } else if (s.kind === 'hut' && dSq <= hutRadSq) {
+    } else if ((s.kind === 'hut' && dSq <= hutRadSq) || (s.kind === 'dock_hut' && dSq <= 150 * 150)) {
       insideHut = true;
     }
     if (nearCampfire && insideHut) break;
@@ -37,15 +37,10 @@ export function registerStructureCollidersCore(
 ): void {
   if (s.kind === 'hut') {
     ctx.world.registerHutColliders(s.id, s.x, s.y);
+  } else if (s.kind === 'dock_hut') {
+    ctx.world.registerDockHutColliders(s.id, s.x, s.y, s.rotationQuarter);
   } else if (s.kind === 'watchtower') {
-    ctx.world.addBoxCollider({
-      kind: 'structure',
-      id: s.id,
-      x: s.x,
-      y: s.y,
-      halfW: 52,
-      halfH: 52
-    });
+    ctx.world.registerWatchtowerColliders(s.id, s.x, s.y, s.rotationQuarter);
   } else if (s.kind === 'campfire' || s.kind === 'cooking_pot') {
     ctx.world.addSolidCollider({
       kind: 'structure',
@@ -67,8 +62,10 @@ export function removeStructureEntityCore(
     for (const p of ctx.playersById.values()) {
       if (p.homeHutId === s.id) p.homeHutId = null;
     }
+  } else if (s.kind === 'dock_hut') {
+    ctx.world.removeDockHutColliders(s.id, s.x, s.y);
   } else if (s.kind === 'watchtower') {
-    ctx.world.removeBoxCollider('structure', s.id, s.x, s.y, 52, 52);
+    ctx.world.removeWatchtowerColliders(s.id, s.x, s.y);
   } else if (s.kind === 'campfire' || s.kind === 'cooking_pot') {
     ctx.world.removeSolidCollider('structure', s.id, s.x, s.y, 38);
   }

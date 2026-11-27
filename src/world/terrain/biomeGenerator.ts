@@ -12,6 +12,12 @@ import type {
   WorldTreeNode
 } from '../../models/types.js';
 import {
+  ARCHIPELAGO_ISLANDS,
+  MAINLAND_LEGACY_OFFSET,
+  getNormalizedIslandRadialRatio
+} from './islandArchipelago.js';
+import { populateArchipelagoOuterIslands } from './archipelagoOuterGen.js';
+import {
   BAKED_LAKE_POLYGONS,
   BAKED_POND_POLYGONS,
   createSeededRng,
@@ -53,17 +59,22 @@ function forestGroveDensity(x: number, y: number, seedPhase: number): number {
 export function populateOakBiome(target: BiomeGeneratorTarget): void {
   const rng = createSeededRng(target.seed);
   const margin = 280;
-  const center = target.size / 2;
-  const scaleFactor = Math.min(12, (target.size / 6400) * (target.size / 6400));
+  const isArchipelago = target.size >= 50000;
+  const mainOrigin = isArchipelago ? MAINLAND_LEGACY_OFFSET : 0;
+  const mainSpan = isArchipelago ? 25600 : target.size;
+  const mainIsl = ARCHIPELAGO_ISLANDS[0];
+  const center = mainOrigin + mainSpan / 2;
+  const scaleFactor = Math.min(12, (mainSpan / 6400) * (mainSpan / 6400));
   const grovePhase = rng() * Math.PI * 2;
 
   // FEATURE 1: Massive Woodland Lakes (14 huge multi-cove lakes, 0.65x shallows / 0.50x deep water)
   const targetLakes = Math.max(4, Math.round(1.2 * scaleFactor));
   let lakeId = 1;
   for (let attempt = 0; attempt < targetLakes * 16 && target.lakes.length < targetLakes; attempt++) {
-    const x = Math.round(margin + 780 + rng() * (target.size - (margin + 780) * 2));
-    const y = Math.round(margin + 780 + rng() * (target.size - (margin + 780) * 2));
+    const x = Math.round(mainOrigin + margin + 780 + rng() * (mainSpan - (margin + 780) * 2));
+    const y = Math.round(mainOrigin + margin + 780 + rng() * (mainSpan - (margin + 780) * 2));
     if (Math.hypot(x - center, y - center) < 1380) continue;
+    if (isArchipelago && getNormalizedIslandRadialRatio(mainIsl, x, y) > 0.82) continue;
 
     const outerRadius = Math.round(520 + rng() * 220);
     const innerRadius = Math.round(outerRadius * 0.58);
@@ -110,9 +121,10 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
   const targetPonds = Math.max(8, Math.round(3.5 * scaleFactor));
   let pondId = 1;
   for (let attempt = 0; attempt < targetPonds * 10 && target.ponds.length < targetPonds; attempt++) {
-    const x = Math.round(margin + 220 + rng() * (target.size - (margin + 220) * 2));
-    const y = Math.round(margin + 220 + rng() * (target.size - (margin + 220) * 2));
+    const x = Math.round(mainOrigin + margin + 220 + rng() * (mainSpan - (margin + 220) * 2));
+    const y = Math.round(mainOrigin + margin + 220 + rng() * (mainSpan - (margin + 220) * 2));
     if (Math.hypot(x - center, y - center) < 680) continue;
+    if (isArchipelago && getNormalizedIslandRadialRatio(mainIsl, x, y) > 0.85) continue;
 
     const radius = Math.round(135 + rng() * 65);
     if (target.overlapsWaterOrMud(x, y, radius + 190)) continue;
@@ -146,9 +158,10 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
   const targetMuds = Math.max(10, Math.round(3.8 * scaleFactor));
   let mudId = 1;
   for (let attempt = 0; attempt < targetMuds * 10 && target.mudPatches.length < targetMuds; attempt++) {
-    const x = Math.round(margin + 220 + rng() * (target.size - (margin + 220) * 2));
-    const y = Math.round(margin + 220 + rng() * (target.size - (margin + 220) * 2));
+    const x = Math.round(mainOrigin + margin + 220 + rng() * (mainSpan - (margin + 220) * 2));
+    const y = Math.round(mainOrigin + margin + 220 + rng() * (mainSpan - (margin + 220) * 2));
     if (Math.hypot(x - center, y - center) < 660) continue;
+    if (isArchipelago && getNormalizedIslandRadialRatio(mainIsl, x, y) > 0.85) continue;
 
     const radius = Math.round(145 + rng() * 75);
     if (target.overlapsWaterOrMud(x, y, radius + 150)) continue;
@@ -182,9 +195,10 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
   const targetLogs = Math.max(12, Math.round(6 * scaleFactor));
   let logId = 1;
   for (let attempt = 0; attempt < targetLogs * 7 && target.fallenLogs.length < targetLogs; attempt++) {
-    const x = Math.round(margin + rng() * (target.size - margin * 2));
-    const y = Math.round(margin + rng() * (target.size - margin * 2));
+    const x = Math.round(mainOrigin + margin + rng() * (mainSpan - margin * 2));
+    const y = Math.round(mainOrigin + margin + rng() * (mainSpan - margin * 2));
     if (Math.hypot(x - center, y - center) < 520) continue;
+    if (isArchipelago && getNormalizedIslandRadialRatio(mainIsl, x, y) > 0.86) continue;
     if (target.overlapsWaterOrMud(x, y, 68)) continue;
     if (target.overlapsAnySolid(x, y, 96)) continue;
 
@@ -206,26 +220,36 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
     target.addSpeedZone({ x, y, radius: mossRadius, multiplier: 0.78 });
   }
 
-  // FEATURE 6: Grove-Clustered Trees across 5 Natural Green Species
-  const trunkByKind = [30, 38, 24, 30, 27] as const;
-  const canopyByKind = [120, 144, 106, 118, 112] as const;
-  const hpByKind = [84, 120, 64, 84, 72] as const;
-  const logsByKind = [4, 6, 3, 4, 3] as const;
+  // FEATURE 6: Grove-Clustered Mainland Trees + Coastal Beach-Rim Palms & Screw Pines (3-4 Wood Logs)
+  const trunkByKind = [30, 38, 24, 30, 27, 25, 24, 27, 29, 36] as const;
+  const canopyByKind = [120, 144, 106, 118, 112, 112, 108, 104, 116, 138] as const;
+  const hpByKind = [84, 120, 64, 84, 72, 78, 74, 76, 84, 112] as const;
+  const logsByKind = [4, 4, 3, 4, 3, 4, 3, 4, 3, 4] as const;
 
   const targetTrees = Math.round(155 * scaleFactor);
   let treeId = 1;
   for (let attempt = 0; attempt < targetTrees * 7 && target.trees.length < targetTrees; attempt++) {
-    const x = Math.round(margin + rng() * (target.size - margin * 2));
-    const y = Math.round(margin + rng() * (target.size - margin * 2));
+    const x = Math.round(mainOrigin + margin + rng() * (mainSpan - margin * 2));
+    const y = Math.round(mainOrigin + margin + rng() * (mainSpan - margin * 2));
 
     const distFromSpawn = Math.hypot(x - center, y - center);
     if (distFromSpawn < 480) continue;
+    const mainRatio = isArchipelago ? getNormalizedIslandRadialRatio(mainIsl, x, y) : 0;
+    if (isArchipelago && mainRatio > 0.945) continue;
     if (target.overlapsWaterOrMud(x, y, 46)) continue;
 
-    const density = forestGroveDensity(x, y, grovePhase);
+    const density = forestGroveDensity(x - mainOrigin, y - mainOrigin, grovePhase);
     if (rng() > 0.3 + density * 0.7) continue;
 
-    const kind = Math.floor(rng() * 5) as TreeKind;
+    const spRoll = rng();
+    const kind: TreeKind =
+      isArchipelago && mainRatio >= 0.815
+        ? spRoll < 0.62
+          ? 6
+          : spRoll < 0.84
+            ? 5
+            : 7
+        : (Math.floor(spRoll * 5) as TreeKind);
     const scale = Number((0.88 + rng() * 0.34).toFixed(3));
     const trunkRadius = Math.round(trunkByKind[kind] * scale);
     const canopyRadius = Math.round(canopyByKind[kind] * scale);
@@ -234,6 +258,7 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
 
     const rotation = Number((rng() * Math.PI * 2).toFixed(3));
     const maxHp = hpByKind[kind];
+    const logDrops: 3 | 4 = isArchipelago ? (rng() < 0.5 ? 3 : 4) : logsByKind[kind];
     const node: WorldTreeNode = {
       id: treeId++,
       kind,
@@ -245,7 +270,7 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
       canopyRadius,
       hp: maxHp,
       maxHp,
-      logDrops: logsByKind[kind],
+      logDrops,
       destroyedAt: null
     };
     target.trees.push(node);
@@ -257,21 +282,22 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
   // FEATURE 7: Multi-Block Sculpted Stone Rocks (40%) & Coal-Veined Rocks (60%)
   const targetRocks = Math.round(105 * scaleFactor);
   const sizeTiers: readonly RockSizeTier[] = ['S', 'M', 'L'];
-  const radiusByTier: Record<RockSizeTier, number> = { S: 34, M: 62, L: 106 };
-  const dropsByTier: Record<RockSizeTier, 3 | 4 | 5> = { S: 3, M: 4, L: 5 };
-  const stoneHpByTier: Record<RockSizeTier, number> = { S: 52, M: 82, L: 118 };
-  const coalHpByTier: Record<RockSizeTier, number> = { S: 56, M: 88, L: 126 };
+  const radiusByTier: Record<RockSizeTier, number> = { S: 34, M: 62, L: 106, XL: 148 };
+  const dropsByTier: Record<RockSizeTier, 3 | 4 | 5 | 8> = { S: 3, M: 4, L: 5, XL: 8 };
+  const stoneHpByTier: Record<RockSizeTier, number> = { S: 52, M: 82, L: 118, XL: 168 };
+  const coalHpByTier: Record<RockSizeTier, number> = { S: 56, M: 88, L: 126, XL: 178 };
   let rockId = 1;
 
   for (let attempt = 0; attempt < targetRocks * 6 && target.rocks.length < targetRocks; attempt++) {
-    const x = Math.round(margin + rng() * (target.size - margin * 2));
-    const y = Math.round(margin + rng() * (target.size - margin * 2));
+    const x = Math.round(mainOrigin + margin + rng() * (mainSpan - margin * 2));
+    const y = Math.round(mainOrigin + margin + rng() * (mainSpan - margin * 2));
     const kind = Math.floor(rng() * 4) as 0 | 1 | 2 | 3;
     const sizeTier = sizeTiers[Math.floor(rng() * 3)];
     const radius = radiusByTier[sizeTier];
     const hasCoal = rng() < 0.6;
 
     if (Math.hypot(x - center, y - center) < 340) continue;
+    if (isArchipelago && getNormalizedIslandRadialRatio(mainIsl, x, y) > 0.94) continue;
     if (target.overlapsWaterOrMud(x, y, radius + 18)) continue;
     if (target.overlapsAnySolid(x, y, radius + 44)) continue;
 
@@ -298,17 +324,18 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
     target.registerRockBucket(node, radius + 220);
   }
 
-  // FEATURE 8: 5 Detailed Fruit & Berry Bush Types
+  // FEATURE 8: 5 Detailed Fruit & Berry Bush Types on Mainland
   const targetBushes = Math.round(145 * scaleFactor);
   let bushId = 1;
   for (let attempt = 0; attempt < targetBushes * 5 && target.bushes.length < targetBushes; attempt++) {
-    const x = Math.round(margin + rng() * (target.size - margin * 2));
-    const y = Math.round(margin + rng() * (target.size - margin * 2));
+    const x = Math.round(mainOrigin + margin + rng() * (mainSpan - margin * 2));
+    const y = Math.round(mainOrigin + margin + rng() * (mainSpan - margin * 2));
     const kind = Math.floor(rng() * 5) as BushKind;
     const radius = Math.round(33 + rng() * 14);
     const spawnsFruit = rng() < 0.6;
     const stickDrops = (2 + Math.floor(rng() * 3)) as 2 | 3 | 4;
 
+    if (isArchipelago && getNormalizedIslandRadialRatio(mainIsl, x, y) > 0.9) continue;
     if (target.overlapsWaterOrMud(x, y, radius + 10)) continue;
     if (target.overlapsAnySolid(x, y, radius + 16)) continue;
 
@@ -337,11 +364,12 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
   const targetFlowers = Math.round(320 * scaleFactor);
   let flowerId = 1;
   for (let attempt = 0; attempt < targetFlowers * 3 && target.flowers.length < targetFlowers; attempt++) {
-    const x = Math.round(140 + rng() * (target.size - 280));
-    const y = Math.round(140 + rng() * (target.size - 280));
+    const x = Math.round(mainOrigin + 140 + rng() * (mainSpan - 280));
+    const y = Math.round(mainOrigin + 140 + rng() * (mainSpan - 280));
     const kind = Math.floor(rng() * 5) as 0 | 1 | 2 | 3 | 4;
     const scale = Number((0.85 + rng() * 0.35).toFixed(3));
 
+    if (isArchipelago && getNormalizedIslandRadialRatio(mainIsl, x, y) > 0.9) continue;
     if (target.overlapsWaterOrMud(x, y, 16)) continue;
     if (target.overlapsAnySolid(x, y, 18)) continue;
 
@@ -353,6 +381,23 @@ export function populateOakBiome(target: BiomeGeneratorTarget): void {
       y,
       scale,
       rotation
+    });
+  }
+
+  if (isArchipelago) {
+    populateArchipelagoOuterIslands({
+      seed: target.seed,
+      trees: target.trees,
+      rocks: target.rocks,
+      bushes: target.bushes,
+      treesById: target.treesById,
+      rocksById: target.rocksById,
+      bushesById: target.bushesById,
+      addSolidCollider: (col) => target.addSolidCollider(col),
+      registerTreeBucket: (node, m) => target.registerTreeBucket(node, m),
+      registerRockBucket: (node, m) => target.registerRockBucket(node, m),
+      registerBushBucket: (node, m) => target.registerBushBucket(node, m),
+      overlapsAnySolid: (x, y, gap) => target.overlapsAnySolid(x, y, gap)
     });
   }
 }

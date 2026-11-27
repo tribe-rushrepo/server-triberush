@@ -295,8 +295,7 @@ export function startBrokenTotemCollapseCore(
       ctx.syncPlayerInventory(p);
       ctx.emitPlayerEvent(p.id, {
         type: 'ACTION_NOTICE',
-        message:
-          'Your Tribe Totem was broken! Chief, High Chief, or Chieftain must place a replacement Totem inside your 20x20 territory within 3:00!'
+        message: `Your Tribe Totem was broken! Chief, High Chief, or Chieftain must place a replacement Totem inside your ${zone.sizeTiles}x${zone.sizeTiles} territory within 3:00!`
       });
     }
   } else {
@@ -305,8 +304,7 @@ export function startBrokenTotemCollapseCore(
       ctx.syncPlayerInventory(owner);
       ctx.emitPlayerEvent(owner.id, {
         type: 'ACTION_NOTICE',
-        message:
-          'Your Tribe Totem was broken! Place a new Totem inside your 20x20 territory within 3:00 or all builds and Chests will be destroyed!'
+        message: `Your Tribe Totem was broken! Place a new Totem inside your ${zone.sizeTiles}x${zone.sizeTiles} territory within 3:00 or all builds and Chests will be destroyed!`
       });
     }
   }

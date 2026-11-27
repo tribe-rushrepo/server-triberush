@@ -87,6 +87,12 @@ export function handleSwingCore(
         for (let d = 0; d < bestTree.logDrops; d++) {
           ctx.spawnGroundDrop('wood', 1, bestTree.x, bestTree.y);
         }
+        if (bestTree.kind === 5) {
+          const cocoCount = 1 + Math.floor(Math.random() * 2); // Fruiting Coconut Palm drops 1-2 Coconuts!
+          for (let c = 0; c < cocoCount; c++) {
+            ctx.spawnGroundDrop('coconut', 1, bestTree.x, bestTree.y);
+          }
+        }
         if (Math.random() < CONFIG.TREE_FIBER_DROP_CHANCE) {
           const fiberCount = 1 + Math.floor(Math.random() * 4);
           ctx.spawnGroundDrop('fiber', fiberCount, bestTree.x, bestTree.y);
@@ -210,9 +216,10 @@ export function handleSwingCore(
         for (let d = 0; d < bestBush.stickDrops; d++) {
           ctx.spawnGroundDrop('stick', 1, bestBush.x, bestBush.y);
         }
-        if (bestBush.hasFruit) {
+        const fruitId = BUSH_FRUIT_ITEMS[bestBush.kind];
+        if (bestBush.hasFruit && fruitId) {
           bestBush.hasFruit = false;
-          ctx.spawnGroundDrop(BUSH_FRUIT_ITEMS[bestBush.kind], 1, bestBush.x, bestBush.y);
+          ctx.spawnGroundDrop(fruitId, 1, bestBush.x, bestBush.y);
         }
       }
 
@@ -402,7 +409,10 @@ export function handleSwingCore(
       const destroyed = s.hp <= 0;
       if (destroyed) {
         ctx.removeStructureEntity(s);
-        if (s.kind === 'hut') {
+        if (s.kind === 'dock_hut') {
+          ctx.spawnGroundDrop('wood', 20, s.x, s.y);
+          ctx.spawnGroundDrop('stone', 10, s.x, s.y);
+        } else if (s.kind === 'hut') {
           ctx.spawnGroundDrop('wood', 12, s.x, s.y);
           ctx.spawnGroundDrop('stone', 6, s.x, s.y);
         } else if (s.kind === 'watchtower') {
@@ -478,6 +488,41 @@ export function handleSwingCore(
       };
       if (destroyed) ctx.emitRosterEvent(totemPayload);
       else ctx.broadcastProximityEvent(totem.x, totem.y, totemPayload);
+      hitStructureEntity = true;
+      break;
+    }
+  }
+
+  if (!hitStructureEntity) {
+    for (const boat of ctx.placedBoats.values()) {
+      if (boat.ownerId === player.id || (player.tribeId && boat.tribeId === player.tribeId)) {
+        continue;
+      }
+      const maxB = stats.reach + 118;
+      const dx = boat.x - player.x;
+      const dy = boat.y - player.y;
+      if (Math.abs(dx) > maxB || Math.abs(dy) > maxB) continue;
+      const dist = Math.hypot(dx, dy);
+      if (dist > maxB) continue;
+      const dot = dist > 0.001 ? (dx / dist) * dirX + (dy / dist) * dirY : 1;
+      if (dot < 0.25) continue;
+
+      boat.hp = Math.max(0, boat.hp - siegeDmg);
+      boat.lastDamagedAt = now;
+      const destroyed = boat.hp <= 0;
+      if (destroyed) {
+        ctx.placedBoats.delete(boat.id);
+        ctx.pirateBoatService.ejectAllPassengersFromDestroyedBoat(boat, ctx.world, ctx.playersById);
+        ctx.spawnGroundDrop('wood', 24, boat.x, boat.y);
+        ctx.spawnGroundDrop('stone', 12, boat.x, boat.y);
+        ctx.markWorldStateDirty();
+        ctx.emitRosterEvent({ type: 'BOAT_REMOVED', id: boat.id });
+      } else {
+        ctx.broadcastProximityEvent(boat.x, boat.y, {
+          type: 'BOAT_UPDATED',
+          boat: ctx.pirateBoatService.serializeBoat(boat)
+        });
+      }
       break;
     }
   }

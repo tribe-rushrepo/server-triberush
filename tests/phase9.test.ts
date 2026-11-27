@@ -118,28 +118,28 @@ describe('5. Phase 9: Exact-Count Drop Slider, Reconnect Session Resume, Batched
     rejoinedHost.x = 12800;
     rejoinedHost.y = 12800;
     assert.strictEqual(rejoinedHost.tribeTag, 'BTCH');
-    for (const t of room.world.trees) if (Math.abs(t.x - 12800) < 900 && Math.abs(t.y - 12800) < 900) t.destroyedAt = 1;
-    for (const rk of room.world.rocks) if (Math.abs(rk.x - 12800) < 900 && Math.abs(rk.y - 12800) < 900) rk.destroyedAt = 1;
-    for (const b of room.world.bushes) if (Math.abs(b.x - 12800) < 900 && Math.abs(b.y - 12800) < 900) b.destroyedAt = 1;
+    for (const t of room.world.trees) if (Math.abs(t.x - 12800) < 1150 && Math.abs(t.y - 12800) < 1150) t.destroyedAt = 1;
+    for (const rk of room.world.rocks) if (Math.abs(rk.x - 12800) < 1150 && Math.abs(rk.y - 12800) < 1150) rk.destroyedAt = 1;
+    for (const b of room.world.bushes) if (Math.abs(b.x - 12800) < 1150 && Math.abs(b.y - 12800) < 1150) b.destroyedAt = 1;
     room.world.fallenLogs.splice(
       0,
       room.world.fallenLogs.length,
-      ...room.world.fallenLogs.filter((l) => Math.abs(l.x - 12800) >= 900 || Math.abs(l.y - 12800) >= 900)
+      ...room.world.fallenLogs.filter((l) => Math.abs(l.x - 12800) >= 1150 || Math.abs(l.y - 12800) >= 1150)
     );
     room.world.lakes.splice(
       0,
       room.world.lakes.length,
-      ...room.world.lakes.filter((lk) => Math.hypot(lk.x - 12800, lk.y - 12800) >= 900 + lk.outerRadius)
+      ...room.world.lakes.filter((lk) => Math.hypot(lk.x - 12800, lk.y - 12800) >= 1150 + lk.outerRadius)
     );
     room.world.ponds.splice(
       0,
       room.world.ponds.length,
-      ...room.world.ponds.filter((pd) => Math.hypot(pd.x - 12800, pd.y - 12800) >= 900 + pd.radius)
+      ...room.world.ponds.filter((pd) => Math.hypot(pd.x - 12800, pd.y - 12800) >= 1150 + pd.radius)
     );
     room.world.mudPatches.splice(
       0,
       room.world.mudPatches.length,
-      ...room.world.mudPatches.filter((md) => Math.hypot(md.x - 12800, md.y - 12800) >= 900 + md.radius)
+      ...room.world.mudPatches.filter((md) => Math.hypot(md.x - 12800, md.y - 12800) >= 1150 + md.radius)
     );
 
     events.length = 0;

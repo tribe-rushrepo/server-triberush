@@ -90,5 +90,46 @@ export const RESOURCE_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     maxStack: 32,
     iconKey: 'clay',
     handStyle: 'held_item'
+  },
+  // 5 Collectible Beach Artifact Seashells (Pickable via [F], pure keepsake artifacts)
+  {
+    id: 'shell_conch',
+    name: 'Queen Conch',
+    category: 'Resources',
+    maxStack: 32,
+    iconKey: 'shell_conch',
+    handStyle: 'held_item'
+  },
+  {
+    id: 'shell_scallop',
+    name: 'Sunrise Scallop',
+    category: 'Resources',
+    maxStack: 32,
+    iconKey: 'shell_scallop',
+    handStyle: 'held_item'
+  },
+  {
+    id: 'shell_nautilus',
+    name: 'Chambered Nautilus',
+    category: 'Resources',
+    maxStack: 32,
+    iconKey: 'shell_nautilus',
+    handStyle: 'held_item'
+  },
+  {
+    id: 'shell_cowrie',
+    name: 'Tiger Cowrie',
+    category: 'Resources',
+    maxStack: 32,
+    iconKey: 'shell_cowrie',
+    handStyle: 'held_item'
+  },
+  {
+    id: 'shell_auger',
+    name: 'Spiral Auger Shell',
+    category: 'Resources',
+    maxStack: 32,
+    iconKey: 'shell_auger',
+    handStyle: 'held_item'
   }
 ];

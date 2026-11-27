@@ -19,9 +19,9 @@ export const MARBLE_PALETTE_ORDER: readonly MarblePaletteId[] = [
   'citrine'
 ];
 
-export type RockSizeTier = 'S' | 'M' | 'L';
-export type TreeKind = 0 | 1 | 2 | 3 | 4;
-export type BushKind = 0 | 1 | 2 | 3 | 4;
+export type RockSizeTier = 'S' | 'M' | 'L' | 'XL';
+export type TreeKind = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+export type BushKind = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
 export type AnimalKind =
   | 'pig'
   | 'cow'
@@ -31,7 +31,13 @@ export type AnimalKind =
   | 'wolf'
   | 'lion'
   | 'sparrow'
-  | 'crow';
+  | 'crow'
+  | 'crab'
+  | 'starfish'
+  | 'turtle'
+  | 'urchin'
+  | 'seagull'
+  | 'sandpiper';
 export const ANIMAL_KIND_TO_CODE: Record<AnimalKind, number> = {
   pig: 0,
   cow: 1,
@@ -41,7 +47,13 @@ export const ANIMAL_KIND_TO_CODE: Record<AnimalKind, number> = {
   wolf: 5,
   lion: 6,
   sparrow: 7,
-  crow: 8
+  crow: 8,
+  crab: 9,
+  starfish: 10,
+  turtle: 11,
+  urchin: 12,
+  seagull: 13,
+  sandpiper: 14
 };
 export type ItemId = string;
 
@@ -88,6 +100,9 @@ export interface WorldAnimalEntity {
   dropOffX?: number;
   dropOffY?: number;
   stealCooldownUntil?: number;
+  // Phase 15 Beach Wildlife extensions
+  sizeVariant?: 0 | 1 | 2; // 0 = 1.0x adult, 1 = 0.72x juvenile, 2 = 1.28x elder (Turtle pods!)
+  stealFlightEndAt?: number; // Seagull 5-second getaway timer
 }
 
 export interface InventorySlotItem {
@@ -167,15 +182,15 @@ export interface WorldTreeNode {
 
 export interface WorldRockNode {
   id: number;
-  kind: 0 | 1 | 2 | 3;
+  kind: 0 | 1 | 2 | 3 | 4 | 5 | 6;
   sizeTier: RockSizeTier;
   x: number;
   y: number;
   radius: number;
   rotation: number;
-  hasCoal: boolean; // 60% Coal Rock (drops 3-5 Coal), 40% Stone Rock (drops 3-5 Stone)
+  hasCoal: boolean;
   dropItemId: 'coal' | 'stone';
-  dropCount: 3 | 4 | 5;
+  dropCount: 3 | 4 | 5 | 8;
   hp: number;
   maxHp: number;
   destroyedAt: number | null;
@@ -191,7 +206,7 @@ export interface WorldBushNode {
   spawnsFruit: boolean;
   hasFruit: boolean;
   fruitRegrowAt: number | null;
-  stickDrops: 2 | 3 | 4;
+  stickDrops: 1 | 2 | 3 | 4;
   hp: number;
   maxHp: number;
   destroyedAt: number | null;
@@ -239,8 +254,26 @@ export interface WorldPlacedTorch {
 }
 
 export type WallOrientation = 'h' | 'v';
-export type StructureKind = 'hut' | 'watchtower' | 'campfire' | 'cooking_pot';
+export type StructureKind = 'hut' | 'watchtower' | 'campfire' | 'cooking_pot' | 'dock_hut';
 export type RotationQuarter = 0 | 1 | 2 | 3;
+
+export interface WorldPirateBoat {
+  id: number;
+  x: number;
+  y: number;
+  angle: number;
+  speed: number;
+  angularVel: number;
+  wheelAngle: number;
+  hp: number;
+  maxHp: number;
+  ownerId: string;
+  tribeId: string | null;
+  helmPlayerId: string | null;
+  helmShortId: number;
+  createdAt: number;
+  lastDamagedAt: number;
+}
 
 export interface WorldPlacedWall {
   id: number;
@@ -500,4 +533,8 @@ export interface ActiveWorldPlayer {
   inventoryDirty?: boolean;
   lastInventorySavedAt?: number;
   urgentInventorySaveAt?: number;
+  aboardBoatId?: number | null;
+  boatLocalX?: number;
+  boatLocalY?: number;
+  lastUrchinPrickAt?: number;
 }

@@ -2,49 +2,30 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { CONFIG } from '../config/index.js';
 import { getItemDef } from '../data/items/index.js';
 import type {
-  BrokenTotemCollapseZone,
-  InventorySlotItem,
-  ItemId,
-  RotationQuarter,
-  StructureKind,
-  WallOrientation,
-  WorldGroundDrop,
-  WorldPlacedChest,
-  WorldPlacedStructure,
-  WorldPlacedTorch,
-  WorldPlacedTotem,
-  WorldPlacedWall
+  BrokenTotemCollapseZone, InventorySlotItem, ItemId, RotationQuarter, StructureKind,
+  WallOrientation, WorldGroundDrop, WorldPirateBoat, WorldPlacedChest, WorldPlacedStructure,
+  WorldPlacedTorch, WorldPlacedTotem, WorldPlacedWall
 } from '../models/types.js';
 import { playerSaveService } from './PlayerSaveService.js';
+import { MAINLAND_LEGACY_OFFSET } from '../world/terrain/islandArchipelago.js';
 import type { PersistedTribeRecord } from '../world/TribeManager.js';
 import type { WorldRoom } from '../world/WorldRoom.js';
 
 export interface PersistedChestRecord {
-  id: number;
-  x: number;
-  y: number;
-  radius: number;
-  ownerId: string;
-  ownerTribeId: string | null;
-  items: Array<[number, ItemId, number]>;
-  createdAt: number;
+  id: number; x: number; y: number; radius: number;
+  ownerId: string; ownerTribeId: string | null;
+  items: Array<[number, ItemId, number]>; createdAt: number;
 }
 
 export interface PersistedWorldStateJson {
   __v: 1;
   savedAt: number;
+  worldSize?: number;
   counters: {
-    dropIdSeq: number;
-    chestIdSeq: number;
-    torchIdSeq: number;
-    wallIdSeq: number;
-    totemIdSeq: number;
-    structureIdSeq: number;
+    dropIdSeq: number; chestIdSeq: number; torchIdSeq: number;
+    wallIdSeq: number; totemIdSeq: number; structureIdSeq: number; boatIdSeq?: number;
   };
-  tribesState: {
-    nextTribeNum: number;
-    tribes: PersistedTribeRecord[];
-  };
+  tribesState: { nextTribeNum: number; tribes: PersistedTribeRecord[]; };
   offlineSoloOwners: Array<[string, number]>;
   totems: WorldPlacedTotem[];
   brokenTotemZones?: BrokenTotemCollapseZone[];
@@ -53,6 +34,7 @@ export interface PersistedWorldStateJson {
   chests: PersistedChestRecord[];
   torches: WorldPlacedTorch[];
   drops: WorldGroundDrop[];
+  boats?: WorldPirateBoat[];
 }
 
 export interface PersistedWorldRow {
@@ -202,6 +184,7 @@ export function serializeWorldRoom(
     state_json: {
       __v: 1,
       savedAt: now,
+      worldSize: room.world.size,
       counters: { ...meta.counters },
       tribesState: room.tribeManager.exportPersistedState((tribeId) => ({
         vaultSlot: room.blueprintService.getSlot(tribeId),
@@ -218,7 +201,14 @@ export function serializeWorldRoom(
       structures: Array.from(room.placedStructures.values()).map((s) => ({ ...s })),
       chests,
       torches: Array.from(room.placedTorches.values()).map((t) => ({ ...t })),
-      drops
+      drops,
+      boats: Array.from(room.placedBoats.values()).map((b) => ({
+        ...b,
+        helmPlayerId: null,
+        helmShortId: 0,
+        speed: 0,
+        angularVel: 0
+      }))
     }
   };
 }
@@ -233,6 +223,10 @@ export function hydrateWorldRoomFromRow(
   room.resetWorldToDayOne(validSeed);
 
   const state = (row.state_json || {}) as Partial<PersistedWorldStateJson>;
+  const coordShift =
+    room.world.size >= 50000 && (!state.worldSize || state.worldSize < 50000)
+      ? MAINLAND_LEGACY_OFFSET
+      : 0;
   room.tribeManager.importPersistedState(
     state.tribesState,
     bootNow,
@@ -256,8 +250,8 @@ export function hydrateWorldRoomFromRow(
       if (!tribeId && (!dormantOwnerId || !dormantExpiresAt || dormantExpiresAt <= bootNow)) {
         continue;
       }
-      const x = Number(raw.x) || 0;
-      const y = Number(raw.y) || 0;
+      const x = (Number(raw.x) || 0) + coordShift;
+      const y = (Number(raw.y) || 0) + coordShift;
       const totem: WorldPlacedTotem = {
         id: Math.floor(raw.id),
         tribeId,
@@ -266,11 +260,11 @@ export function hydrateWorldRoomFromRow(
         ownerId: String(raw.ownerId || dormantOwnerId || ''),
         x,
         y,
-        claimX: typeof raw.claimX === 'number' ? raw.claimX : x,
-        claimY: typeof raw.claimY === 'number' ? raw.claimY : y,
+        claimX: typeof raw.claimX === 'number' ? raw.claimX + coordShift : x,
+        claimY: typeof raw.claimY === 'number' ? raw.claimY + coordShift : y,
         radius: Number(raw.radius) || CONFIG.TOTEM_RADIUS,
         level: Number(raw.level) || 1,
-        sizeTiles: Number(raw.sizeTiles) || CONFIG.TOTEM_SIZE_TILES,
+        sizeTiles: Math.max(CONFIG.TOTEM_SIZE_TILES, Number(raw.sizeTiles) || CONFIG.TOTEM_SIZE_TILES),
         hp: Math.max(1, Math.min(CONFIG.TOTEM_MAX_HP, Number(raw.hp) || CONFIG.TOTEM_MAX_HP)),
         maxHp: Number(raw.maxHp) || CONFIG.TOTEM_MAX_HP,
         huntCounts: {
@@ -297,9 +291,9 @@ export function hydrateWorldRoomFromRow(
         tribeId: String(raw.tribeId || ''),
         tribeTag: String(raw.tribeTag || 'TRB'),
         ownerId: raw.ownerId,
-        x: Number(raw.x) || 0,
-        y: Number(raw.y) || 0,
-        sizeTiles: Number(raw.sizeTiles) || CONFIG.TOTEM_SIZE_TILES,
+        x: (Number(raw.x) || 0) + coordShift,
+        y: (Number(raw.y) || 0) + coordShift,
+        sizeTiles: Math.max(CONFIG.TOTEM_SIZE_TILES, Number(raw.sizeTiles) || CONFIG.TOTEM_SIZE_TILES),
         expiresAt: raw.expiresAt
       });
     }
@@ -313,8 +307,8 @@ export function hydrateWorldRoomFromRow(
       const ori: WallOrientation = raw.orientation === 'v' ? 'v' : 'h';
       const wall: WorldPlacedWall = {
         id: Math.floor(raw.id),
-        x: Number(raw.x) || 0,
-        y: Number(raw.y) || 0,
+        x: (Number(raw.x) || 0) + coordShift,
+        y: (Number(raw.y) || 0) + coordShift,
         orientation: ori,
         length: Number(raw.length) || CONFIG.WALL_LENGTH,
         thickness: Number(raw.thickness) || CONFIG.WALL_THICKNESS,
@@ -336,17 +330,21 @@ export function hydrateWorldRoomFromRow(
       if (!raw || typeof raw.id !== 'number') continue;
       if (raw.tribeId && !room.tribeManager.hasTribe(raw.tribeId)) continue;
       const kind: StructureKind =
-        raw.kind === 'hut' || raw.kind === 'watchtower' || raw.kind === 'cooking_pot'
+        raw.kind === 'hut' ||
+        raw.kind === 'watchtower' ||
+        raw.kind === 'cooking_pot' ||
+        raw.kind === 'dock_hut'
           ? raw.kind
           : 'campfire';
       const rot = ((Number(raw.rotationQuarter) || 0) & 3) as RotationQuarter;
+      const defaultTiles = kind === 'dock_hut' ? 5 : kind === 'hut' ? 3 : 2;
       const structure: WorldPlacedStructure = {
         id: Math.floor(raw.id),
         kind,
-        x: Number(raw.x) || 0,
-        y: Number(raw.y) || 0,
-        tilesW: Number(raw.tilesW) || (kind === 'hut' ? 3 : 2),
-        tilesH: Number(raw.tilesH) || (kind === 'hut' ? 3 : 2),
+        x: (Number(raw.x) || 0) + coordShift,
+        y: (Number(raw.y) || 0) + coordShift,
+        tilesW: Number(raw.tilesW) || defaultTiles,
+        tilesH: Number(raw.tilesH) || defaultTiles,
         rotationQuarter: rot,
         hp: Math.max(1, Number(raw.hp) || 100),
         maxHp: Number(raw.maxHp) || 100,
@@ -368,8 +366,8 @@ export function hydrateWorldRoomFromRow(
       if (raw.ownerTribeId && !room.tribeManager.hasTribe(raw.ownerTribeId)) continue;
       const chest: WorldPlacedChest = {
         id: Math.floor(raw.id),
-        x: Number(raw.x) || 0,
-        y: Number(raw.y) || 0,
+        x: (Number(raw.x) || 0) + coordShift,
+        y: (Number(raw.y) || 0) + coordShift,
         radius: Number(raw.radius) || 25,
         ownerId: String(raw.ownerId || ''),
         ownerTribeId: raw.ownerTribeId ? String(raw.ownerTribeId) : null,
@@ -388,8 +386,8 @@ export function hydrateWorldRoomFromRow(
       if (raw.ownerTribeId && !room.tribeManager.hasTribe(raw.ownerTribeId)) continue;
       const torch: WorldPlacedTorch = {
         id: Math.floor(raw.id),
-        x: Number(raw.x) || 0,
-        y: Number(raw.y) || 0,
+        x: (Number(raw.x) || 0) + coordShift,
+        y: (Number(raw.y) || 0) + coordShift,
         ownerId: String(raw.ownerId || ''),
         ownerTribeId: raw.ownerTribeId ? String(raw.ownerTribeId) : null,
         createdAt: Number(raw.createdAt) || bootNow
@@ -411,14 +409,40 @@ export function hydrateWorldRoomFromRow(
         id: Math.floor(raw.id),
         itemId: def.id,
         count: Math.max(1, Math.min(def.maxStack, Math.floor(Number(raw.count) || 1))),
-        x: Number(raw.x) || 0,
-        y: Number(raw.y) || 0,
-        originX: Number(raw.originX) || Number(raw.x) || 0,
-        originY: Number(raw.originY) || Number(raw.y) || 0,
+        x: (Number(raw.x) || 0) + coordShift,
+        y: (Number(raw.y) || 0) + coordShift,
+        originX: (Number(raw.originX) || Number(raw.x) || 0) + coordShift,
+        originY: (Number(raw.originY) || Number(raw.y) || 0) + coordShift,
         spawnedAt
       };
       room.groundDrops.set(drop.id, drop);
       if (drop.id > maxDropId) maxDropId = drop.id;
+    }
+  }
+
+  let maxBoatId = 0;
+  if (Array.isArray(state.boats)) {
+    for (const raw of state.boats) {
+      if (!raw || typeof raw.id !== 'number') continue;
+      const boat: WorldPirateBoat = {
+        id: Math.floor(raw.id),
+        x: Number(raw.x) || 0,
+        y: Number(raw.y) || 0,
+        angle: Number(raw.angle) || 0,
+        wheelAngle: 0,
+        speed: 0,
+        angularVel: 0,
+        hp: Math.max(1, Number(raw.hp) || CONFIG.PIRATE_BOAT_MAX_HP),
+        maxHp: Number(raw.maxHp) || CONFIG.PIRATE_BOAT_MAX_HP,
+        ownerId: String(raw.ownerId || ''),
+        tribeId: raw.tribeId ? String(raw.tribeId) : null,
+        helmPlayerId: null,
+        helmShortId: 0,
+        createdAt: Number(raw.createdAt) || bootNow,
+        lastDamagedAt: 0
+      };
+      room.placedBoats.set(boat.id, boat);
+      if (boat.id > maxBoatId) maxBoatId = boat.id;
     }
   }
 
@@ -481,7 +505,8 @@ export function hydrateWorldRoomFromRow(
       torchIdSeq: Math.max(maxTorchId + 1, Math.floor(Number(c?.torchIdSeq) || 1)),
       wallIdSeq: Math.max(maxWallId + 1, Math.floor(Number(c?.wallIdSeq) || 1)),
       totemIdSeq: Math.max(maxTotemId + 1, Math.floor(Number(c?.totemIdSeq) || 1)),
-      structureIdSeq: Math.max(maxStructureId + 1, Math.floor(Number(c?.structureIdSeq) || 1))
+      structureIdSeq: Math.max(maxStructureId + 1, Math.floor(Number(c?.structureIdSeq) || 1)),
+      boatIdSeq: Math.max(maxBoatId + 1, Math.floor(Number(c?.boatIdSeq) || 1))
     }
   });
 }

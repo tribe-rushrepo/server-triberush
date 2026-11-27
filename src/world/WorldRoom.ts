@@ -2,13 +2,15 @@ import { CONFIG } from '../config/index.js';
 import type {
   ActiveWorldPlayer, BlueprintTargetKind, BrokenTotemCollapseZone, DayCycleSnapshot, DayPhaseName, InventorySlotItem,
   ItemId, LeaderboardEntry, PlayerProfileData, RotationQuarter, TribeRole, TribeSummary, WallOrientation,
-  WorldBushNode, WorldGroundDrop, WorldPlacedChest, WorldPlacedStructure, WorldPlacedTorch,
+  WorldBushNode, WorldGroundDrop, WorldPirateBoat, WorldPlacedChest, WorldPlacedStructure, WorldPlacedTorch,
   WorldPlacedTotem, WorldPlacedWall, WorldRockNode, WorldTreeNode
 } from '../models/types.js';
 import type { CompactInventorySave, SavedPlayerWorldState } from '../services/PlayerSaveService.js';
 import { AnimalService } from './AnimalService.js';
 import { BlueprintService } from './BlueprintService.js';
 import { CombatService } from './CombatService.js';
+import { PirateBoatService } from './PirateBoatService.js';
+import { SeashellService } from './SeashellService.js';
 import { SeededWorld } from './SeededWorld.js';
 import { SpatialGrid } from './SpatialGrid.js';
 import { SurvivalService } from './SurvivalService.js';
@@ -70,6 +72,7 @@ export interface WorldPersistenceCounters {
   wallIdSeq: number;
   totemIdSeq: number;
   structureIdSeq: number;
+  boatIdSeq?: number;
 }
 
 export class WorldRoom {
@@ -80,6 +83,8 @@ export class WorldRoom {
   public readonly animalService: AnimalService;
   public readonly totemService: TotemService;
   public readonly blueprintService: BlueprintService;
+  public readonly pirateBoatService: PirateBoatService;
+  public readonly seashellService: SeashellService;
 
   private readonly spatialGrid: SpatialGrid;
   private readonly playersById: Map<string, ActiveWorldPlayer> = new Map();
@@ -91,6 +96,7 @@ export class WorldRoom {
   public readonly placedWalls: Map<number, WorldPlacedWall> = new Map();
   public readonly placedTotems: Map<number, WorldPlacedTotem> = new Map();
   public readonly placedStructures: Map<number, WorldPlacedStructure> = new Map();
+  public readonly placedBoats: Map<number, WorldPirateBoat> = new Map();
   public readonly brokenTotemZones: Map<string, BrokenTotemCollapseZone> = new Map();
 
   private readonly pendingTreeRespawns: Set<WorldTreeNode> = new Set();
@@ -105,6 +111,7 @@ export class WorldRoom {
   private wallIdSeq = 1;
   private totemIdSeq = 1;
   private structureIdSeq = 1;
+  private boatIdSeq = 1;
   private serverTick = 0;
 
   private dayNumber = 1;
@@ -142,6 +149,8 @@ export class WorldRoom {
     this.animalService = new AnimalService(this.world);
     this.totemService = new TotemService();
     this.blueprintService = new BlueprintService(blueprintStoragePath);
+    this.pirateBoatService = new PirateBoatService();
+    this.seashellService = new SeashellService(this.world);
     this.blueprintService.onMarkTribeVaultDirty = () => this.onMarkWorldDirty?.();
 
     this.ctx = {
@@ -153,6 +162,8 @@ export class WorldRoom {
       animalService: this.animalService,
       totemService: this.totemService,
       blueprintService: this.blueprintService,
+      pirateBoatService: this.pirateBoatService,
+      seashellService: this.seashellService,
       playersById: this.playersById,
       playersByShortId: this.playersByShortId,
       groundDrops: this.groundDrops,
@@ -161,6 +172,7 @@ export class WorldRoom {
       placedWalls: this.placedWalls,
       placedTotems: this.placedTotems,
       placedStructures: this.placedStructures,
+      placedBoats: this.placedBoats,
       brokenTotemZones: this.brokenTotemZones,
       pendingTreeRespawns: this.pendingTreeRespawns,
       pendingRockRespawns: this.pendingRockRespawns,
@@ -171,6 +183,7 @@ export class WorldRoom {
       nextWallId: () => this.wallIdSeq++,
       nextTotemId: () => this.totemIdSeq++,
       nextStructureId: () => this.structureIdSeq++,
+      nextBoatId: () => this.boatIdSeq++,
       getServerTick: () => this.serverTick,
       emitRosterEvent: (payload) => this.onBroadcastRosterEvent?.(payload),
       emitPlayerEvent: (pid, payload) => this.onSendPlayerEvent?.(pid, payload),
@@ -256,6 +269,17 @@ export class WorldRoom {
       },
       sessionResumeCache: this.sessionResumeCache
     };
+    this.spawnDailySeashells();
+  }
+
+  public spawnDailySeashells(chanceOverride?: number): number {
+    return this.seashellService.spawnDailyShellsForDay(
+      this.dayNumber,
+      this.groundDrops,
+      (itemId, count, x, y) => spawnGroundDropCore(this.ctx, itemId, count, x, y, x, y, false),
+      (dropId) => this.onBroadcastRosterEvent?.({ type: 'DROP_COLLECTED', dropId, collectorShortId: 0 }),
+      chanceOverride
+    );
   }
 
   private dirtyIfOk<T extends { ok: boolean }>(res: T): T {
@@ -279,7 +303,8 @@ export class WorldRoom {
         torchIdSeq: this.torchIdSeq,
         wallIdSeq: this.wallIdSeq,
         totemIdSeq: this.totemIdSeq,
-        structureIdSeq: this.structureIdSeq
+        structureIdSeq: this.structureIdSeq,
+        boatIdSeq: this.boatIdSeq
       }
     };
   }
@@ -302,6 +327,7 @@ export class WorldRoom {
     this.wallIdSeq = meta.counters.wallIdSeq;
     this.totemIdSeq = meta.counters.totemIdSeq;
     this.structureIdSeq = meta.counters.structureIdSeq;
+    this.boatIdSeq = meta.counters.boatIdSeq ?? 1;
   }
 
   public refreshOfflineGraceForShutdown(now: number = Date.now()): void {
@@ -374,6 +400,7 @@ export class WorldRoom {
     this.placedWalls.clear();
     this.placedTotems.clear();
     this.placedStructures.clear();
+    this.placedBoats.clear();
     this.brokenTotemZones.clear();
     this.pendingTreeRespawns.clear();
     this.pendingRockRespawns.clear();
@@ -386,6 +413,8 @@ export class WorldRoom {
     const nextSeed = typeof explicitSeed === 'number' ? explicitSeed : this.world.seed;
     this.world.regenerateWithSeed(nextSeed);
     this.animalService.regenerate();
+    this.seashellService.rebuildBeachSlots();
+    this.spawnDailySeashells();
     this.onMarkWorldDirty?.();
   }
 
@@ -498,6 +527,26 @@ export class WorldRoom {
   public handleBlueprintMoveEntity(playerId: string, targetKind: BlueprintTargetKind, targetId: number, targetX: number, targetY: number, orientation?: WallOrientation, rotationQuarter?: RotationQuarter) {
     return this.dirtyIfOk(handleBlueprintMoveEntityCore(this.ctx, playerId, targetKind, targetId, targetX, targetY, orientation, rotationQuarter));
   }
+  public handleInteractBoat(playerId: string, boatId: number, action: 'ladder' | 'wheel') {
+    const player = this.playersById.get(playerId);
+    if (!player || player.isDead) return { ok: false, error: 'Player not available.' };
+    const boat = this.placedBoats.get(boatId);
+    if (!boat) return { ok: false, error: 'Pirate Boat not found.' };
+    return this.dirtyIfOk(
+      this.pirateBoatService.handleInteractBoat({
+        player,
+        boat,
+        action,
+        world: this.world,
+        boats: this.placedBoats,
+        playersById: this.playersById,
+        onBoatUpdated: (b) =>
+          this.onBroadcastRosterEvent?.({ type: 'BOAT_UPDATED', boat: this.pirateBoatService.serializeBoat(b) }),
+        onPlayerNotice: (message) => this.onSendPlayerEvent?.(player.id, { type: 'ACTION_NOTICE', message })
+      })
+    );
+  }
+
   public handleOpenChest(playerId: string, chestId: number) { return handleOpenChestCore(this.ctx, playerId, chestId); }
   public handleRespawn(playerId: string) { return handleRespawnCore(this.ctx, playerId); }
   public handleCreateTribe(playerId: string, name: string, tag: string, visibility: 'public' | 'private' = 'public') {
@@ -581,6 +630,7 @@ export class WorldRoom {
     while (this.tickAccumulator >= CONFIG.DAY_CYCLE_TICKS) {
       this.tickAccumulator -= CONFIG.DAY_CYCLE_TICKS;
       this.dayNumber += 1;
+      this.spawnDailySeashells();
     }
     const currCycle = this.getDayCycleSnapshot();
     if (currCycle.phase !== prevPhase || currCycle.dayNumber !== prevDay || now - this.lastDaySyncBroadcastAt >= 10000) {

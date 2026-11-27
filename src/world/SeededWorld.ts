@@ -12,6 +12,17 @@ import type {
 } from '../models/types.js';
 import { populateOakBiome } from './terrain/biomeGenerator.js';
 import {
+  ARCHIPELAGO_ISLANDS,
+  MAINLAND_LEGACY_OFFSET,
+  clampFootPositionWithPiers,
+  classifyArchipelagoPoint,
+  getDockHutWingBoxes,
+  getNormalizedIslandRadialRatio,
+  getWatchtowerParapetBoxes,
+  isPointInsideAnyPier,
+  type WalkablePierZone
+} from './terrain/islandArchipelago.js';
+import {
   BAKED_LAKE_POLYGONS,
   BAKED_POND_POLYGONS,
   createSeededRng,
@@ -50,6 +61,7 @@ export class SeededWorld {
 
   private colliderBuckets: Map<number, SolidCollider[]> = new Map();
   private readonly boxColliderBuckets: Map<number, BoxCollider[]> = new Map();
+  private readonly walkablePierZones: Map<number, WalkablePierZone> = new Map();
   private speedZoneBuckets: Map<number, SpeedZone[]> = new Map();
   private treeBuckets: Map<number, WorldTreeNode[]> = new Map();
   private rockBuckets: Map<number, WorldRockNode[]> = new Map();
@@ -71,31 +83,15 @@ export class SeededWorld {
 
   public regenerateWithSeed(newSeed: number): void {
     this.seed = newSeed;
-    this.lakes.length = 0;
-    this.ponds.length = 0;
-    this.mudPatches.length = 0;
-    this.fallenLogs.length = 0;
-    this.fernPatches.length = 0;
-    this.trees.length = 0;
-    this.rocks.length = 0;
-    this.bushes.length = 0;
-    this.flowers.length = 0;
-    this.treesById.clear();
-    this.rocksById.clear();
-    this.bushesById.clear();
-    this.lakesById.clear();
-    this.pondsById.clear();
-    this.colliderBuckets.clear();
-    this.boxColliderBuckets.clear();
-    this.speedZoneBuckets.clear();
-    this.treeBuckets.clear();
-    this.rockBuckets.clear();
-    this.bushBuckets.clear();
-    this.alteredTreeIds.clear();
-    this.alteredRockIds.clear();
-    this.alteredBushIds.clear();
-    this.relocatedTreeIds.clear();
-    this.relocatedRockIds.clear();
+    this.lakes.length = 0; this.ponds.length = 0; this.mudPatches.length = 0;
+    this.fallenLogs.length = 0; this.fernPatches.length = 0; this.trees.length = 0;
+    this.rocks.length = 0; this.bushes.length = 0; this.flowers.length = 0;
+    this.treesById.clear(); this.rocksById.clear(); this.bushesById.clear();
+    this.lakesById.clear(); this.pondsById.clear();
+    this.colliderBuckets.clear(); this.boxColliderBuckets.clear(); this.walkablePierZones.clear();
+    this.speedZoneBuckets.clear(); this.treeBuckets.clear(); this.rockBuckets.clear();
+    this.bushBuckets.clear(); this.alteredTreeIds.clear(); this.alteredRockIds.clear();
+    this.alteredBushIds.clear(); this.relocatedTreeIds.clear(); this.relocatedRockIds.clear();
     this.relocatedBushIds.clear();
     this.generateOakBiome();
   }
@@ -179,13 +175,27 @@ export class SeededWorld {
 
   private findRandomResourceSpawn(
     clearanceRadius: number,
-    isBlockedByTerritory: (x: number, y: number) => boolean
+    isBlockedByTerritory: (x: number, y: number) => boolean,
+    preferOuterIslands: boolean = false
   ): { x: number; y: number } | null {
+    const isArch = this.size >= 50000;
     const margin = 300;
     const span = this.size - margin * 2;
     for (let attempt = 0; attempt < 60; attempt++) {
-      const cx = Math.round(margin + Math.random() * span);
-      const cy = Math.round(margin + Math.random() * span);
+      let cx: number;
+      let cy: number;
+      if (isArch) {
+        const isl = preferOuterIslands
+          ? ARCHIPELAGO_ISLANDS[1 + Math.floor(Math.random() * (ARCHIPELAGO_ISLANDS.length - 1))]
+          : ARCHIPELAGO_ISLANDS[0];
+        const ang = Math.random() * Math.PI * 2;
+        const rad = Math.sqrt(Math.random()) * 0.92;
+        cx = Math.round(isl.cx + Math.cos(ang) * isl.rx * rad);
+        cy = Math.round(isl.cy + Math.sin(ang) * isl.ry * rad);
+      } else {
+        cx = Math.round(margin + Math.random() * span);
+        cy = Math.round(margin + Math.random() * span);
+      }
       if (isBlockedByTerritory(cx, cy)) continue;
       if (this.overlapsWaterOrMud(cx, cy, clearanceRadius + 16)) continue;
       if (this.overlapsAnySolid(cx, cy, clearanceRadius + 24)) continue;
@@ -198,7 +208,7 @@ export class SeededWorld {
     tree: WorldTreeNode,
     isBlockedByTerritory: (x: number, y: number) => boolean
   ): boolean {
-    const nextPos = this.findRandomResourceSpawn(tree.trunkRadius + 14, isBlockedByTerritory);
+    const nextPos = this.findRandomResourceSpawn(tree.trunkRadius + 14, isBlockedByTerritory, tree.kind >= 5);
     if (!nextPos) return false;
     const margin = Math.max(tree.canopyRadius + 90, tree.trunkRadius + 220);
     this.removeNodeBucket(this.treeBuckets, tree, margin);
@@ -220,13 +230,11 @@ export class SeededWorld {
         const t = trees[i];
         if (t.destroyedAt !== null) continue;
         const minClear = t.canopyRadius + rock.radius * 0.4;
-        const dx = cx - t.x;
-        const dy = cy - t.y;
-        if (dx * dx + dy * dy < minClear * minClear) return true;
+        if ((cx - t.x) ** 2 + (cy - t.y) ** 2 < minClear * minClear) return true;
       }
       return false;
     };
-    const nextPos = this.findRandomResourceSpawn(rock.radius + 14, isBlocked);
+    const nextPos = this.findRandomResourceSpawn(rock.radius + 14, isBlocked, rock.kind >= 4);
     if (!nextPos) return false;
     this.removeNodeBucket(this.rockBuckets, rock, rock.radius + 220);
     rock.x = nextPos.x;
@@ -240,7 +248,7 @@ export class SeededWorld {
     bush: WorldBushNode,
     isBlockedByTerritory: (x: number, y: number) => boolean
   ): boolean {
-    const nextPos = this.findRandomResourceSpawn(bush.radius + 10, isBlockedByTerritory);
+    const nextPos = this.findRandomResourceSpawn(bush.radius + 10, isBlockedByTerritory, bush.kind >= 5);
     if (!nextPos) return false;
     this.removeNodeBucket(this.bushBuckets, bush, bush.radius + 220);
     bush.x = nextPos.x;
@@ -314,6 +322,23 @@ export class SeededWorld {
 
   public clearBoxColliders(): void {
     this.boxColliderBuckets.clear();
+    this.walkablePierZones.clear();
+  }
+
+  public registerDockHutColliders(structureId: number, x: number, y: number, rotationQuarter = 0): void {
+    this.removeDockHutColliders(structureId, x, y);
+    this.walkablePierZones.set(structureId, { id: structureId, x, y, halfW: 162, halfH: 162 });
+    const wings = getDockHutWingBoxes(structureId, x, y, rotationQuarter);
+    for (let i = 0; i < wings.length; i++) this.addBoxCollider(wings[i]);
+  }
+
+  public removeDockHutColliders(structureId: number, x: number, y: number): void {
+    this.walkablePierZones.delete(structureId);
+    this.removeBoxCollider('structure', structureId, x, y, 168, 168);
+  }
+
+  public isPointOnWalkablePier(x: number, y: number): boolean {
+    return isPointInsideAnyPier(this.walkablePierZones, x, y);
   }
 
   public addBoxCollider(box: BoxCollider): void {
@@ -383,6 +408,16 @@ export class SeededWorld {
     this.removeSolidCollider('structure', structureId, x, y, 102);
   }
 
+  public registerWatchtowerColliders(structureId: number, x: number, y: number, rotationQuarter = 0): void {
+    this.removeWatchtowerColliders(structureId, x, y);
+    const walls = getWatchtowerParapetBoxes(structureId, x, y, rotationQuarter);
+    for (let i = 0; i < walls.length; i++) this.addBoxCollider(walls[i]);
+  }
+
+  public removeWatchtowerColliders(structureId: number, x: number, y: number): void {
+    this.removeBoxCollider('structure', structureId, x, y, 64, 64);
+  }
+
   private addSpeedZone(zone: SpeedZone): void {
     const minCx = Math.max(0, Math.floor((zone.x - zone.radius) / COLLISION_CELL_SIZE));
     const maxCx = Math.min(this.gridCols - 1, Math.floor((zone.x + zone.radius) / COLLISION_CELL_SIZE));
@@ -403,31 +438,21 @@ export class SeededWorld {
   }
 
   public getMovementSpeedMultiplier(x: number, y: number): number {
+    let minMult = 1.0;
+    if (this.size >= 50000 && !this.isPointOnWalkablePier(x, y)) {
+      minMult = Math.min(minMult, classifyArchipelagoPoint(x, y, this.size).speedMult);
+    }
     const cx = Math.max(0, Math.min(this.gridCols - 1, Math.floor(x / COLLISION_CELL_SIZE)));
     const cy = Math.max(0, Math.min(this.gridCols - 1, Math.floor(y / COLLISION_CELL_SIZE)));
     const list = this.speedZoneBuckets.get(this.bucketKey(cx, cy));
-    if (!list) return 1.0;
+    if (!list) return minMult;
 
-    let minMult = 1.0;
     for (let i = 0; i < list.length; i++) {
       const z = list[i];
       if (z.multiplier >= minMult) continue;
-      const dx = x - z.x;
-      const dy = y - z.y;
-      if (dx * dx + dy * dy > z.radius * z.radius) continue;
+      if ((x - z.x) ** 2 + (y - z.y) ** 2 > z.radius * z.radius) continue;
       if (z.contour && z.rx && z.ry) {
-        if (
-          isPointInsideFreeformZone(
-            x,
-            y,
-            z.x,
-            z.y,
-            z.rx,
-            z.ry,
-            z.rotation || 0,
-            z.contour
-          )
-        ) {
+        if (isPointInsideFreeformZone(x, y, z.x, z.y, z.rx, z.ry, z.rotation || 0, z.contour)) {
           minMult = z.multiplier;
         }
       } else {
@@ -475,6 +500,10 @@ export class SeededWorld {
   }
 
   public overlapsWaterOrMud(x: number, y: number, padding: number = 25): boolean {
+    if (this.size >= 50000) {
+      const arch = classifyArchipelagoPoint(x, y, this.size);
+      if (arch.isSeawater || arch.radialRatio > 0.992 - padding / 12000) return true;
+    }
     for (let i = 0; i < this.lakes.length; i++) {
       const lk = this.lakes[i];
       const d = lk.outerRadius + padding;
@@ -552,7 +581,7 @@ export class SeededWorld {
     let rx = Math.max(pad, Math.min(this.size - pad, nextX));
     let ry = Math.max(pad, Math.min(this.size - pad, nextY));
 
-    const queryRadius = playerRadius + 116;
+    const queryRadius = playerRadius + 164;
     const minCx = Math.max(0, Math.floor((rx - queryRadius) / COLLISION_CELL_SIZE));
     const maxCx = Math.min(this.gridCols - 1, Math.floor((rx + queryRadius) / COLLISION_CELL_SIZE));
     const minCy = Math.max(0, Math.floor((ry - queryRadius) / COLLISION_CELL_SIZE));
@@ -615,42 +644,40 @@ export class SeededWorld {
       }
     }
 
+    if (this.size >= 50000) {
+      const clamped = clampFootPositionWithPiers(rx, ry, this.size, this.walkablePierZones);
+      rx = clamped.x;
+      ry = clamped.y;
+    }
     rx = Math.max(pad, Math.min(this.size - pad, rx));
     ry = Math.max(pad, Math.min(this.size - pad, ry));
     return { x: rx, y: ry };
   }
 
   public getSafeSpawnPosition(seedOffset: number = 0): { x: number; y: number } {
-    const center = this.size / 2;
+    const center = this.size >= 50000 ? ARCHIPELAGO_ISLANDS[0].cx : this.size / 2;
     const angle = ((seedOffset * 137.508) % 360) * (Math.PI / 180);
     const dist = 60 + ((seedOffset * 43) % 210);
-    const candidateX = center + Math.cos(angle) * dist;
-    const candidateY = center + Math.sin(angle) * dist;
-    return this.resolvePlayerPosition(candidateX, candidateY);
+    return this.resolvePlayerPosition(center + Math.cos(angle) * dist, center + Math.sin(angle) * dist);
   }
 
   public getRandomSafeSpawnPosition(
-    activePlayers: ReadonlyArray<{
-      x: number;
-      y: number;
-      isDead?: boolean;
-      tribeId?: string | null;
-    }> = [],
+    activePlayers: ReadonlyArray<{ x: number; y: number; isDead?: boolean; tribeId?: string | null }> = [],
     ownTribeId: string | null = null
   ): { x: number; y: number } {
+    const isArch = this.size >= 50000;
     const margin = CONFIG.SPAWN_WORLD_MARGIN;
     const minEnemyDist = CONFIG.SPAWN_MIN_ENEMY_DISTANCE;
-    const span = this.size - margin * 2;
-    const enemies = activePlayers.filter(
-      (p) => !p.isDead && (!ownTribeId || p.tribeId !== ownTribeId)
-    );
+    const mainOrigin = isArch ? MAINLAND_LEGACY_OFFSET : 0;
+    const mainSpan = isArch ? 25600 : this.size;
+    const span = mainSpan - margin * 2;
+    const enemies = activePlayers.filter((p) => !p.isDead && (!ownTribeId || p.tribeId !== ownTribeId));
 
     let bestFallback: { x: number; y: number; nearestEnemyDist: number } | null = null;
-
-    for (let attempt = 0; attempt < 40; attempt++) {
-      const cx = Math.round(margin + Math.random() * span);
-      const cy = Math.round(margin + Math.random() * span);
-
+    for (let attempt = 0; attempt < 48; attempt++) {
+      const cx = Math.round(mainOrigin + margin + Math.random() * span);
+      const cy = Math.round(mainOrigin + margin + Math.random() * span);
+      if (isArch && getNormalizedIslandRadialRatio(ARCHIPELAGO_ISLANDS[0], cx, cy) > 0.94) continue;
       if (this.overlapsWaterOrMud(cx, cy, CONFIG.PLAYER_RADIUS + 42)) continue;
       if (this.overlapsAnySolid(cx, cy, CONFIG.PLAYER_RADIUS + 34)) continue;
 
@@ -659,19 +686,12 @@ export class SeededWorld {
         const d = Math.hypot(cx - enemies[i].x, cy - enemies[i].y);
         if (d < nearestEnemyDist) nearestEnemyDist = d;
       }
-
-      if (nearestEnemyDist >= minEnemyDist) {
-        return this.resolvePlayerPosition(cx, cy);
-      }
-
+      if (nearestEnemyDist >= minEnemyDist) return this.resolvePlayerPosition(cx, cy);
       if (!bestFallback || nearestEnemyDist > bestFallback.nearestEnemyDist) {
         bestFallback = { x: cx, y: cy, nearestEnemyDist };
       }
     }
-
-    if (bestFallback) {
-      return this.resolvePlayerPosition(bestFallback.x, bestFallback.y);
-    }
+    if (bestFallback) return this.resolvePlayerPosition(bestFallback.x, bestFallback.y);
     return this.getSafeSpawnPosition(Math.floor(Math.random() * 500));
   }
 }

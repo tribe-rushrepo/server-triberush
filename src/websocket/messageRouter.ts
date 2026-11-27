@@ -284,6 +284,10 @@ export async function dispatchClientMessage(
       );
       return;
     }
+    case 'INTERACT_BOAT': {
+      sendNoticeIfError(ctx, worldRoom.handleInteractBoat(playerId, msg.boatId, msg.action));
+      return;
+    }
     case 'FEED_STRUCTURE': {
       sendNoticeIfError(ctx, worldRoom.handleFeedStructure(playerId, msg.structureId));
       return;

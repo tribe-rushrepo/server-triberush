@@ -33,7 +33,17 @@ export interface ItemRecipeConfig {
 }
 
 export interface ItemPlaceableConfig {
-  kind: 'chest' | 'torch' | 'wall' | 'totem' | 'hut' | 'watchtower' | 'campfire' | 'cooking_pot';
+  kind:
+    | 'chest'
+    | 'torch'
+    | 'wall'
+    | 'totem'
+    | 'hut'
+    | 'watchtower'
+    | 'campfire'
+    | 'cooking_pot'
+    | 'dock_hut'
+    | 'pirate_boat';
   maxDistance: number;
   radius?: number;
   chestSlots?: number;
@@ -44,6 +54,8 @@ export interface ItemPlaceableConfig {
   rotatable?: boolean;
   maxHp?: number;
   requiresTotem?: boolean;
+  waterOnly?: boolean;
+  shorelineStraddle?: boolean;
   lightRadius?: number;
   warmthRadius?: number;
 }

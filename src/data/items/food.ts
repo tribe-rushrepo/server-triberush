@@ -135,6 +135,33 @@ export const FOOD_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     iconKey: 'cooked_mutton',
     handStyle: 'held_item',
     food: { healAmount: 13, hungerAmount: 22 }
+  },
+  {
+    id: 'coconut',
+    name: 'Coconut',
+    category: 'Food',
+    maxStack: 32,
+    iconKey: 'coconut',
+    handStyle: 'held_item',
+    food: { healAmount: 6, hungerAmount: 11 }
+  },
+  {
+    id: 'raw_crab',
+    name: 'Raw Crab Meat',
+    category: 'Food',
+    maxStack: 32,
+    iconKey: 'raw_crab',
+    handStyle: 'held_item',
+    food: { healAmount: 3, hungerAmount: 6 }
+  },
+  {
+    id: 'cooked_crab',
+    name: 'Cooked Crab',
+    category: 'Food',
+    maxStack: 32,
+    iconKey: 'cooked_crab',
+    handStyle: 'held_item',
+    food: { healAmount: 14, hungerAmount: 22 }
   }
 ];
 
@@ -143,5 +170,6 @@ export const RAW_TO_COOKED_MEAT: Readonly<Record<string, string>> = {
   raw_beef: 'cooked_beef',
   raw_chicken: 'cooked_chicken',
   raw_duck: 'cooked_duck',
-  raw_mutton: 'cooked_mutton'
+  raw_mutton: 'cooked_mutton',
+  raw_crab: 'cooked_crab'
 };
