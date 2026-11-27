@@ -284,10 +284,26 @@ describe('Phase 15: The Beach, Archipelago & Pirate Seas', () => {
     assert.equal(boardRes.ok, true, boardRes.error);
     assert.equal(captain.aboardBoatId, boat.id);
 
-    // Once on the upper deck, player must move freely across the deck without getting stuck on invisible barriers!
+    // Once on the upper deck of an ANCHORED (unsteered) ship, walking must emit BOATS_SYNC so client never rubber-bands back to ladder!
+    let anchoredSyncCount = 0;
+    let latestSyncedPassengerLx = captain.boatLocalX ?? 0;
+    const prevRosterCb = room.onBroadcastRosterEvent;
+    room.onBroadcastRosterEvent = (ev) => {
+      if (ev.type === 'BOATS_SYNC' && Array.isArray(ev.boats)) {
+        anchoredSyncCount += 1;
+        const syncedBoat = ev.boats.find((b: { id: number }) => b.id === boat.id);
+        if (syncedBoat?.passengers?.[0]) {
+          latestSyncedPassengerLx = syncedBoat.passengers[0].lx;
+        }
+      }
+      prevRosterCb?.(ev);
+    };
     room.handleInputState(captain.id, 1, 0, 0, false);
     for (let t = 0; t < 15; t++) room.stepSimulation(0.05);
+    room.onBroadcastRosterEvent = prevRosterCb;
     assert.ok((captain.boatLocalX ?? 0) > 40, 'Player on upper deck must walk forward freely across the ship');
+    assert.ok(anchoredSyncCount >= 10, 'Walking on anchored ship deck must emit 20Hz BOATS_SYNC packets');
+    assert.ok(latestSyncedPassengerLx > 40, 'BOATS_SYNC must stream live updated passenger deck coordinates');
 
     // Walk on deck near stern wheel (-296, 0) and take the helm ('wheel')
     captain.boatLocalX = -296;

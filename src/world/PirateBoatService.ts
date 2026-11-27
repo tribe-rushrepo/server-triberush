@@ -537,6 +537,11 @@ export class PirateBoatService {
       }
     }
 
+    const activeBoatIds = new Set<number>();
+    for (let i = 0; i < activeMovingBoats.length; i++) {
+      activeBoatIds.add(activeMovingBoats[i].id);
+    }
+
     // Update all passengers freely walking on the upper deck (zero interior obstacles!)
     for (const p of playersById.values()) {
       if (!p.aboardBoatId || p.isDead) continue;
@@ -545,6 +550,9 @@ export class PirateBoatService {
         p.aboardBoatId = null;
         continue;
       }
+
+      const prevLx = p.boatLocalX ?? 0;
+      const prevLy = p.boatLocalY ?? 0;
 
       if (boat.helmPlayerId === p.id) {
         p.boatLocalX = BOAT_HELM_STAND_X;
@@ -557,11 +565,21 @@ export class PirateBoatService {
         const lvy = (p.moveX * sinInv + p.moveY * cosInv) * BOAT_DECK_WALK_SPEED;
         const nextLx = Math.max(
           BOAT_DECK_MIN_X,
-          Math.min(BOAT_DECK_MAX_X, (p.boatLocalX ?? 0) + lvx * dt)
+          Math.min(BOAT_DECK_MAX_X, prevLx + lvx * dt)
         );
         const maxLy = getBoatDeckHalfWidthAtLocalX(nextLx);
         p.boatLocalX = nextLx;
-        p.boatLocalY = Math.max(-maxLy, Math.min(maxLy, (p.boatLocalY ?? 0) + lvy * dt));
+        p.boatLocalY = Math.max(-maxLy, Math.min(maxLy, prevLy + lvy * dt));
+      }
+
+      if (
+        Math.abs((p.boatLocalX ?? 0) - prevLx) > 0.04 ||
+        Math.abs((p.boatLocalY ?? 0) - prevLy) > 0.04
+      ) {
+        if (!activeBoatIds.has(boat.id)) {
+          activeBoatIds.add(boat.id);
+          activeMovingBoats.push(boat);
+        }
       }
 
       const wp = boatLocalToWorld(boat, p.boatLocalX ?? 0, p.boatLocalY ?? 0);
