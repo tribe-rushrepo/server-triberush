@@ -219,7 +219,9 @@ export class AnimalService {
       animal.lastDamagedAt = now;
       animal.hp = Math.max(0, animal.hp - stats.combatDmg);
 
-      const kbSpeed = (stats.knockback || 210) * 0.42;
+      const specForKb = ANIMAL_SPECIES[animal.kind];
+      const kbResist = Math.max(0, Math.min(0.95, specForKb.knockbackResist ?? 0));
+      const kbSpeed = (stats.knockback || 210) * 0.42 * (1 - kbResist);
       animal.kbVx = nx * kbSpeed;
       animal.kbVy = ny * kbSpeed;
 

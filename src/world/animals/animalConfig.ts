@@ -34,6 +34,7 @@ export interface AnimalSpeciesSpec {
   radius: number;
   roamSpeed: number;
   fleeSpeed: number;
+  knockbackResist?: number;
   meatItem: ItemId;
   meatMin: number;
   meatMax: number;
@@ -98,10 +99,11 @@ export const ANIMAL_SPECIES: Record<AnimalKind, AnimalSpeciesSpec> = {
   },
   wolf: {
     kind: 'wolf',
-    maxHp: 85,
-    radius: 22,
+    maxHp: 145,
+    radius: 29,
     roamSpeed: 95,
     fleeSpeed: 242,
+    knockbackResist: 0.58,
     meatItem: '',
     meatMin: 0,
     meatMax: 0,
@@ -109,10 +111,11 @@ export const ANIMAL_SPECIES: Record<AnimalKind, AnimalSpeciesSpec> = {
   },
   lion: {
     kind: 'lion',
-    maxHp: 135,
-    radius: 26,
+    maxHp: 240,
+    radius: 36,
     roamSpeed: 105,
     fleeSpeed: 242,
+    knockbackResist: 0.72,
     meatItem: '',
     meatMin: 0,
     meatMax: 0,

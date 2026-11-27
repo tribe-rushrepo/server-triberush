@@ -59,6 +59,8 @@ describe('Phase 13: Predators (Wolf & Lion), Birds (Sparrow & Crow), Campfire Fu
 
     const wolf = room.animalService.animals.find((a) => a.kind === 'wolf')!;
     assert.ok(wolf, 'Expected wolves spawned in world');
+    assert.strictEqual(wolf.maxHp, 145);
+    assert.strictEqual(wolf.radius, 29);
 
     // During DAYTIME, wolves stay hidden and never attack
     setRoomPhase(room, 'DAYTIME');
@@ -99,6 +101,8 @@ describe('Phase 13: Predators (Wolf & Lion), Birds (Sparrow & Crow), Campfire Fu
 
     const lion = room.animalService.animals.find((a) => a.kind === 'lion')!;
     assert.ok(lion, 'Expected lions spawned in world');
+    assert.strictEqual(lion.maxHp, 240);
+    assert.strictEqual(lion.radius, 36);
 
     // Player faces EAST (angle = 0) while Lion approaches from WEST (behind player -> unspotted!)
     p.x = 6200;
@@ -361,6 +365,12 @@ describe('Phase 13: Predators (Wolf & Lion), Birds (Sparrow & Crow), Campfire Fu
     assert.ok((stonePick.combat?.rockDmg ?? 0) > (getItemDef('wooden_pickaxe')!.combat?.rockDmg ?? 0));
     assert.ok((stoneSpear.combat?.combatDmg ?? 0) > (getItemDef('wooden_spear')!.combat?.combatDmg ?? 0));
     assert.ok((stoneSword.combat?.combatDmg ?? 0) > (getItemDef('wooden_sword')!.combat?.combatDmg ?? 0));
+
+    // Stone tools must share the exact same reach as their wooden counterparts
+    assert.strictEqual(stoneAxe.combat?.reach, getItemDef('wooden_axe')!.combat?.reach);
+    assert.strictEqual(stonePick.combat?.reach, getItemDef('wooden_pickaxe')!.combat?.reach);
+    assert.strictEqual(stoneSpear.combat?.reach, getItemDef('wooden_spear')!.combat?.reach);
+    assert.strictEqual(stoneSword.combat?.reach, getItemDef('wooden_sword')!.combat?.reach);
 
     // Verify Rock mining drops 3-4 Clay when clayRoll < 0.50, and 0 Clay when clayRoll >= 0.50
     const room = new WorldRoom(13005);

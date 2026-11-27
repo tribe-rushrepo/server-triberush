@@ -63,7 +63,7 @@ export const WEAPON_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     combat: {
       cooldownMs: 400,
       durationMs: 300,
-      reach: 158,
+      reach: 154,
       treeDmg: 0,
       bushDmg: 15,
       rockDmg: 0,
@@ -91,7 +91,7 @@ export const WEAPON_ITEMS: readonly Omit<ItemDefinition, 'netId'>[] = [
     combat: {
       cooldownMs: 365,
       durationMs: 270,
-      reach: 104,
+      reach: 100,
       treeDmg: 0,
       bushDmg: 18,
       rockDmg: 0,

@@ -232,7 +232,7 @@ export function stepPredatorOrBirdEntity(params: {
       }
 
       a.isMoving = true;
-      const stagger = now - a.lastDamagedAt < 180 ? 0.25 : 1;
+      const stagger = now - a.lastDamagedAt < 110 ? 0.58 : 1;
       return advanceGroundedAnimal(
         world,
         a,
@@ -319,7 +319,7 @@ export function stepPredatorOrBirdEntity(params: {
       }
 
       a.isMoving = true;
-      const stagger = now - a.lastDamagedAt < 180 ? 0.25 : 1;
+      const stagger = now - a.lastDamagedAt < 90 ? 0.72 : 1;
       const speed = a.lionSneakReady
         ? dist <= LION_POUNCE_TRIGGER_DIST
           ? LION_POUNCE_SPEED
